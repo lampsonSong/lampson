@@ -1,0 +1,22 @@
+# Lampson 默认配置模板
+# 复制到 ~/.lampson/config.yaml 并填写相应字段
+
+llm:
+  api_key: ""                                        # 智谱 API Key（必填）
+  base_url: "https://open.bigmodel.cn/api/paas/v4/" # LLM API 地址
+  model: "glm-5.1"                               # 模型名称
+
+feishu:
+  app_id: ""      # 飞书应用 App ID（可选）
+  app_secret: ""  # 飞书应用 App Secret（可选）
+
+memory_path: "~/.lampson/memory"   # 记忆文件存储路径
+skills_path: "~/.lampson/skills"   # 技能文件存储路径
+
+# MCP 服务器配置（Phase 2 预留）
+# mcp:
+#   servers:
+#     - name: filesystem
+#       command: "npx"
+#       args: ["-y", "@modelcontextprotocol/server-filesystem", "/home/user"]
+#       enabled: true

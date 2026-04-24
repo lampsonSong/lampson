@@ -1,0 +1,33 @@
+# Lampson Project - Cursor Context
+
+## 项目概述
+Lampson 是一个可以自己更新自己代码的 CLI 智能助手。
+
+## 你的角色
+你是这个项目的代码实现者。三儿（Hermes Agent）负责统筹，你负责写代码。
+
+## 需求文档
+完整需求见 `docs/PRD.md`，请先通读。
+
+## 已确认的技术决策
+1. LLM: 智谱 GLM-5.1，走 OpenAI 兼容接口（base_url: https://open.bigmodel.cn/api/paas/v4/）
+2. CLI: Prompt Toolkit（轻量 REPL）
+3. 飞书: 直接调飞书 API
+4. 包管理: pip install -e .
+5. 自更新保护文件: cli.py, agent.py, llm.py, feishu/client.py, tools/shell.py
+
+## 代码规范
+- Python 3.11+，用 type hints
+- 每个 module 有清晰的 docstring
+- 函数不超过 50 行
+- 错误处理要完善，不能 crash
+- 异步操作用 asyncio
+
+## 开发顺序（按阶段来）
+Phase 1: pyproject.toml + CLI骨架 + LLM对话 + 工具系统(shell/文件操作)
+Phase 2: Memory系统 + Skills系统 + 飞书通信 + 自更新
+
+## 注意事项
+- 不要搞过度设计，MVP 能跑就行
+- 依赖尽量少
+- 先让它能对话、能执行命令，再花哨
