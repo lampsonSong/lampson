@@ -13,6 +13,8 @@ from typing import Any
 from openai import OpenAI, APITimeoutError, APIConnectionError, RateLimitError
 from openai.types.chat import ChatCompletion
 
+from src.core.prompt_builder import PromptBuilder
+
 
 SYSTEM_PROMPT = """你是 Lampson，一个运行在终端的 CLI 智能助手。你可以：
 - 通过工具执行 shell 命令
@@ -42,17 +44,16 @@ class LLMClient:
             timeout=60.0,
         )
         self.messages: list[dict[str, Any]] = []
-        self._system_prompt = SYSTEM_PROMPT
+        self._prompt_builder = PromptBuilder(model=model)
         self._pending_tools: list[dict[str, Any]] = []
 
-    def set_system_context(self, core_memory: str = "", skills_context: str = "") -> None:
-        """设置 system prompt，可附加核心记忆和技能上下文。"""
-        parts = [self._system_prompt]
-        if core_memory.strip():
-            parts.append(f"\n## 你的记忆\n{core_memory}")
-        if skills_context.strip():
-            parts.append(f"\n## 可用技能\n{skills_context}")
-        self.messages = [{"role": "system", "content": "\n".join(parts)}]
+    def set_system_context(self, core_memory: str = "") -> None:
+        """设置 system prompt（通过 PromptBuilder 分层构建）。
+
+        Skills 全文不再注入，改为 skills index + 按需加载。
+        """
+        content = self._prompt_builder.build(core_memory=core_memory)
+        self.messages = [{"role": "system", "content": content}]
 
     def add_user_message(self, content: str) -> None:
         self.messages.append({"role": "user", "content": content})

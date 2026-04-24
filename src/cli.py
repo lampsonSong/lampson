@@ -18,6 +18,7 @@ from src.core.config import (
     LAMPSON_DIR,
 )
 from src.core.llm import LLMClient
+from src.core.compaction import CompactionConfig, apply_compaction
 from src.core.agent import Agent
 from src.memory import manager as memory_mgr
 from src.skills import manager as skills_mgr
@@ -216,7 +217,15 @@ def _handle_serve_command(config: dict[str, Any], agent: Agent) -> None:
         print(f"[serve] 导入飞书监听模块失败：{e}")
         return
 
-    FeishuListener(app_id=app_id, app_secret=app_secret, agent=agent).start()
+    from src.core.compaction import CompactionConfig
+
+    compaction_cfg = _build_compaction_config(config)
+    enabled = config.get("compaction", {}).get("enabled", True)
+    if enabled and compaction_cfg:
+        listener = FeishuListener(app_id=app_id, app_secret=app_secret, agent=agent, compaction_config=compaction_cfg)
+    else:
+        listener = FeishuListener(app_id=app_id, app_secret=app_secret, agent=agent)
+    listener.start()
 
 
 def _handle_command(
@@ -277,6 +286,20 @@ def _save_session_summary(agent: Agent) -> None:
     summary = agent.generate_session_summary()
     if summary.strip():
         memory_mgr.save_session_summary(summary)
+
+
+def _build_compaction_config(config: dict[str, Any]) -> CompactionConfig | None:
+    """从配置字典构建 CompactionConfig。"""
+    c = config.get("compaction", {})
+    if not c:
+        return CompactionConfig()  # 使用默认配置
+    return CompactionConfig(
+        trigger_threshold=c.get("trigger_threshold", 0.8),
+        end_threshold=c.get("end_threshold", 0.3),
+        context_window=c.get("context_window", 131072),
+        max_iterations=c.get("max_iterations", 3),
+        enable_archive=c.get("enable_archive", True),
+    )
 
 
 def _parse_args() -> tuple[str | None, bool]:
@@ -410,7 +433,7 @@ def _run_non_interactive(user_input: str, is_slash_command: bool) -> None:
         supports_native_tool_calling=native_tool_calling,
     )
     agent = Agent(llm)
-    agent.set_context(core_memory=core_memory, skills_context=skills_context)
+    agent.set_context(core_memory=core_memory)
     agent.skills = skills
 
     _init_feishu(config)
@@ -464,7 +487,7 @@ def main() -> None:
         supports_native_tool_calling=native_tool_calling,
     )
     agent = Agent(llm)
-    agent.set_context(core_memory=core_memory, skills_context=skills_context)
+    agent.set_context(core_memory=core_memory)
     agent.skills = skills
 
     # 初始化飞书（可选）
@@ -503,6 +526,19 @@ def main() -> None:
                     print(f"\nLampson> {response}\n")
                 except Exception as e:
                     print(f"\n[错误] {e}\n")
+
+                # 上下文压缩检查
+                compaction_cfg = _build_compaction_config(config)
+                if compaction_cfg and config.get("compaction", {}).get("enabled", True):
+                    try:
+                        cr = apply_compaction(agent.llm, compaction_cfg, agent.last_total_tokens, agent.last_stop_reason)
+                        if cr is not None:
+                            if cr.success:
+                                print(f"[上下文压缩] 已完成，归档 {cr.archived_count} 条内容。")
+                            else:
+                                print(f"[上下文压缩] 失败: {cr.error}")
+                    except Exception:
+                        pass  # 压缩失败不影响正常对话
 
     finally:
         print("\n正在保存会话摘要...")

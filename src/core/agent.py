@@ -1,11 +1,7 @@
 """Agent 主循环：接收用户输入，调用 LLM，处理 tool calling，返回最终回复。
 
-启动时注入 core memory 到 system prompt；
-每轮用户输入前，先用 skills manager 匹配技能并注入当轮 system 上下文。
-
-支持两种工具调用模式：
-- 原生 tool calling（supports_native_tool_calling=True）：走 OpenAI tool_calls 字段解析
-- prompt-based tool calling（supports_native_tool_calling=False）：解析模型文本输出中的 <tool_call:xxx> 标签
+Skills 使用索引模式（skills index 已在 system prompt 中）。
+LLM 需要某 skill 时，通过 skill_view(name) 工具按需加载。
 """
 
 from __future__ import annotations
@@ -37,30 +33,22 @@ class Agent:
         self._core_memory: str = ""
         self._skills_context: str = ""
         self._tools_prompt_injected: bool = False
+        self.last_total_tokens: int = 0  # 最近一次 LLM 调用的 total_tokens
+        self.last_stop_reason: str | None = None  # 最近一次 LLM 的 stop reason
 
     def refresh_tools(self) -> None:
         """重新加载工具列表（外部注册新工具后调用）。"""
         self._tools = tool_registry.get_all_schemas()
 
-    def set_context(self, core_memory: str = "", skills_context: str = "") -> None:
+    def set_context(self, core_memory: str = "") -> None:
         """设置 system prompt 上下文（启动时调用一次）。"""
         self._core_memory = core_memory
-        self._skills_context = skills_context
         self._tools_prompt_injected = False
-        self.llm.set_system_context(core_memory=core_memory, skills_context=skills_context)
+        self.llm.set_system_context(core_memory=core_memory)
 
     def _inject_skill(self, user_input: str) -> str | None:
-        """匹配技能并返回技能全文，用于注入本轮上下文。"""
-        if not self.skills:
-            return None
-
-        from src.skills.manager import match_skill, match_skill_with_llm
-
-        skill = match_skill(user_input, self.skills)
-        if skill is None:
-            skill = match_skill_with_llm(user_input, self.skills, self.llm)
-
-        return skill.full_content if skill else None
+        """匹配技能并返回技能全文（已弃用，改用 skill_view 工具按需加载）。"""
+        return None  # 不再自动注入，LLM 通过 skill_view 按需加载
 
     def _inject_tools_prompt(self) -> None:
         """在 messages 中注入工具描述（prompt-based 模式，只注入一次）。"""
@@ -81,8 +69,13 @@ class Agent:
             except RuntimeError as e:
                 return f"[LLM 错误] {e}"
 
+            # 记录 token 用量
+            if response.usage:
+                self.last_total_tokens = response.usage.total_tokens
+
             choice = response.choices[0]
             finish_reason = choice.finish_reason
+            self.last_stop_reason = finish_reason
             message = choice.message
 
             if finish_reason == "stop" or not message.tool_calls:
@@ -105,10 +98,16 @@ class Agent:
             except RuntimeError as e:
                 return f"[LLM 错误] {e}"
 
+            # 记录 token 用量
+            if response.usage:
+                self.last_total_tokens = response.usage.total_tokens
+
             content = response.choices[0].message.content or ""
             match = _TOOL_CALL_PATTERN.search(content)
 
+
             if not match:
+                self.last_stop_reason = "stop"
                 return content
 
             tool_name = match.group(1).strip()
@@ -130,15 +129,8 @@ class Agent:
     def run(self, user_input: str) -> str:
         """处理一轮用户输入，返回最终回复文本。
 
-        如果匹配到技能，会在本轮 messages 中临时插入技能内容作为 system 提示。
+        Skills 通过 skill_view(name) 工具按需加载，不再每轮自动注入。
         """
-        skill_content = self._inject_skill(user_input)
-        if skill_content:
-            self.llm.messages.append({
-                "role": "system",
-                "content": f"[当前激活技能]\n{skill_content}",
-            })
-
         if not self.llm.supports_native_tool_calling:
             self._inject_tools_prompt()
 

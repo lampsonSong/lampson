@@ -9,6 +9,7 @@ from src.tools import shell as shell_tool
 from src.tools import fileops as fileops_tool
 from src.tools import web as web_tool
 from src.feishu import client as feishu_client
+from src.core import skills_tools
 
 
 ToolRunner = Callable[[dict[str, Any]], str]
@@ -27,6 +28,9 @@ _register(fileops_tool.FILE_WRITE_SCHEMA, fileops_tool.run_file_write)
 _register(web_tool.SCHEMA, web_tool.run)
 _register(feishu_client.FEISHU_SEND_SCHEMA, feishu_client.tool_feishu_send)
 _register(feishu_client.FEISHU_READ_SCHEMA, feishu_client.tool_feishu_read)
+_register(skills_tools.SKILL_VIEW_SCHEMA, skills_tools.skill_view)
+_register(skills_tools.SKILLS_LIST_SCHEMA, skills_tools.skills_list)
+_register(skills_tools.PROJECT_CONTEXT_SCHEMA, skills_tools.project_context)
 
 
 def get_all_schemas() -> list[dict[str, Any]]:

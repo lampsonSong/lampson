@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -141,6 +142,9 @@ def _display_plan(plan: dict[str, Any]) -> None:
 
 def run_update(description: str, llm: LLMClient) -> str:
     """执行自更新流程，交互式，返回最终状态描述。"""
+    if not sys.stdin.isatty():
+        return "[自更新不可用] 当前运行在非交互模式（如飞书服务模式），自更新需要在 CLI REPL 中执行。"
+
     project_root = _find_project_root()
 
     # 检查 git 状态
@@ -230,6 +234,9 @@ def run_update(description: str, llm: LLMClient) -> str:
 
 def run_rollback() -> str:
     """回滚自更新：切换回 main 分支并删除当前 self-update 分支。"""
+    if not sys.stdin.isatty():
+        return "[回滚不可用] 当前运行在非交互模式，回滚需要在 CLI REPL 中执行。"
+
     project_root = _find_project_root()
     current_branch = _get_current_branch(project_root)
 

@@ -13,6 +13,15 @@ feishu:
 memory_path: "~/.lampson/memory"   # 记忆文件存储路径
 skills_path: "~/.lampson/skills"   # 技能文件存储路径
 
+# 上下文压缩配置
+compaction:
+  enabled: true                    # 是否启用自动压缩
+  trigger_threshold: 0.8           # 触发阈值（占 context_window 的百分比）
+  end_threshold: 0.3               # 压缩目标（占 context_window 的百分比）
+  context_window: 131072           # LLM context window 大小（token 数），GLM-5.1=128K
+  max_iterations: 3                # 最大压缩迭代次数
+  enable_archive: true             # 是否归档有价值内容到文件
+
 # MCP 服务器配置（Phase 2 预留）
 # mcp:
 #   servers:
