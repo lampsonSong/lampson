@@ -89,7 +89,7 @@ def _get_current_branch(project_root: Path) -> str:
 
 def _generate_update_plan(description: str, llm: LLMClient) -> dict[str, Any]:
     """调用 LLM 生成修改方案，返回解析后的 dict。"""
-    from openai import OpenAI, APITimeoutError, APIConnectionError
+        # 注意：此处 future 可扩展异常处理，但目前依赖 LLMClient 内部抛出的 RuntimeError
 
     temp_client = LLMClient(
         api_key=llm.client.api_key,

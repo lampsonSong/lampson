@@ -1,6 +1,6 @@
 # Lampson 项目文档
 
-> 文档版本：2026-04-25
+> 文档版本：2026-04-25（Session 三层架构重构）
 > 项目版本：v0.2.0-dev
 
 ---
@@ -26,43 +26,52 @@
 
 ## 二、技术架构
 
-### 2.1 模块关系图
+### 2.1 三层架构
 
 ```
-用户输入（CLI / 飞书）
-         │
-         ▼
-    ┌─────────┐
-    │  cli.py │  REPL 入口 / 命令解析 / 压缩触发
-    └────┬────┘
-         │
-         ▼
-    ┌─────────┐
-    │  Agent  │  主循环：LLM调用 + 工具分发
-    └────┬────┘
-         │
-    ┌────┴────┐
-    │         │
-    ▼         ▼
-┌──────┐  ┌──────────────┐
-│ LLM  │  │ Tool Registry│
-│Client│  └──────┬───────┘
-└──┬───┘         │
+┌──────────────────── Gateway 层 ────────────────────┐
+│                                                     │
+│  cli.py                 feishu/listener.py          │
+│  参数解析 + REPL 循环    WebSocket 收发 + 去重       │
+│  结果展示               消息解析                     │
+│                                                     │
+└─────────────────────┬──────────────────────────────┘
+                      │ session.handle_input(text)
+                      ▼
+┌──────────────────── Session 层 ────────────────────┐
+│                                                     │
+│  core/session.py                                    │
+│  Agent 生命周期 / 命令路由 / 压缩触发 / 飞书初始化   │
+│                                                     │
+│  Session.from_config(config)  工厂方法               │
+│  Session.handle_input(text)   统一入口 → HandleResult│
+│                                                     │
+└─────────────────────┬──────────────────────────────┘
+                      │ agent.run() / agent.maybe_compact()
+                      ▼
+┌──────────────────── Agent 层 ──────────────────────┐
+│                                                     │
+│  core/agent.py          planning/                   │
+│  LLM 主循环 + 工具分发   规划器 + 执行器 + 状态机    │
+│                                                     │
+└────────┬───────────────────────┬───────────────────┘
+         │                       │
+    ┌────┴────┐           ┌──────┴───────┐
+    │         │           │              │
+    ▼         ▼           ▼              ▼
+┌──────┐  ┌──────────────┐  ┌──────────┐  ┌─────────┐
+│ LLM  │  │ Tool Registry│  │ Prompt   │  │Compaction│
+│Client│  └──────┬───────┘  │ Builder  │  │ 归档+摘要│
+└──┬───┘         │          └──────────┘  └─────────┘
    │         ┌────┴────┬──────────┬──────────┐
    │         ▼         ▼          ▼          ▼
    │     ┌────────┐ ┌────────┐ ┌────────┐ ┌─────────┐
    │     │ Shell  │ │FileOps │ │  Web   │ │ Feishu │
-   │     └────────┘ └────────┘ └────────┘ └────┬────┘
-   │                                           │
-   ▼                                      ┌────▼────┐
- 智谱 API                               ┌─┤Feishu   │
-                                      │ │Listener  │ ← WebSocket 长连接
-                           ┌──────────┤ └─────────┘
-                      ┌────▼────┐   │
-                  ┌───┤ Prompt  │   │
-                  │   │Builder  │   │
-                  │   └─────────┘   │
-                  │                  │
+   │     └────────┘ └────────┘ └────────┘ └─────────┘
+   │
+   ▼
+ 智谱 API
+
               ┌───┴────┐      ┌──────▼────┐
               │ Memory  │      │  Skills    │
               │ Manager │      │  Manager   │
@@ -72,20 +81,16 @@
               │ core.md │        │ ~/.lampson/
               │sessions/│        │ skills/  │
               └─────────┘        └──────────┘
-
-    ┌─────────────────────────────────────────────┐
-    │  Compaction（上下文压缩）                     │
-    │  agent.run() 返回后检查 token 阈值            │
-    │  → Classify → Archive → Summarize → 迭代    │
-    └─────────────────────────────────────────────┘
 ```
 
 ### 2.2 核心模块
 
 | 模块 | 文件 | 职责 |
 |------|------|------|
-| CLI 入口 | `src/cli.py` | REPL 循环、命令路由、参数解析 |
-| Agent | `src/core/agent.py` | LLM 主循环，工具调用分发 |
+| CLI 入口 | `src/cli.py` | 参数解析 + REPL 循环 + 结果展示（纯 Gateway） |
+| Session | `src/core/session.py` | Agent 生命周期 + 命令路由 + 压缩触发 + 飞书初始化 |
+| Agent | `src/core/agent.py` | LLM 主循环，工具调用分发，规划执行 |
+| Planning | `src/planning/` | 任务规划器 + 步骤执行器 + Plan 状态机 |
 | LLM | `src/core/llm.py` | 封装 OpenAI SDK，支持原生/prompt-based 两种 tool calling |
 | PromptBuilder | `src/core/prompt_builder.py` | 分层构建 system prompt（9层） |
 | Tools | `src/core/tools.py` | 工具注册表 + 分发调度 |
@@ -94,7 +99,7 @@
 | Skills | `src/skills/manager.py` | 技能发现、匹配、加载 |
 | Skills Tools | `src/core/skills_tools.py` | Agent 可调用的 skill_view / skills_list / project_context |
 | Feishu Client | `src/feishu/client.py` | 飞书 REST API 封装（发送/读取消息） |
-| Feishu Listener | `src/feishu/listener.py` | WebSocket 长连接接收飞书消息 |
+| Feishu Listener | `src/feishu/listener.py` | WebSocket 收发 + 去重（纯 Gateway，走 Session） |
 | Feishu Poller | `src/feishu/poller.py` | 轮询方式接收飞书消息（备选） |
 | Self-update | `src/selfupdate/updater.py` | 自更新流程（LLM生成方案 → 用户确认 → git分支执行） |
 | Shell Tool | `src/tools/shell.py` | 执行 shell 命令，带危险命令拦截 |
@@ -193,31 +198,51 @@
 
 ### 4.1 CLI 入口 (`src/cli.py`)
 
+纯 Gateway 层，不含任何业务逻辑。
+
 **核心流程**：
 
 ```
 main()
-  ├─ _parse_args()          解析命令行参数
-  ├─ load_config()          加载 ~/.lampson/config.yaml
-  ├─ run_setup_wizard()     首次运行引导配置
-  ├─ _install_default_skills()  安装内置技能到 ~/.lampson/skills/
-  ├─ load_core()            加载核心记忆
-  ├─ load_all_skills()      加载所有技能
-  ├─ LLMClient + Agent      初始化 LLM 和 Agent
-  ├─ PromptSession          创建 REPL（history + auto-suggest）
-  └─ while True:            REPL 循环
-       ├─ session.prompt()   读取用户输入
-       ├─ /command → _handle_command()
-       └─ natural lang → agent.run() → print response
+  ├─ _parse_args()              解析命令行参数
+  ├─ load_config()              加载配置
+  ├─ run_setup_wizard()         首次运行引导
+  ├─ Session.from_config(config)  工厂方法创建 Session
+  └─ _run_repl(session)         REPL 循环
+       ├─ prompt_session.prompt()    读取用户输入
+       ├─ session.handle_input()     返回 HandleResult
+       ├─ result.reply → print       展示回复
+       ├─ result.compaction_msg → print  压缩通知
+       └─ result.is_exit → break     退出
 ```
 
-**关键设计**：
-- 支持两种输入模式：交互式 REPL、非交互式单次查询
-- `/serve` 启动飞书 WebSocket 监听（阻塞模式）
-- 退出时自动生成会话摘要写入 `sessions/`
-- 所有子命令既可通过 REPL 输入，也可通过命令行参数执行
+**HandleResult 结构**：
+- `reply`: str — 回复文本
+- `is_exit`: bool — 是否退出
+- `is_command`: bool — 是否 / 命令
+- `compaction_msg`: str — 压缩通知
 
-### 4.2 Agent 主循环 (`src/core/agent.py`)
+### 4.2 Session (`src/core/session.py`)
+
+中间层，管理 Agent 生命周期和所有业务逻辑。Gateway 层只需调用 `handle_input()`。
+
+```python
+class Session:
+    @classmethod
+    def from_config(cls, config) -> Session   # 工厂：技能→LLM→Agent→飞书
+
+    def handle_input(self, text) -> HandleResult  # 统一入口
+        ├─ /command → _handle_command()  命令路由
+        └─ 自然语言 → agent.run() → maybe_compact()
+
+    def init_feishu(self) -> bool              # 飞书客户端初始化
+    def start_feishu_listener(self) -> None    # 启动 WebSocket 监听（阻塞）
+    def save_summary(self) -> None             # 退出时保存会话摘要
+```
+
+**命令路由**：`/help` `/config` `/memory` `/skills` `/feishu` `/update` `/serve` `/exit` 全部在 Session 内部处理。
+
+### 4.3 Agent 主循环 (`src/core/agent.py`)
 
 ```python
 class Agent:
@@ -240,7 +265,7 @@ class Agent:
 - Skills 通过 `skill_view(name)` 工具按需加载，不每轮自动注入
 - `_inject_tools_prompt()` 只在 prompt-based 模式注入一次
 
-### 4.3 LLM 客户端 (`src/core/llm.py`)
+### 4.4 LLM 客户端 (`src/core/llm.py`)
 
 ```python
 class LLMClient:
@@ -255,7 +280,7 @@ class LLMClient:
 
 **异常处理**：超时、连接错误、频率限制
 
-### 4.4 分层 System Prompt (`src/core/prompt_builder.py`)
+### 4.5 分层 System Prompt (`src/core/prompt_builder.py`)
 
 9层结构：
 
@@ -271,7 +296,7 @@ class LLMClient:
 | L8 | Platform Hints | CLI 环境提示 |
 | L9 | Timestamp | 会话开始时间 |
 
-### 4.5 工具注册与分发 (`src/core/tools.py`)
+### 4.6 工具注册与分发 (`src/core/tools.py`)
 
 ```python
 _REGISTRY: dict[str, tuple[schema, runner]]
@@ -283,7 +308,7 @@ def dispatch(tool_name, arguments_raw):
 
 每个工具提供：schema（OpenAI function calling 格式）+ runner（实际执行函数）。
 
-### 4.6 记忆管理 (`src/memory/manager.py`)
+### 4.7 记忆管理 (`src/memory/manager.py`)
 
 两层架构：
 - **core.md**：键值对风格，启动全量加载
@@ -294,7 +319,7 @@ def dispatch(tool_name, arguments_raw):
 - `search_memory()`：关键词搜索 core + sessions
 - `forget_memory()`：删除含关键词的条目
 
-### 4.7 技能管理 (`src/skills/manager.py`)
+### 4.8 技能管理 (`src/skills/manager.py`)
 
 SKILL.md 格式：
 ```yaml
@@ -312,7 +337,7 @@ triggers:
 - **关键词匹配**：`match_skill()` 简单字符串包含
 - **LLM 语义匹配**：`match_skill_with_llm()`（需要 LLM 调用）
 
-### 4.8 飞书客户端 (`src/feishu/client.py`)
+### 4.9 飞书客户端 (`src/feishu/client.py`)
 
 - `FeishuClient`：封装所有 REST API 调用
 - **自动刷新 token**：每 2 小时刷新，留 200s 余量
@@ -320,9 +345,9 @@ triggers:
 - `get_messages()`：拉取历史消息（轮询方式）
 - 全局单例模式：`init_client()` → `get_client()`
 
-### 4.9 飞书监听 (`src/feishu/listener.py`)
+### 4.10 飞书监听 (`src/feishu/listener.py`)
 
-基于 `lark_oapi` WebSocket 长连接：
+纯 Gateway 层，基于 `lark_oapi` WebSocket 长连接：
 
 ```
 start()
@@ -331,9 +356,10 @@ start()
 ```
 
 - `MessageDeduplicator`：基于 message_id 的滑动窗口 TTL 去重
-- `_handle_message()`：解析消息 → agent.run() → 回复
+- `_handle_message()`：解析消息 → `session.handle_input(text)` → 回复
+- 向后兼容：可传 `agent` 或 `session`（推荐 session）
 
-### 4.10 自更新 (`src/selfupdate/updater.py`)
+### 4.11 自更新 (`src/selfupdate/updater.py`)
 
 ```python
 run_update(description, llm):
@@ -356,9 +382,11 @@ LLM 返回格式：
 }
 ```
 
-### 4.11 上下文压缩 (`src/core/compaction.py`)
+### 4.12 上下文压缩 (`src/core/compaction.py`)
 
 设计文档：`docs/compaction-design.md`
+
+压缩触发由 Session 层统一管理（`agent.maybe_compact()`），不在 gateway 层调用。
 
 **三阶段流程**：
 
@@ -400,6 +428,23 @@ total_tokens > context_window × 80% ?
 达标？→ 是 → 摘要替换对话历史
      → 否 → 继续下一轮压缩
 ```
+
+### 4.13 任务规划 (`src/planning/`)
+
+设计文档：`docs/planning-design.md`
+
+**模块组成**：
+
+| 文件 | 内容 |
+|------|------|
+| `steps.py` | `PlanStatus` / `StepStatus` / `Step` / `Plan` 数据类 + Plan 状态机 |
+| `planner.py` | `Planner` 类：调 LLM 生成步骤、JSON 解析、action 校验与模糊修正、replan |
+| `executor.py` | `Executor` 类：参数引用解析（`$prev.result` / `$step[N].result` / `$goal`）、重试、失败处理 |
+| `prompts.py` | 规划/重新规划/汇总 prompt 模板 + 上下文构建 |
+
+**Agent.run() 集成**：所有输入统一走规划器（1-step 退化 + 规划失败回退到直接对话）。
+
+**Plan 状态机**：`pending → planning → executing → completed/failed/cancelled`
 
 **关键设计决策**：
 - 归档而非丢弃：有长期价值的内容写入 skill/project 文件
@@ -457,31 +502,35 @@ compaction:
 用户输入自然语言
     │
     ▼
-cli.py: 判断是 /command 还是普通输入
+cli.py: session.handle_input(text)
     │
     ▼
-Agent.run(user_input)
-    │
-    ├─ LLMClient.add_user_message()
-    │
-    ▼
-LLM chat(tools=schemas)
-    │ (原生 tool_calls)
-    ▼
-┌─ 返回 content ───────────────────┐
-│         ↓                       │
-│  有 tool_calls → dispatch()     │
-│         ↓                       │
-│  工具执行结果                   │
-│         ↓                       │
-│  LLMClient.add_tool_result()   │
-│         ↓                       │
-│  再次 chat() ◀─────────────┐   │
-│         ↓                  │   │
-└──── 循环直到 stop ──────────┘   │
-    │
-    ▼
-返回最终 content → cli.py → 打印给用户
+Session.handle_input()
+    ├─ /command → 命令路由（_handle_command）
+    └─ 自然语言 → Agent.run(user_input)
+                      │
+                      ├─ Planner：生成执行步骤（1-step 退化）
+                      ├─ Executor：逐步执行
+                      │   └─ LLMClient.add_user_message()
+                      │
+                      ▼
+                  LLM chat(tools=schemas)
+                      │ (原生 tool_calls)
+                      ▼
+                ┌─ 返回 content ───────────────────┐
+                │         ↓                       │
+                │  有 tool_calls → dispatch()     │
+                │         ↓                       │
+                │  工具执行结果                   │
+                │         ↓                       │
+                │  LLMClient.add_tool_result()   │
+                │         ↓                       │
+                │  再次 chat() ◀─────────────┐   │
+                │         ↓                  │   │
+                └──── 循环直到 stop ──────────┘   │
+                      │
+                      ▼
+                  返回 HandleResult → cli.py → 打印给用户
 ```
 
 ### 6.2 飞书消息处理流程（WebSocket）
@@ -497,10 +546,10 @@ FeishuListener._handle_message(data)
   └─ 提取 text 字段
       │
       ▼
-  Agent.run(text)
+  session.handle_input(text)  →  HandleResult
       │
       ▼
-  agent 回复文本
+  result.reply
       │
       ▼
   FeishuListener._send_reply(chat_id, text)
@@ -567,7 +616,7 @@ vim ~/.lampson/config.yaml
 
 ### 7.5 内置技能安装
 
-首次运行时，`_install_default_skills()` 自动将 `config/default_skills/` 中的技能复制到 `~/.lampson/skills/`（已存在的不覆盖）。
+首次运行时，`Session.from_config()` 自动调用 `_install_default_skills()` 将 `config/default_skills/` 中的技能复制到 `~/.lampson/skills/`（已存在的不覆盖）。
 
 ---
 
@@ -577,13 +626,14 @@ vim ~/.lampson/config.yaml
 
 | 功能 | 状态 | 备注 |
 |------|------|------|
-| CLI REPL | done | 交互式 + 非交互模式 |
+| CLI REPL | done | 交互式 + 非交互模式，纯 Gateway 层 |
+| Session 中间层 | done | 三层架构（Gateway→Session→Agent） |
 | LLM 对话 | done | 原生 + prompt-based tool calling |
 | Shell 工具 | done | 危险命令拦截 |
 | 文件读写 | done | 大小限制保护 |
 | 网页搜索 | done | DuckDuckGo HTML |
 | 飞书发送/读取 | done | REST API |
-| 飞书 WebSocket 监听 | done | 长连接 + 去重 |
+| 飞书 WebSocket 监听 | done | 长连接 + 去重，走 Session |
 | 飞书轮询监听 | done | 备选方案 |
 | 核心记忆 | done | core.md 全量加载 |
 | 会话摘要 | done | 退出时写入 |
@@ -592,6 +642,7 @@ vim ~/.lampson/config.yaml
 | 首次运行引导 | done | API Key 配置 |
 | Prompt 分层 | done | 9层 system prompt |
 | Context Compaction | done | 三阶段压缩，14个测试全通过 |
+| 任务规划 (Planning) | done | Plan-and-Execute，30个测试全通过 |
 | 项目文档 | done | PROJECT.md 完整梳理 |
 
 ### 8.2 当前阶段：v0.2 — 智能化增强
@@ -621,13 +672,19 @@ vim ~/.lampson/config.yaml
 现状：
 - Agent 单轮对话能力强（LLM + 9个工具）
 - Compaction 保证长对话不爆上下文
-- 缺少：任务规划、步骤跟踪、中途校验、失败重试
+- **任务规划器已实现**：`src/planning/` 模块（Planner + Executor + Plan 状态机），30 个测试全通过
+- Agent.run() 已集成规划器，所有输入统一走 Plan-and-Execute（1-step 退化 + 失败回退）
+- 设计文档：`docs/planning-design.md`
+
+已实现：
+- [x] **任务规划器（Planner）**：接收复杂任务后生成结构化执行计划（步骤列表）
+- [x] **步骤跟踪（Plan 状态机）**：pending → planning → executing → completed/failed/cancelled
+- [x] **失败处理**：Executor 支持失败后回退到直接对话
+- [x] **参数引用**：`$prev.result` / `$step[N].result` / `$goal` 步骤间传参
 
 待实现：
-- [ ] **任务规划器（Planner）**：接收复杂任务后生成结构化执行计划（步骤列表 + 依赖关系）
-- [ ] **步骤跟踪（Step Tracker）**：维护当前进度，每步完成后自动推进，状态持久化
 - [ ] **中途校验（Checkpoint）**：关键步骤后校验结果，不一致则回退或调整计划
-- [ ] **失败重试与调整**：某步失败时，LLM 分析原因，生成替代方案，不直接放弃
+- [ ] **Replan**：执行失败时重新规划（接口已有，prompt 待优化）
 - [ ] **进度报告**：向用户汇报当前执行到哪一步、预计还需多久
 - [ ] **人工确认点**：高风险操作（删除、部署上线等）在执行前暂停等用户确认
 - [ ] **并发子任务**：多个独立步骤可以并行执行（如果工具支持）
@@ -636,14 +693,15 @@ vim ~/.lampson/config.yaml
 
 | 优先级 | 功能 | 依赖 |
 |--------|------|------|
-| P0 | 多轮任务规划器（Planner） | - |
-| P0 | 步骤跟踪 + 状态持久化 | Planner |
-| P0 | 中途校验 + 失败重试 | Planner |
+| ~~P0~~ | ~~多轮任务规划器（Planner）~~ | ~~已完成~~ |
+| ~~P0~~ | ~~步骤跟踪 + Plan 状态机~~ | ~~已完成~~ |
+| ~~P0~~ | ~~失败处理 + 参数引用~~ | ~~已完成~~ |
+| P0 | 中途校验（Checkpoint）+ Replan | Planner |
+| P0 | 进度报告 + 人工确认点 | Planner |
 | P1 | `/skills edit`、`/skills delete` | - |
 | P1 | `memory update`、`/memory compact` | - |
 | P1 | 主动总结触发（"记下来"等指令） | - |
-| P1 | 进度报告 + 人工确认点 | Planner |
-| P2 | 并发子任务执行 | Planner + 工具并发 |
+| P1 | 并发子任务执行 | Planner + 工具并发 |
 | P2 | MCP Server 接入 | - |
 | P2 | `file_edit`（patch 模式） | - |
 | P2 | `code_search`（代码搜索） | - |
@@ -661,7 +719,7 @@ vim ~/.lampson/config.yaml
 4. **文件大小限制**：读文件 100KB 上限，大文件场景需多次分段读取
 5. **Skills 语义匹配**：`match_skill_with_llm()` 需要额外 LLM 调用，有延迟和 token 开销
 6. **Compaction 压缩质量**：依赖 LLM 对内容价值的判断，可能误判归档/丢弃
-7. **无任务规划能力**：复杂任务只能靠用户逐步引导，不能自主拆解执行
+7. **Planning prompt 待优化**：Replan 场景的 prompt 需要更多测试数据打磨
 8. **工具无法并发**：Agent 主循环是串行的，多个独立工具调用无法并行
 
 ---
@@ -673,25 +731,33 @@ vim ~/.lampson/config.yaml
 | `docs/PRD.md` | 产品需求文档 |
 | `docs/PROJECT.md` | 本文档 |
 | `docs/compaction-design.md` | Context Compaction 设计文档 |
+| `docs/planning-design.md` | 任务规划设计文档 |
 | `pyproject.toml` | 包配置 |
 | `config/default.yaml` | 默认配置模板（含 compaction 配置） |
 | `config/default_skills/` | 内置技能 |
 | `.cursorrules` | Cursor 开发规范 |
-| `src/cli.py` | CLI 入口（含压缩触发） |
-| `src/core/agent.py` | Agent 主循环（含 token 计数） |
+| `src/cli.py` | CLI 入口（纯 Gateway：参数解析 + REPL） |
+| `src/core/session.py` | Session 中间层（生命周期 + 命令路由 + 压缩） |
+| `src/core/agent.py` | Agent 主循环（LLM + 工具 + 规划执行） |
 | `src/core/llm.py` | LLM 调用封装 |
 | `src/core/prompt_builder.py` | 分层 Prompt 构建器 |
 | `src/core/tools.py` | 工具注册与分发 |
 | `src/core/config.py` | 配置管理 |
 | `src/core/skills_tools.py` | Skills 工具（skill_view 等） |
 | `src/core/compaction.py` | 上下文压缩（归档+摘要） |
+| `src/planning/__init__.py` | 规划模块入口 |
+| `src/planning/steps.py` | Plan/Step 数据类 + 状态机 |
+| `src/planning/planner.py` | 规划器（LLM 生成步骤） |
+| `src/planning/executor.py` | 执行器（参数引用 + 重试 + 失败处理） |
+| `src/planning/prompts.py` | 规划相关 prompt 模板 |
 | `src/memory/manager.py` | 记忆管理器 |
 | `src/skills/manager.py` | 技能管理器 |
 | `src/feishu/client.py` | 飞书 API 客户端 |
-| `src/feishu/listener.py` | 飞书 WebSocket 监听 |
+| `src/feishu/listener.py` | 飞书 WebSocket 监听（纯 Gateway） |
 | `src/feishu/poller.py` | 飞书轮询器 |
 | `src/tools/shell.py` | Shell 执行工具 |
 | `src/tools/fileops.py` | 文件读写工具 |
 | `src/tools/web.py` | 网页搜索工具 |
 | `src/selfupdate/updater.py` | 自更新逻辑 |
 | `tests/test_compaction.py` | Compaction 单元测试（14个） |
+| `tests/test_planning.py` | Planning 单元测试（30个） |

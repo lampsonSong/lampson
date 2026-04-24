@@ -47,8 +47,8 @@ MEMORY_GUIDANCE = (
 
 SKILLS_GUIDANCE = (
     "完成复杂任务（5+ 工具调用）、修复疑难错误或发现重要工作流后，\n"
-    "用 skill_manage 工具将其保存为技能，以便下次复用。\n"
-    "如果发现某个 skill 过期、不完整或错误，立即用 skill_manage(action='patch') 修补，不要等被问到。\n"
+    "考虑将工作流记录到 ~/.lampson/skills/ 目录下以便复用。\n"
+    "如果发现某个 skill 过时或错误，及时更新它。\n"
     "不维护的 skills 迟早会成为负担。"
 )
 

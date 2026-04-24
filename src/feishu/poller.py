@@ -7,9 +7,28 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any
+from typing import Any, Optional
 
 from src.feishu.client import FeishuClient
+
+
+class MessageDeduplicator:
+    """消息去重：基于 message_id 防止重复处理。"""
+
+    def __init__(self, ttl_seconds: int = 120) -> None:
+        self._seen: dict[str, float] = {}
+        self._ttl = ttl_seconds
+
+    def is_duplicate(self, message_id: str) -> bool:
+        now = time.monotonic()
+        if message_id in self._seen:
+            return True
+        self._seen[message_id] = now
+        return False
+
+    def cleanup(self) -> None:
+        now = time.monotonic()
+        self._seen = {k: v for k, v in self._seen.items() if now - v < self._ttl}
 
 
 class FeishuPoller:
@@ -26,6 +45,7 @@ class FeishuPoller:
         self.agent = agent
         self.chat_ids = chat_ids
         self.poll_interval = poll_interval
+        self._dedup = MessageDeduplicator()
         self._bot_open_id: str = ""
         # 每个 chat_id 最后处理的消息时间戳（毫秒字符串）
         self._last_ts: dict[str, str] = {}
@@ -91,6 +111,10 @@ class FeishuPoller:
         # items 按创建时间倒序，先反转成正序处理
         new_messages = []
         for msg in reversed(items):
+            message_id = msg.get("message_id", "")
+            if self._dedup.is_duplicate(message_id):
+                continue
+
             create_time = msg.get("create_time", "0")
             if create_time <= last_ts:
                 continue
@@ -111,6 +135,9 @@ class FeishuPoller:
             except Exception as e:
                 print(f"[poller] 处理消息异常：{e}")
             last_ts = max(last_ts, create_time)
+
+        # 定期清理过期去重记录
+        self._dedup.cleanup()
 
         self._last_ts[chat_id] = last_ts
 

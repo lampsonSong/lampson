@@ -7,14 +7,23 @@ LLM 需要某 skill 时，通过 skill_view(name) 工具按需加载。
 from __future__ import annotations
 
 import json
+import logging
 import re
+import json
 from typing import Any, TYPE_CHECKING
 
 from src.core.llm import LLMClient
 from src.core import tools as tool_registry
+from src.core.compaction import CompactionConfig, CompactionResult, apply_compaction
+from src.planning.planner import Planner, PlanParseError
+from src.planning.executor import Executor
+from src.planning.steps import Plan, PlanStatus
+from src.planning.prompts import build_context_from_history
 
 if TYPE_CHECKING:
     from src.skills.manager import Skill
+
+logger = logging.getLogger(__name__)
 
 
 MAX_TOOL_ROUNDS = 10
@@ -26,7 +35,11 @@ _TOOL_CALL_PATTERN = re.compile(
 
 
 class Agent:
-    def __init__(self, llm: LLMClient) -> None:
+    def __init__(
+        self,
+        llm: LLMClient,
+        compaction_config: CompactionConfig | None = None,
+    ) -> None:
         self.llm = llm
         self._tools = tool_registry.get_all_schemas()
         self.skills: dict[str, "Skill"] = {}
@@ -35,6 +48,14 @@ class Agent:
         self._tools_prompt_injected: bool = False
         self.last_total_tokens: int = 0  # 最近一次 LLM 调用的 total_tokens
         self.last_stop_reason: str | None = None  # 最近一次 LLM 的 stop reason
+
+        # 压缩配置（由外部注入，Agent 自己不读配置文件）
+        self._compaction_config: CompactionConfig | None = compaction_config
+
+        # 规划状态
+        self.current_plan: Plan | None = None
+        self._planner = Planner(llm=llm, tool_schemas=self._tools)
+        self._executor = Executor(llm=llm)
 
     def refresh_tools(self) -> None:
         """重新加载工具列表（外部注册新工具后调用）。"""
@@ -118,7 +139,7 @@ class Agent:
             except json.JSONDecodeError:
                 arguments = {}
 
-            result = tool_registry.dispatch(tool_name, json.dumps(arguments))
+            result = tool_registry.dispatch(tool_name, arguments)
             self.llm.messages.append({
                 "role": "user",
                 "content": f"<tool_result:{tool_name}>\n{result}\n</tool_result:{tool_name}>",
@@ -129,17 +150,53 @@ class Agent:
     def run(self, user_input: str) -> str:
         """处理一轮用户输入，返回最终回复文本。
 
-        Skills 通过 skill_view(name) 工具按需加载，不再每轮自动注入。
+        所有输入统一走规划器：
+        - 1-step plan → 退化直接执行（行为和之前单轮一致）
+        - N-step plan → 展示计划 → 自动执行 → 汇总
+        - 规划失败 → 回退到原有单轮模式
         """
         if not self.llm.supports_native_tool_calling:
             self._inject_tools_prompt()
 
         self.llm.add_user_message(user_input)
 
-        if self.llm.supports_native_tool_calling:
-            return self._run_native()
-        else:
-            return self._run_prompt_based()
+        # 构建上下文（供规划器使用，不污染主对话）
+        context = build_context_from_history(self.llm.get_history(), max_chars=1500)
+
+        try:
+            # 规划
+            plan = self._planner.plan(goal=user_input, context=context)
+            self.current_plan = plan
+
+            if plan.is_single_step:
+                # 1-step 退化：直接执行，不展示计划
+                logger.debug(f"1-step plan: {plan.steps[0].action}")
+            else:
+                # 多步计划：记录日志
+                logger.info(
+                    f"计划生成: {plan.plan_summary} ({len(plan.steps)} 步)"
+                )
+
+            # 执行
+            result = self._executor.execute(plan)
+            return result
+
+        except PlanParseError as e:
+            logger.warning(f"规划失败，回退到单轮模式: {e}")
+            self.current_plan = None
+            # 回退：用原有逻辑
+            if self.llm.supports_native_tool_calling:
+                return self._run_native()
+            else:
+                return self._run_prompt_based()
+
+        except Exception as e:
+            logger.exception(f"规划异常，回退到单轮模式")
+            self.current_plan = None
+            if self.llm.supports_native_tool_calling:
+                return self._run_native()
+            else:
+                return self._run_prompt_based()
 
     def get_conversation_text(self) -> str:
         """导出当前对话的可读文本，供会话摘要生成使用。"""
@@ -152,6 +209,52 @@ class Agent:
             prefix = "用户" if role == "user" else "Lampson"
             lines.append(f"{prefix}: {content}")
         return "\n".join(lines)
+
+    def _estimate_context_tokens(self) -> int:
+        """估算当前 messages 的 token 总数（粗略：UTF-8 字节数 ÷ 4）。"""
+        try:
+            serialized = json.dumps(self.llm.messages, ensure_ascii=False)
+            return len(serialized.encode("utf-8")) // 4
+        except Exception:
+            # 估算失败时保守返回 0（不触发压缩）
+            return 0
+
+    def maybe_compact(self) -> CompactionResult | None:
+        """检查并执行上下文压缩。
+
+        由外部调用方（cli.py / listener.py）在每轮 run() 之后调用。
+        内部处理所有判断逻辑：
+        - 压缩未配置 → 跳过
+        - plan 正在执行中 → 跳过
+        - token 未达阈值 → 跳过
+
+        Returns:
+            CompactionResult 如果执行了压缩，None 如果跳过。
+        """
+        if self._compaction_config is None:
+            return None
+
+        # 规划执行中不触发压缩
+        if (
+            self.current_plan is not None
+            and self.current_plan.status == PlanStatus.executing
+        ):
+            return None
+
+        # 用实际 context 大小判断是否触发压缩，而非依赖 last_total_tokens
+        # （last_total_tokens 只记录最后一次 LLM 调用的用量，不反映整个 context size）
+        actual_tokens = self._estimate_context_tokens()
+
+        try:
+            return apply_compaction(
+                agent_llm=self.llm,
+                config=self._compaction_config,
+                last_total_tokens=actual_tokens,
+                stop_reason=self.last_stop_reason,
+            )
+        except Exception as e:
+            logger.warning(f"压缩异常: {e}")
+            return None
 
     def generate_session_summary(self) -> str:
         """让 LLM 生成本次会话摘要，用于写入 sessions/ 目录。"""

@@ -1,4 +1,8 @@
-"""飞书长连接监听器：通过 WebSocket 接收消息事件，替代轮询方案。"""
+"""飞书长连接监听器：通过 WebSocket 接收消息事件，替代轮询方案。
+
+职责仅限：消息收发 + 去重。
+所有业务逻辑通过 Session.handle_input() 处理。
+"""
 
 from __future__ import annotations
 
@@ -15,8 +19,7 @@ from lark_oapi.api.im.v1 import (
 )
 
 if TYPE_CHECKING:
-    from src.core.agent import Agent
-    from src.core.compaction import CompactionConfig
+    from src.core.session import Session
 
 
 class MessageDeduplicator:
@@ -65,13 +68,20 @@ class FeishuListener:
         self,
         app_id: str,
         app_secret: str,
-        agent: "Agent",
-        compaction_config: "CompactionConfig | None" = None,
+        agent=None,
+        session: Session | None = None,
     ) -> None:
         self.app_id = app_id
         self.app_secret = app_secret
-        self.agent = agent
-        self.compaction_config = compaction_config
+        # 兼容旧调用方式（直接传 agent）和新方式（传 session）
+        if session is not None:
+            self._session = session
+        elif agent is not None:
+            # 向后兼容：从 agent 构造一个最小 session 包装
+            self._session = None
+            self._agent = agent
+        else:
+            raise ValueError("必须传入 agent 或 session")
         self._dedup = MessageDeduplicator()
         self._lark_client = (
             lark.Client.builder()
@@ -138,23 +148,18 @@ class FeishuListener:
                 print("[listener] 消息内容为空，跳过", flush=True)
                 return
 
-            print(f"[listener] 调用 agent.run，输入: {text}", flush=True)
-            reply = self.agent.run(text)
-            print(f"[listener] agent 回复: {reply}", flush=True)
-
-            self._dedup.mark_processed(message_id)
-            self._send_reply(chat_id, reply)
-
-            # 上下文压缩检查
-            if self.compaction_config:
-                from src.core.compaction import apply_compaction
+            # 走 Session（推荐）或直接走 agent（向后兼容）
+            if self._session is not None:
+                result = self._session.handle_input(text)
+                reply = result.reply
+                if result.compaction_msg:
+                    print(f"[listener] {result.compaction_msg}", flush=True)
+            else:
+                print(f"[listener] 调用 agent.run，输入: {text}", flush=True)
+                reply = self._agent.run(text)
+                # 上下文压缩
                 try:
-                    cr = apply_compaction(
-                        self.agent.llm,
-                        self.compaction_config,
-                        self.agent.last_total_tokens,
-                        self.agent.last_stop_reason,
-                    )
+                    cr = self._agent.maybe_compact()
                     if cr is not None and cr.success:
                         print(f"[listener] 上下文压缩已完成，归档 {cr.archived_count} 条内容。", flush=True)
                     elif cr is not None and not cr.success:
@@ -162,6 +167,11 @@ class FeishuListener:
                 except Exception as e:
                     print(f"[listener] 上下文压缩异常: {e}", flush=True)
 
+            print(f"[listener] 回复: {reply}", flush=True)
+
+            self._dedup.mark_processed(message_id)
+            if reply:
+                self._send_reply(chat_id, reply)
 
         except Exception as e:
             print(f"[listener] 处理消息时发生错误：{e}", flush=True)
