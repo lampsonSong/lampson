@@ -128,6 +128,21 @@ class FeishuListener:
                 flush=True,
             )
 
+            # 过期消息丢弃：超过 60 秒才投递的视为过期
+            create_time_str = getattr(message, "create_time", None)
+            if create_time_str:
+                try:
+                    create_ts = int(create_time_str) / 1000  # 飞书毫秒时间戳
+                    delay = time.time() - create_ts
+                    if delay > 60:
+                        print(
+                            f"[listener] 消息已过期（投递延迟 {delay:.0f} 秒），丢弃",
+                            flush=True,
+                        )
+                        return
+                except (ValueError, TypeError):
+                    pass
+
             message_id = getattr(message, "message_id", None) or str(id(data))
             if self._dedup.is_duplicate(message_id):
                 print(f"[listener] 消息 {message_id} 已处理过，跳过", flush=True)
