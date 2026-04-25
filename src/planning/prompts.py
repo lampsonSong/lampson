@@ -21,20 +21,10 @@ PERSISTENT_ENV_BLOCK = """## 环境信息
 - **禁止使用 grep/rg 命令**，改用 `search_content` 工具（按内容搜索）
 - 需要查看目录内容用 `ls`，这是允许的（执行快，不会超时）
 
-## 定位代码/项目的方法论（重要！）
-当用户让你"找一下XX代码在哪里"、"XX项目的代码在什么位置"时，**不要盲目 search_files 搜索整个文件系统**。
-正确的方法是**反向追踪**：
-1. 先 `which XX` 找到可执行文件路径（如果 XX 是一个命令）
-2. 再 `head -5 $(which XX)` 看可执行文件的 shebang 和 import 语句
-3. 从 import 路径定位到源码目录（通常在可执行文件的上级或同级目录）
-4. 最后 `ls 源码目录` 确认项目结构
-
-如果 XX 不是命令而是项目名：
-1. 先检查已知项目路径（查 projects_index 或记忆中的路径信息）
-2. 如果记忆中没有，`ls ~` 和 `ls ~/projects` 快速扫一眼目录名
-3. 找到后用记忆工具记录路径，避免下次重复搜索
-
-**绝对不要**对整个主目录做 search_files 或 search_content，会超时且低效。"""
+## 技能加载（重要！）
+当用户的请求可能涉及特定操作方法时（如"找代码"、"调试"、"写代码"），**先调用 skill_view 加载相关技能**。
+可用 skills 列表见 system prompt，用 skills_list() 搜索，skill_view(name) 加载全文。
+加载技能后再制定计划，不要凭记忆硬编步骤。"""
 
 MEMORY_STRUCTURE_BLOCK = """## lampson 记忆结构
 
@@ -89,8 +79,13 @@ PLAN_OUTPUT_FORMAT = """请只输出一个 JSON 对象，字段：
 
 # ── 阶段一：意图分类 ──
 
-def build_classify_prompt(goal: str, context: str, tools_desc: str) -> str:
+def build_classify_prompt(
+    goal: str, context: str, tools_desc: str, skills_triggers: str = ""
+) -> str:
     """阶段一：判断意图、是否需要工具、缺省信息与可能的直接回复。"""
+    skills_block = ""
+    if skills_triggers.strip():
+        skills_block = f"## 可用技能触发词\n{skills_triggers}\n\n"
     # // FIX-6: 在「通用原则」后追加了「决策指引」
     return f"""你是一个任务理解助手。根据用户目标与对话上下文，判断意图并决定是否需要工具。
 
@@ -98,7 +93,7 @@ def build_classify_prompt(goal: str, context: str, tools_desc: str) -> str:
 
 {MEMORY_STRUCTURE_BLOCK}
 
-## 工具能力
+{skills_block}## 工具能力
 {tools_desc}
 
 ## 最近对话与上下文
@@ -115,6 +110,7 @@ def build_classify_prompt(goal: str, context: str, tools_desc: str) -> str:
 - "missing_info": 字符串数组。若需要工具但缺少关键信息（如路径未知），列出缺什么；否则 []
 - "direct_reply": 若 needs_tools 为 false，可在此给出自然语言直接回复；若留空或 null 则由主对话模型生成
 - "initial_plan": 可选。仅当 needs_tools 为 true 且 missing_info 非空时，提供 {{ "steps": [ ... ] }} 用于先收集信息；steps 中每项含 id, thought, action, args, reasoning
+- "matched_skill": 字符串或 null。如果用户目标匹配到上面某个技能的触发词，填写技能名称；否则 null
 
 通用原则：**意图含糊时，confidence 降低并列出 missing_info，让阶段二去探测，不要硬选工具**
 
@@ -124,6 +120,8 @@ def build_classify_prompt(goal: str, context: str, tools_desc: str) -> str:
 - "帮我找一下 XXX" 类请求 → needs_tools=true，但通常一步就能完成
 - 闲聊、知识问答、代码解释类请求 → needs_tools=false
 - 如果判断 needs_tools=true 且 confidence >= 0.8 且 missing_info 为空，说明意图非常清晰，不需要信息收集
+- 如果用户请求匹配某个 skill 的触发词（如"找代码"匹配 reverse-tracking），设置 matched_skill 为对应技能名
+- matched_skill 不影响 needs_tools 和 confidence 的判断，它是一个附加信号
 
 示例结构：
 {{
@@ -137,7 +135,20 @@ def build_classify_prompt(goal: str, context: str, tools_desc: str) -> str:
     "steps": [
       {{"id": 1, "thought": "...", "action": "shell", "args": {{}}, "reasoning": "..."}}
     ]
-  }}
+  }},
+  "matched_skill": "reverse-tracking"
+}}
+
+若未匹配到任何技能：
+{{
+  "intent": "chat",
+  "needs_tools": false,
+  "intent_detail": "...",
+  "confidence": 0.9,
+  "missing_info": [],
+  "direct_reply": null,
+  "initial_plan": null,
+  "matched_skill": null
 }}"""
 
 

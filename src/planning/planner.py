@@ -48,7 +48,13 @@ class Planner:
     def classify(self, goal: str, context: str = "") -> IntentResult:
         """阶段一：理解意图、是否需要工具、缺省信息与可选的信息收集子计划。"""
         tools_desc = _format_tool_schemas(self.tool_schemas)
-        prompt = build_classify_prompt(goal=goal, context=context, tools_desc=tools_desc)
+        skills_triggers = self._build_skills_triggers()
+        prompt = build_classify_prompt(
+            goal=goal,
+            context=context,
+            tools_desc=tools_desc,
+            skills_triggers=skills_triggers,
+        )
         raw = self._call_llm(prompt)
         result = self._parse_intent(raw, goal=goal)
         if not result.needs_tools and result.confidence < _INTENT_CONFIDENCE_TOOL_FLOOR:
@@ -74,12 +80,24 @@ class Planner:
                     "intent_detail": phase1_result.intent_detail,
                     "confidence": phase1_result.confidence,
                     "missing_info": phase1_result.missing_info,
+                    "matched_skill": phase1_result.matched_skill,
                 },
                 ensure_ascii=False,
             )
         else:
             p1 = str(phase1_result)
         ex = exploration_results.strip() or "（未执行信息收集步骤或尚无情境结果。）"
+        if isinstance(phase1_result, IntentResult) and phase1_result.matched_skill:
+            from src.core import tools as tool_registry
+
+            skill_content = tool_registry.dispatch(
+                "skill_view", {"name": phase1_result.matched_skill}
+            )
+            if not skill_content.startswith("[Skill"):
+                ex = (
+                    f"\n## 已加载技能：{phase1_result.matched_skill}\n{skill_content}\n"
+                    + ex
+                )
         prompt = build_plan_prompt_v2(
             goal=goal,
             context=context,
@@ -210,6 +228,11 @@ class Planner:
             except PlanParseError:
                 initial = None
 
+        raw_ms = data.get("matched_skill")
+        matched_skill: str | None = None
+        if isinstance(raw_ms, str) and raw_ms.strip():
+            matched_skill = raw_ms.strip()
+
         return IntentResult(
             intent=intent,
             needs_tools=needs_tools,
@@ -218,6 +241,7 @@ class Planner:
             missing_info=missing,
             direct_reply=direct,
             initial_plan=initial,
+            matched_skill=matched_skill,
         )
 
     # ── 解析 ──
@@ -312,3 +336,23 @@ class Planner:
             if name:
                 actions.add(name)
         return actions
+
+    def _build_skills_triggers(self) -> str:
+        """从 skills 目录收集所有 trigger 词，格式化为紧凑文本。"""
+        from src.core.skills_tools import _iter_skills
+
+        skills = _iter_skills()
+        if not skills:
+            return ""
+        lines = []
+        for s in skills:
+            raw = s.get("triggers", [])
+            if isinstance(raw, str):
+                triggers = [raw] if raw.strip() else []
+            elif isinstance(raw, list):
+                triggers = [str(t) for t in raw if str(t).strip()]
+            else:
+                triggers = []
+            if triggers:
+                lines.append(f"- {s['name']}: {', '.join(triggers)}")
+        return "\n".join(lines) if lines else ""

@@ -285,15 +285,10 @@ PLATFORM_HINTS = """\
 本机 ~/.ssh/config 已配置好所有机器的 SSH 别名。在连接远程机器之前，**必须先用 project_context 工具加载 machines 项目**获取正确的 SSH 别名，不要猜测别名。
 在远程机器上执行 find 命令时，务必加 -maxdepth 限制深度（如 -maxdepth 5），避免搜索 NFS/NAS 大目录导致超时。
 
-# 定位代码/项目的方法论（重要！）
-当用户让你"找一下XX代码在哪里"时，**不要盲目 search_files 搜索整个文件系统**。
-正确做法是**反向追踪**：
-1. `which XX` → 找可执行文件
-2. `head -5 $(which XX)` → 看 shebang 和 import
-3. 从 import 路径定位源码目录
-4. `ls 源码目录` 确认结构
-如果 XX 不是命令：先查 projects_index 或记忆中的路径；没有的话 `ls ~` 快速扫目录名。
-**绝对不要**对整个主目录做 search_files/search_content，会超时且低效。"""
+# 技能加载（重要！）
+当用户请求涉及特定操作（如找代码、调试、写代码）时，先调用 skill_view 加载相关技能。
+可用 skills 列表见 system prompt，用 skills_list() 搜索，skill_view(name) 加载全文。
+加载后再执行，不要凭记忆硬编步骤。"""
 
 
 # ── Timestamp ────────────────────────────────────────────────────────────────

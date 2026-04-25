@@ -48,6 +48,7 @@ class Agent:
         self._tools_prompt_injected: bool = False
         self.last_total_tokens: int = 0  # 最近一次 LLM 调用的 total_tokens
         self.last_stop_reason: str | None = None  # 最近一次 LLM 的 stop reason
+        self._fast_path_tool_count: int = 0
 
         # 压缩配置（由外部注入，Agent 自己不读配置文件）
         self._compaction_config: CompactionConfig | None = compaction_config
@@ -105,6 +106,7 @@ class Agent:
 
     def _run_native(self) -> str:
         """原生 tool calling 主循环。"""
+        self._fast_path_tool_count = 0
         for _ in range(self.max_tool_rounds):
             try:
                 response = self.llm.chat(tools=self._tools)
@@ -128,12 +130,14 @@ class Agent:
                     tool_name = tool_call.function.name
                     arguments = tool_call.function.arguments
                     result = tool_registry.dispatch(tool_name, arguments)
+                    self._fast_path_tool_count += 1
                     self.llm.add_tool_result(tool_call.id, result)
 
         return "[错误] 工具调用轮次超过限制，请重新提问。"
 
     def _run_prompt_based(self) -> str:
         """prompt-based tool calling 主循环。"""
+        self._fast_path_tool_count = 0
         for _ in range(self.max_tool_rounds):
             try:
                 response = self.llm.chat(tools=self._tools)
@@ -161,6 +165,7 @@ class Agent:
                 arguments = {}
 
             result = tool_registry.dispatch(tool_name, arguments)
+            self._fast_path_tool_count += 1
             self.llm.messages.append({
                 "role": "user",
                 "content": f"<tool_result:{tool_name}>\n{result}\n</tool_result:{tool_name}>",
@@ -191,7 +196,13 @@ class Agent:
         if plan.status == PlanStatus.created:
             plan.confirm()
         result = self._executor.execute(plan)
+
+        # 反思与沉淀
+        reflection_hints = self._maybe_reflect(plan=plan, goal=plan.goal)
         self.current_plan = None
+
+        if reflection_hints:
+            result += "\n\n" + "\n".join(reflection_hints)
         return result
 
     def cancel_plan(self) -> str:
@@ -232,11 +243,36 @@ class Agent:
                 logger.debug(
                     f"Fast path: intent={intent.intent}, confidence={intent.confidence}"
                 )
+                if intent.matched_skill:
+                    skill_content = tool_registry.dispatch(
+                        "skill_view", {"name": intent.matched_skill}
+                    )
+                    if not skill_content.startswith("[Skill"):
+                        self.llm.messages.append({
+                            "role": "assistant",
+                            "content": (
+                                f"[系统] 已加载技能 {intent.matched_skill}，"
+                                "请按照技能指导执行。"
+                            ),
+                        })
+                        self.llm.add_user_message(skill_content)
                 self.current_plan = None
                 if self.llm.supports_native_tool_calling:
-                    return self._run_native()
+                    fp_result = self._run_native()
                 else:
-                    return self._run_prompt_based()
+                    fp_result = self._run_prompt_based()
+
+                # Fast Path 反思
+                fp_tool_count = getattr(self, "_fast_path_tool_count", 0)
+                reflection_hints = self._maybe_reflect(
+                    goal=user_input,
+                    is_fast_path=True,
+                    tool_call_count=fp_tool_count,
+                    intent=intent.intent,
+                )
+                if reflection_hints:
+                    fp_result += "\n\n" + "\n".join(reflection_hints)
+                return fp_result
 
             exploration_results = ""
             if (
@@ -365,3 +401,46 @@ class Agent:
             return response.choices[0].message.content or ""
         except Exception:
             return history[:500]
+
+    def _maybe_reflect(
+        self,
+        goal: str = "",
+        plan: Plan | None = None,
+        is_fast_path: bool = False,
+        tool_call_count: int = 0,
+        intent: str = "",
+    ) -> list[str]:
+        """任务完成后触发反思，自动沉淀 skill 或 project 信息。返回人类可读提示列表。"""
+        from src.core.reflection import (
+            should_reflect,
+            reflect_and_learn,
+            execute_learnings,
+            format_execution_summary,
+        )
+
+        if not should_reflect(
+            plan=plan,
+            is_fast_path=is_fast_path,
+            tool_call_count=tool_call_count,
+            intent=intent,
+        ):
+            return []
+
+        # 构建执行摘要
+        if plan is not None:
+            exec_summary = format_execution_summary(plan)
+        else:
+            exec_summary = f"Fast Path 任务，调用了 {tool_call_count} 个工具"
+
+        try:
+            learnings = reflect_and_learn(
+                goal=goal,
+                execution_summary=exec_summary,
+                llm_client=self.llm,
+            )
+            if not learnings:
+                return []
+            return execute_learnings(learnings)
+        except Exception as e:
+            logger.warning(f"反思过程异常: {e}")
+            return []

@@ -97,6 +97,8 @@ class IntentResult:
     direct_reply: str | None = None
     # 当 missing_info 非空时，由 LLM 给出用于收集信息的步骤；可能为空
     initial_plan: "Plan | None" = None
+    # 阶段一 classify 中若用户目标匹配某 skill 的 trigger，填技能名；否则为 None
+    matched_skill: str | None = None
 
 
 @dataclass
