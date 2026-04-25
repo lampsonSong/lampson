@@ -29,14 +29,14 @@ class MessageDeduplicator:
     同一消息在 TTL 窗口内只处理一次。
     """
 
-    def __init__(self, ttl_seconds: int = 60, max_size: int = 10000) -> None:
+    def __init__(self, ttl_seconds: int = 600, max_size: int = 10000) -> None:
         self._seen: dict[str, float] = {}
         self._lock = threading.Lock()
         self._ttl = ttl_seconds
         self._max_size = max_size
 
     def is_duplicate(self, message_id: str) -> bool:
-        """返回 True 表示该消息已被处理过（去重）。"""
+        """返回 True 表示该消息已被处理过（去重）。只检查，不写入。"""
         now = time.monotonic()
         with self._lock:
             # 清理过期条目
@@ -44,20 +44,15 @@ class MessageDeduplicator:
             for mid in expired:
                 del self._seen[mid]
 
-            if message_id in self._seen:
-                return True
+            return message_id in self._seen
 
+    def mark_processed(self, message_id: str) -> None:
+        """标记一条消息为已处理（处理成功后调用）。"""
+        with self._lock:
             # 防止无限膨胀
             if len(self._seen) >= self._max_size:
                 oldest = min(self._seen, key=self._seen.get)
                 del self._seen[oldest]
-
-            self._seen[message_id] = now
-            return False
-
-    def mark_processed(self, message_id: str) -> None:
-        """手动标记一条消息为已处理（用于确认处理成功）。"""
-        with self._lock:
             self._seen[message_id] = time.monotonic()
 
 
@@ -150,7 +145,12 @@ class FeishuListener:
 
             # 走 Session（推荐）或直接走 agent（向后兼容）
             if self._session is not None:
-                result = self._session.handle_input(text)
+                # 注入实时消息回调，供 /model all 等流式场景使用
+                self._session.partial_sender = lambda text: self._send_reply(chat_id, text)
+                try:
+                    result = self._session.handle_input(text)
+                finally:
+                    self._session.partial_sender = None
                 reply = result.reply
                 if result.compaction_msg:
                     print(f"[listener] {result.compaction_msg}", flush=True)

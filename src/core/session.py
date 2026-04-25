@@ -79,6 +79,8 @@ class Session:
         # 多个模型的 LLM 客户端 {model_name: LLMClient}
         self.llm_clients: dict[str, Any] = {}
         self._current_model_name: str = ""
+        # 实时消息回调：由 listener 注入，用于 /model all 等流式场景
+        self.partial_sender: Callable[[str], None] | None = None
 
     # ── 工厂方法 ──
 
@@ -114,7 +116,12 @@ class Session:
                 )
 
         compaction_cfg = _build_compaction_config(config)
-        agent = Agent(primary_llm, compaction_config=compaction_cfg)
+        max_tool_rounds = config.get("max_tool_rounds")
+        agent = Agent(
+            primary_llm,
+            compaction_config=compaction_cfg,
+            max_tool_rounds=max_tool_rounds,
+        )
         agent.set_context(core_memory=core_memory)
         agent.skills = skills
 
@@ -350,26 +357,133 @@ class Session:
             return "\n".join(lines)
 
         if parts[1].lower() == "all":
-            # /model all <question> → 并行查询所有模型
+            # /model all <question> → 并行查询所有模型（带工具调用）
             question = " ".join(parts[2:])
             if not question.strip():
                 return "用法: /model all <问题内容>"
 
-            results: dict[str, str] = {}
+            tools_schemas = self.agent._tools
 
             def query_model(name: str, client: Any) -> tuple[str, str]:
+                """完整工具调用循环，每轮实时反馈，最终标记 end turn。"""
+                import json as _json
+                import re as _re
+                from src.core import tools as _tool_reg
+
+                _TOOL_CALL_RE = _re.compile(
+                    r"<tool_call:\s*(\w+)\s*>\s*(.*?)\s*</tool_call:\s*\1\s*>",
+                    _re.DOTALL,
+                )
+                max_rounds = self.agent.max_tool_rounds
+                sender = self.partial_sender  # 闭包捕获
+
+                def _send(text: str) -> None:
+                    """发送一条中间消息。"""
+                    if sender:
+                        try:
+                            sender("[{}] {}".format(name, text))
+                        except Exception:
+                            pass
+
                 try:
-                    tmp = client.clone()
-                    # clone() 深拷贝了完整历史，但 /model all 只需要 system prompt + question
-                    # 保留 messages[0]（system prompt），丢弃其余历史
-                    if tmp.messages:
-                        tmp.messages = [tmp.messages[0]]
+                    tmp = client.clone_for_inference()
+                    # clone_for_inference() 只带 system prompt，避免无用的深拷贝
+                    # prompt-based 模式需要手动注入工具描述到 messages
+                    if not tmp.supports_native_tool_calling:
+                        tools_prompt = LLMClient.format_tools_prompt(tools_schemas)
+                        tmp.messages.append({"role": "system", "content": tools_prompt})
                     tmp.add_user_message(question)
-                    resp = tmp.chat(tools=None)
-                    answer = resp.choices[0].message.content or "（无内容）"
-                    return name, answer
+
+                    for round_num in range(max_rounds):
+                        resp = tmp.chat(tools=tools_schemas)
+                        msg = resp.choices[0].message
+
+                        if tmp.supports_native_tool_calling:
+                            if not msg.tool_calls:
+                                final_text = msg.content or ""
+                                _send("=== end turn ===\n" + final_text)
+                                return name, ""
+                            for tc in msg.tool_calls:
+                                _send("Round {}: 调用 {}({})".format(
+                                    round_num + 1,
+                                    tc.function.name,
+                                    tc.function.arguments[:200],
+                                ))
+                                result = _tool_reg.dispatch(tc.function.name, tc.function.arguments)
+                                result_preview = result[:500] + ("..." if len(result) > 500 else "")
+                                _send("  结果: " + result_preview)
+                                tmp.add_tool_result(tc.id, result)
+                        else:
+                            content = msg.content or ""
+                            match = _TOOL_CALL_RE.search(content)
+                            _fallback = False
+                            if not match:
+                                # 兜底：尝试解析裸 JSON（部分模型不遵守 <tool_call:xxx> 格式）
+                                # 例如直接输出 {"command": "ls", "timeout": 30}
+                                _json_match = _re.search(
+                                    r'\{[^{}]*"(?:command|query|path|name)' ,
+                                    content,
+                                )
+                                if _json_match:
+                                    start = _json_match.start()
+                                    depth = 0
+                                    end = start
+                                    for i in range(start, len(content)):
+                                        if content[i] == '{':
+                                            depth += 1
+                                        elif content[i] == '}':
+                                            depth -= 1
+                                            if depth == 0:
+                                                end = i + 1
+                                                break
+                                    raw_json = content[start:end]
+                                    try:
+                                        parsed = _json.loads(raw_json)
+                                        # 根据 key 推断工具名
+                                        if "command" in parsed:
+                                            tool_name = "shell"
+                                        elif "query" in parsed and "name" not in parsed:
+                                            tool_name = "web_search"
+                                        elif "path" in parsed and "content" not in parsed:
+                                            tool_name = "file_read"
+                                        elif "path" in parsed and "content" in parsed:
+                                            tool_name = "file_write"
+                                        elif "name" in parsed:
+                                            tool_name = "project_context"
+                                        else:
+                                            _send("=== end turn ===\n" + content)
+                                            return name, ""
+                                        raw_args = raw_json
+                                        _fallback = True
+                                    except _json.JSONDecodeError:
+                                        pass
+                                if not _fallback:
+                                    _send("=== end turn ===\n" + content)
+                                    return name, ""
+                            if not _fallback:
+                                tool_name = match.group(1).strip()
+                                raw_args = match.group(2).strip()
+                            _send("Round {}: 调用 {}({})".format(
+                                round_num + 1, tool_name, raw_args[:200],
+                            ))
+                            try:
+                                args = _json.loads(raw_args)
+                            except _json.JSONDecodeError:
+                                args = {}
+                            result = _tool_reg.dispatch(tool_name, args)
+                            result_preview = result[:500] + ("..." if len(result) > 500 else "")
+                            _send("  结果: " + result_preview)
+                            tmp.messages.append({
+                                "role": "user",
+                                "content": "<tool_result:{}>\n{}\n</tool_result:{}>".format(tool_name, result, tool_name),
+                            })
+
+                    _send("=== end turn ===\n[超过 {} 轮限制]".format(max_rounds))
+                    return name, ""
+
                 except Exception as e:
-                    return name, f"[请求失败: {e}]"
+                    _send("=== end turn ===\n[请求失败: {}]".format(e))
+                    return name, ""
 
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=len(self.llm_clients)
@@ -379,22 +493,19 @@ class Session:
                     for name, client in self.llm_clients.items()
                 }
                 try:
-                    for future in concurrent.futures.as_completed(futures, timeout=90):
-                        name, answer = future.result()
-                        results[name] = answer
+                    for future in concurrent.futures.as_completed(futures, timeout=180):
+                        name, _ = future.result()
                 except concurrent.futures.TimeoutError:
-                    # 超时的模型标记为未响应
                     for name in self.llm_clients:
-                        if name not in results:
-                            results[name] = "[请求超时]"
+                        sender = self.partial_sender
+                        if sender:
+                            try:
+                                sender("[{}] === end turn ===\n[请求超时]".format(name))
+                            except Exception:
+                                pass
 
-            # 按模型名字典序输出，便于对比
-            lines = []
-            for name in sorted(results):
-                lines.append(f"=== {name} ===")
-                lines.append(results[name])
-                lines.append("")
-            return "\n".join(lines).strip()
+            # 所有消息已通过 partial_sender 实时发出，不再返回汇总
+            return ""
 
         # /model <name> → 切换模型（方案B：迁移对话历史到新 client）
         target_name = parts[1]

@@ -173,6 +173,19 @@ class Executor:
             resolved[key] = value
         return resolved
 
+    @staticmethod
+    def _safe_replace_value(result: str) -> str:
+        """将引用结果转为可安全嵌入的文本。
+
+        多行结果只取第一行（避免破坏 shell 命令语法），
+        并去除首尾空白。
+        """
+        if not result:
+            return ""
+        # 多行结果取第一行
+        first_line = result.split("\n", 1)[0].strip()
+        return first_line
+
     def _resolve_refs(self, text: str, plan: Plan, step_index: int) -> str:
         """替换文本中的所有引用。"""
         # $prev.result → 上一步的结果
@@ -187,7 +200,7 @@ class Executor:
                     step_index + 1,
                     f"$prev.result 引用的步骤{prev.id}尚未执行完成",
                 )
-            text = text.replace("$prev.result", prev.result)
+            text = text.replace("$prev.result", self._safe_replace_value(prev.result))
 
         # $step[N].result → 第 N 步的结果
         for match in re.finditer(r"\$step\[(\d+)\]\.result", text):
@@ -202,7 +215,7 @@ class Executor:
                     step_index + 1,
                     f"$step[{ref_id}].result 引用的步骤尚未执行完成",
                 )
-            text = text.replace(match.group(0), ref_step.result)
+            text = text.replace(match.group(0), self._safe_replace_value(ref_step.result))
 
         # $goal → 用户原始目标
         text = text.replace("$goal", plan.goal)

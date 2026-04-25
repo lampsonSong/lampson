@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-MAX_TOOL_ROUNDS = 10
+_DEFAULT_MAX_TOOL_ROUNDS = 30
 
 _TOOL_CALL_PATTERN = re.compile(
     r"<tool_call:\s*(\w+)\s*>\s*(.*?)\s*</tool_call:\s*\1\s*>",
@@ -38,6 +38,7 @@ class Agent:
         self,
         llm: LLMClient,
         compaction_config: CompactionConfig | None = None,
+        max_tool_rounds: int | None = None,
     ) -> None:
         self.llm = llm
         self._tools = tool_registry.get_all_schemas()
@@ -50,6 +51,9 @@ class Agent:
 
         # 压缩配置（由外部注入，Agent 自己不读配置文件）
         self._compaction_config: CompactionConfig | None = compaction_config
+
+        # 工具调用最大轮次
+        self.max_tool_rounds: int = max_tool_rounds or _DEFAULT_MAX_TOOL_ROUNDS
 
         # 规划状态
         self.current_plan: Plan | None = None
@@ -101,7 +105,7 @@ class Agent:
 
     def _run_native(self) -> str:
         """原生 tool calling 主循环。"""
-        for _ in range(MAX_TOOL_ROUNDS):
+        for _ in range(self.max_tool_rounds):
             try:
                 response = self.llm.chat(tools=self._tools)
             except RuntimeError as e:
@@ -130,7 +134,7 @@ class Agent:
 
     def _run_prompt_based(self) -> str:
         """prompt-based tool calling 主循环。"""
-        for _ in range(MAX_TOOL_ROUNDS):
+        for _ in range(self.max_tool_rounds):
             try:
                 response = self.llm.chat(tools=self._tools)
             except RuntimeError as e:

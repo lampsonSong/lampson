@@ -164,17 +164,21 @@ class LLMClient:
         self.model = model
         self._prompt_builder = PromptBuilder(model=model)
 
-    def clone(self) -> "LLMClient":
-        """创建一个新实例，共享 client 配置但有独立的 messages 历史（深拷贝）。"""
+    def clone_for_inference(self) -> "LLMClient":
+        """创建一个新实例，仅带 system prompt（用于 /model all 临时查询）。
+
+        messages[0]（system prompt）直接引用，不拷贝；其余消息为空。
+        既避免并发竞态（独立 client 实例），又避免无用的深拷贝。
+        """
         new_client = LLMClient(
             api_key=self.api_key,
             base_url=self.base_url,
             model=self.model,
             supports_native_tool_calling=self.supports_native_tool_calling,
         )
-        # 深拷贝 messages，避免并发竞态
+        # 只保留 system prompt，不拷贝历史
         if self.messages:
-            new_client.messages = copy.deepcopy(self.messages)
+            new_client.messages = [self.messages[0]]
         return new_client
 
     def migrate_from(self, source: "LLMClient") -> None:
