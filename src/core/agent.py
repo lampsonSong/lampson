@@ -16,7 +16,7 @@ from src.core import tools as tool_registry
 from src.core.compaction import CompactionConfig, CompactionResult, apply_compaction
 from src.planning.planner import Planner, PlanParseError
 from src.planning.executor import Executor
-from src.planning.steps import Plan, PlanStatus
+from src.planning.steps import IntentResult, Plan, PlanStatus
 from src.planning.prompts import build_context_from_history
 
 if TYPE_CHECKING:
@@ -58,7 +58,7 @@ class Agent:
         # 规划状态
         self.current_plan: Plan | None = None
         self._planner = Planner(llm=llm, tool_schemas=self._tools)
-        self._executor = Executor(llm=llm)
+        self._executor = Executor(llm=llm, planner=self._planner)
 
     def refresh_tools(self) -> None:
         """重新加载工具列表（外部注册新工具后调用）。"""
@@ -168,13 +168,26 @@ class Agent:
 
         return "[错误] 工具调用轮次超过限制，请重新提问。"
 
+    def _reply_without_tools(self, user_input: str, phase1: IntentResult) -> str:
+        """阶段一判断无需工具时，用直接回复或主 LLM 生成自然语言回答。"""
+        if phase1.direct_reply and phase1.direct_reply.strip():
+            text = phase1.direct_reply.strip()
+            self.llm.messages.append({"role": "assistant", "content": text})
+            return text
+        try:
+            response = self.llm.chat(tools=None)
+        except RuntimeError as e:
+            return f"[LLM 错误] {e}"
+        if response.usage:
+            self.last_total_tokens = response.usage.total_tokens
+        return response.choices[0].message.content or ""
+
     def run(self, user_input: str) -> str:
         """处理一轮用户输入，返回最终回复文本。
 
-        所有输入统一走规划器：
-        - 1-step plan → 退化直接执行（行为和之前单轮一致）
-        - N-step plan → 展示计划 → 自动执行 → 汇总
-        - 规划失败 → 回退到原有单轮模式
+        v2：先阶段一分类 → 不需要工具则直接答；需要工具时可选信息收集 →
+        阶段二 plan_v2 → 执行器（含重试与 replan）。
+        若分类或规划解析失败，回退到 v1/单轮模式。
         """
         if not self.llm.supports_native_tool_calling:
             self._inject_tools_prompt()
@@ -185,22 +198,39 @@ class Agent:
         context = build_context_from_history(self.llm.get_history(), max_chars=1500)
 
         try:
-            # 规划
-            plan = self._planner.plan(goal=user_input, context=context)
+            intent = self._planner.classify(goal=user_input, context=context)
+
+            if not intent.needs_tools:
+                self.current_plan = None
+                return self._reply_without_tools(user_input, intent)
+
+            exploration_results = ""
+            if (
+                intent.missing_info
+                and intent.initial_plan is not None
+                and len(intent.initial_plan.steps) > 0
+            ):
+                ip = intent.initial_plan
+                ip.goal = user_input
+                ex_out = self._executor.execute(ip, synthesize=False, record_to_history=False)
+                exploration_results = ex_out
+
+            plan = self._planner.plan_v2(
+                goal=user_input,
+                context=context,
+                phase1_result=intent,
+                exploration_results=exploration_results,
+            )
             self.current_plan = plan
 
             if plan.is_single_step:
-                # 1-step 退化：直接执行，不展示计划
                 logger.debug(f"1-step plan: {plan.steps[0].action}")
             else:
-                # 多步计划：记录日志
                 logger.info(
                     f"计划生成: {plan.plan_summary} ({len(plan.steps)} 步)"
                 )
 
-            # 执行
-            result = self._executor.execute(plan)
-            return result
+            return self._executor.execute(plan)
 
         except PlanParseError as e:
             logger.warning(f"规划失败，回退到单轮模式: {e}")

@@ -65,6 +65,41 @@ class StepResult:
 
 
 @dataclass
+class StepEvaluation:
+    """单步执行结果的启发式评估（用于重试 / replan 决策）。"""
+
+    ok: bool
+    reason: str = ""
+    should_retry: bool = False
+    is_plan_flawed: bool = False
+
+
+@dataclass
+class FailedAttempt:
+    """某一步失败时的记录，供 replan 注入。"""
+
+    step_id: int
+    action: str
+    args: dict
+    error: str
+    tried_solutions: list[str] = field(default_factory=list)
+
+
+@dataclass
+class IntentResult:
+    """阶段一：意图分类与是否需要工具的输出。"""
+
+    intent: str
+    needs_tools: bool
+    intent_detail: str
+    confidence: float
+    missing_info: list[str] = field(default_factory=list)
+    direct_reply: str | None = None
+    # 当 missing_info 非空时，由 LLM 给出用于收集信息的步骤；可能为空
+    initial_plan: "Plan | None" = None
+
+
+@dataclass
 class Plan:
     """完整执行计划。"""
 
@@ -75,6 +110,8 @@ class Plan:
     plan_summary: str = ""  # 一句话描述计划
     created_at: float = field(default_factory=time.time)
     current_step_index: int = 0  # 执行到第几步
+    expected_result: str = ""  # 阶段二可选：计划完成后预期
+    failed_attempts: list[FailedAttempt] = field(default_factory=list)
 
     # ── 状态转换 ──
 
@@ -123,6 +160,23 @@ class Plan:
             if s.id == step_id:
                 return s
         return None
+
+    def add_failure(self, attempt: FailedAttempt) -> None:
+        """将一次失败尝试记入计划，供后续 replan 使用。"""
+        self.failed_attempts.append(attempt)
+
+    def get_failure_context(self) -> str:
+        """将失败历史格式化为可注入 replan 的文本。"""
+        if not self.failed_attempts:
+            return ""
+        lines: list[str] = ["## 之前的失败尝试"]
+        for f in self.failed_attempts:
+            args_repr = f.args if isinstance(f.args, dict) else {}
+            lines.append(f"- 步骤{f.step_id}: {f.action}({args_repr})")
+            lines.append(f"  错误: {f.error}")
+            tried = ", ".join(f.tried_solutions) if f.tried_solutions else "（无）"
+            lines.append(f"  已尝试: {tried}")
+        return "\n".join(lines)
 
     def format_for_display(self) -> str:
         """格式化为用户可见的执行计划。"""

@@ -91,6 +91,36 @@ PROJECT_CONTEXT_SCHEMA = {
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
 
+def _format_memory_file_entry(md_file: Path, base_dir: Path, preview_len: int) -> str | None:
+    """读取 markdown 并格式化为 `### 标题` + 预览；标题优先用首行 ``#``，子目录下加路径前缀。"""
+    try:
+        content = md_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not content:
+        return None
+    preview = content[:preview_len] + "\n..." if len(content) > preview_len else content
+    rel_path = md_file.relative_to(base_dir)
+    title = md_file.stem
+    first_line = content.split("\n", 1)[0].strip()
+    if first_line.startswith("# "):
+        parsed = first_line[2:].strip()
+        if parsed:
+            title = parsed
+    if rel_path.parent != Path("."):
+        parent_name = " > ".join(rel_path.parent.parts)
+        if parent_name:
+            title = f"{parent_name} > {title}"
+    return f"### {title}\n\n{preview}"
+
+
+def _safe_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def _parse_skill(path: Path) -> dict[str, Any] | None:
     """解析 SKILL.md。"""
     try:
@@ -211,14 +241,9 @@ def memory_show(params: dict[str, Any]) -> str:
     if PROJECTS_DIR.exists():
         projects: list[str] = []
         for md_file in sorted(PROJECTS_DIR.rglob("*.md")):
-            try:
-                content = md_file.read_text(encoding="utf-8").strip()
-                if not content:
-                    continue
-                preview = content[:300] + "\n..." if len(content) > 300 else content
-                projects.append(f"### {md_file.stem}\n\n{preview}")
-            except OSError:
-                pass
+            block = _format_memory_file_entry(md_file, PROJECTS_DIR, 300)
+            if block:
+                projects.append(block)
         if projects:
             sections.append(
                 f"## 项目（{len(projects)} 个）\n\n" + "\n\n".join(projects)
@@ -237,21 +262,17 @@ def memory_show(params: dict[str, Any]) -> str:
             f"## 技能（{len(skills)} 个）\n\n" + "\n".join(skill_lines)
         )
 
-    # 4. 最近会话摘要
+    # 4. 最近会话摘要（按修改时间，含子目录）
     sessions_dir = LAMPSON_DIR / "memory" / "sessions"
     if sessions_dir.exists():
-        session_files = sorted(sessions_dir.glob("*.md"), reverse=True)[:3]
+        all_session_files = [p for p in sessions_dir.rglob("*.md") if p.is_file()]
+        session_files = sorted(all_session_files, key=_safe_mtime, reverse=True)[:3]
         if session_files:
-            session_lines = []
+            session_lines: list[str] = []
             for sf in session_files:
-                try:
-                    content = sf.read_text(encoding="utf-8").strip()
-                    if not content:
-                        continue
-                    preview = content[:500] + "\n..." if len(content) > 500 else content
-                    session_lines.append(f"### {sf.stem}\n\n{preview}")
-                except OSError:
-                    pass
+                block = _format_memory_file_entry(sf, sessions_dir, 500)
+                if block:
+                    session_lines.append(block)
             if session_lines:
                 sections.append(
                     f"## 最近会话摘要\n\n" + "\n\n".join(session_lines)

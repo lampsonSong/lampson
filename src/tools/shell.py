@@ -21,6 +21,13 @@ DANGEROUS_PATTERNS = [
 
 _DANGER_RE = [re.compile(p) for p in DANGEROUS_PATTERNS]
 
+# 命令行长度上限（与文件读取 100KB 量级一致，且远低于系统 ARG_MAX）
+MAX_COMMAND_LENGTH = 100_000
+
+# cat/rm 等后接通配（避免 cat *.py、cat src/* 等滥用）
+_GLOB_ABUSE_RE = re.compile(
+    r"\b(cat|rm|mv|cp|less|head|tail)\b[^\n#;]*?[\*]"
+)
 
 def is_dangerous(command: str) -> bool:
     for pattern in _DANGER_RE:
@@ -29,10 +36,25 @@ def is_dangerous(command: str) -> bool:
     return False
 
 
-def execute_shell(command: str, timeout: int = 60) -> str:
+def _has_glob_abuse(command: str) -> bool:
+    return bool(_GLOB_ABUSE_RE.search(command))
+
+
+def execute_shell(command: str, timeout: int = 30) -> str:
     """执行 shell 命令，返回 stdout + stderr 合并字符串。"""
+    if len(command) > MAX_COMMAND_LENGTH:
+        return (
+            f"[拒绝执行] 命令过长（{len(command)} 字符），上限为 {MAX_COMMAND_LENGTH}，"
+            "请缩短或拆成多步/分批执行。"
+        )
     if is_dangerous(command):
         return f"[拒绝执行] 该命令被识别为危险操作，已拦截：{command}"
+    if _has_glob_abuse(command):
+        return (
+            "[拒绝执行] 检测到对 cat/rm 等使用通配符（如 *.py、src/*），"
+            "请改为明确路径、使用 `search_files` / `search_content` 或分文件读取，"
+            "避免一次展开大量文件。"
+        )
 
     try:
         result = subprocess.run(
@@ -70,8 +92,8 @@ SCHEMA: dict[str, Any] = {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "超时秒数，默认 60",
-                    "default": 60,
+                    "description": "超时秒数，默认 30，最长 120",
+                    "default": 30,
                 },
             },
             "required": ["command"],
@@ -82,7 +104,9 @@ SCHEMA: dict[str, Any] = {
 
 def run(params: dict[str, Any]) -> str:
     command = params.get("command", "")
-    timeout = int(params.get("timeout", 60))
+    timeout = int(params.get("timeout", 30))
+    # 上限 120 秒，防止 LLM 设置过长的超时
+    timeout = min(timeout, 120)
     if not command:
         return "[错误] command 参数不能为空"
     return execute_shell(command, timeout=timeout)

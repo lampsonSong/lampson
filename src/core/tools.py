@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from src.tools import shell as shell_tool
 from src.tools import fileops as fileops_tool
+from src.tools import search as search_tool
 from src.tools import web as web_tool
 from src.feishu import client as feishu_client
 from src.core import skills_tools
@@ -23,6 +24,8 @@ def _register(schema: dict[str, Any], runner: ToolRunner) -> None:
 
 
 _register(shell_tool.SCHEMA, shell_tool.run)
+_register(search_tool.SEARCH_FILES_SCHEMA, search_tool.run_search_files)
+_register(search_tool.SEARCH_CONTENT_SCHEMA, search_tool.run_search_content)
 _register(fileops_tool.FILE_READ_SCHEMA, fileops_tool.run_file_read)
 _register(fileops_tool.FILE_WRITE_SCHEMA, fileops_tool.run_file_write)
 _register(web_tool.SCHEMA, web_tool.run)
