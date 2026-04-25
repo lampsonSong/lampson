@@ -634,7 +634,7 @@ vim ~/.lampson/config.yaml
 | 网页搜索 | done | DuckDuckGo HTML |
 | 飞书发送/读取 | done | REST API |
 | 飞书 WebSocket 监听 | done | 长连接 + 去重，走 Session |
-| 飞书轮询监听 | done | 备选方案 |
+| 飞书轮询监听 | done | 备选方案（已删除，只保留 WebSocket） |
 | 核心记忆 | done | core.md 全量加载 |
 | 会话摘要 | done | 退出时写入 |
 | 技能系统 | done | 发现/匹配/加载 |
@@ -643,9 +643,37 @@ vim ~/.lampson/config.yaml
 | Prompt 分层 | done | 9层 system prompt |
 | Context Compaction | done | 三阶段压缩，14个测试全通过 |
 | 任务规划 (Planning) | done | Plan-and-Execute，30个测试全通过 |
+| /model 多模型对比 | done | `/model all` 并发实时流式对比，`/model <name>` 切换（方案B） |
+| 过期消息丢弃 | done | 飞书投递延迟 >60s 的消息自动丢弃 |
 | 项目文档 | done | PROJECT.md 完整梳理 |
 
-### 8.2 当前阶段：v0.2 — 智能化增强
+### 8.2 2026-04-25 更新：/model 多模型对比 + 飞书稳定性
+
+**改动概要**（commit `7d9a9e3` + `c3eef23`）：
+
+| 改动 | 文件 | 说明 |
+|------|------|------|
+| `/model all` 多模型实时对比 | `session.py` | 并发查询多个模型，每轮工具调用实时通过飞书 partial_sender 推送 |
+| `/model <name>` 模型切换（方案B） | `session.py`, `agent.py` | 切换时迁移对话历史到新 client，system prompt 按模型重新生成 |
+| clone_for_inference | `llm.py` | 只带 system prompt 的轻量克隆，用于 /model all 避免深拷贝 |
+| 裸 JSON 工具调用解析 | `session.py` | GPTOssModel 有时输出 `{"command":"..."}` 不走 `<tool_call:xxx>` 格式，加 json.loads fallback |
+| PLATFORM_HINTS 远程机器提示 | `prompt_builder.py` | 强制要求先 `project_context("machines")` 获取 SSH 别名，find 加 `-maxdepth` |
+| max_tool_rounds 可配置 | `config.yaml`, `agent.py` | 从 config 读取，默认 30 |
+| MessageDeduplicator TTL | `listener.py` | 60s → 600s，/model all 工具调用耗时超过 60s 导致重复处理 |
+| 过期消息丢弃 | `listener.py` | 投递延迟超过 60 秒的消息直接丢弃，防止飞书 WebSocket 积压后补投旧消息 |
+| executor `_safe_replace_value` | `executor.py` | 多行 `$step[N].result` 引用截断为第一行，避免破坏 shell 命令语法 |
+| 删除 poller.py | `feishu/` | 只保留 WebSocket listener 模式 |
+
+**当前模型配置**：
+
+| 模型 | base_url | tool calling 模式 |
+|------|----------|------------------|
+| GPTOssModel | `http://openai-gpt.test.beemai.svc/v1` | prompt-based（无原生 tool_calls） |
+| MiniMax-M2.7-highspeed | `https://api.minimaxi.com/v1/` | native tool_calls |
+
+**部署**：launchd 守护 (`~/Library/LaunchAgents/com.lampson.gateway.plist`)，日志 `~/.lampson/logs/launchd.log`
+
+### 8.3 当前阶段：v0.2 — 智能化增强
 
 从"能跑的工具箱"进化到"能独立做复杂任务的智能体"。
 
@@ -713,14 +741,15 @@ vim ~/.lampson/config.yaml
 
 ## 九、已知问题和限制
 
-1. **飞书 WebSocket 重连**：网络波动时断线后不会自动重连，需手动重启 `/serve`
+1. **飞书 WebSocket 重连**：网络波动时断线后不会自动重连，需手动重启
 2. **Session summary 生成**：退出时用临时 LLMClient 生成摘要，若 API 异常则回退到截取前500字
 3. **危险命令拦截**：正则匹配可能漏掉变形写法
 4. **文件大小限制**：读文件 100KB 上限，大文件场景需多次分段读取
 5. **Skills 语义匹配**：`match_skill_with_llm()` 需要额外 LLM 调用，有延迟和 token 开销
 6. **Compaction 压缩质量**：依赖 LLM 对内容价值的判断，可能误判归档/丢弃
 7. **Planning prompt 待优化**：Replan 场景的 prompt 需要更多测试数据打磨
-8. **工具无法并发**：Agent 主循环是串行的，多个独立工具调用无法并行
+8. **MiniMax 不稳定读 machines**：有时跳过 `project_context("machines")` 直接猜 SSH 别名，需在 system prompt 中强制要求
+9. **GPTOssModel 输出不确定**：低 temperature（0.3）下稳定走 `<tool_call:xxx>` 格式，高 temperature 偶尔返回空 content
 
 ---
 
@@ -753,8 +782,7 @@ vim ~/.lampson/config.yaml
 | `src/memory/manager.py` | 记忆管理器 |
 | `src/skills/manager.py` | 技能管理器 |
 | `src/feishu/client.py` | 飞书 API 客户端 |
-| `src/feishu/listener.py` | 飞书 WebSocket 监听（纯 Gateway） |
-| `src/feishu/poller.py` | 飞书轮询器 |
+| `src/feishu/listener.py` | 飞书 WebSocket 监听 + 消息去重 + 过期丢弃 |
 | `src/tools/shell.py` | Shell 执行工具 |
 | `src/tools/fileops.py` | 文件读写工具 |
 | `src/tools/web.py` | 网页搜索工具 |
