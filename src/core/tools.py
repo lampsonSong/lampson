@@ -31,6 +31,7 @@ _register(feishu_client.FEISHU_READ_SCHEMA, feishu_client.tool_feishu_read)
 _register(skills_tools.SKILL_VIEW_SCHEMA, skills_tools.skill_view)
 _register(skills_tools.SKILLS_LIST_SCHEMA, skills_tools.skills_list)
 _register(skills_tools.PROJECT_CONTEXT_SCHEMA, skills_tools.project_context)
+_register(skills_tools.MEMORY_SHOW_SCHEMA, skills_tools.memory_show)
 
 
 def get_all_schemas() -> list[dict[str, Any]]:

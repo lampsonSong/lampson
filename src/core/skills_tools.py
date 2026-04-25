@@ -52,6 +52,24 @@ SKILLS_LIST_SCHEMA = {
     }
 }
 
+MEMORY_SHOW_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "memory_show",
+        "description": (
+            "展示你记住的所有内容，包括：核心记忆(core.md)、项目列表及摘要、"
+            "技能列表、最近会话摘要。"
+            "当用户问'你都记了啥'、'你记住了什么'、'看看你的记忆'、"
+            "'show me your memory'等查看记忆类问题时使用此工具。"
+            "这是一个聚合查询，一次性返回所有已存储的内容。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {}
+        }
+    }
+}
+
 PROJECT_CONTEXT_SCHEMA = {
     "type": "function",
     "function": {
@@ -173,3 +191,73 @@ def project_context(params: dict[str, Any]) -> str:
     if not name:
         return "project_context 需要 name 参数，例如：project_context(name=\"Lampson\")"
     return _load(name)
+
+
+def memory_show(params: dict[str, Any]) -> str:
+    """展示所有已存储的记忆内容（核心记忆 + 项目 + 技能 + 会话摘要）。"""
+    sections: list[str] = []
+
+    # 1. 核心记忆
+    core_path = LAMPSON_DIR / "memory" / "core.md"
+    if core_path.exists():
+        try:
+            content = core_path.read_text(encoding="utf-8").strip()
+            if content:
+                sections.append(f"## 核心记忆\n\n{content}")
+        except OSError:
+            pass
+
+    # 2. 项目列表
+    if PROJECTS_DIR.exists():
+        projects: list[str] = []
+        for md_file in sorted(PROJECTS_DIR.rglob("*.md")):
+            try:
+                content = md_file.read_text(encoding="utf-8").strip()
+                if not content:
+                    continue
+                preview = content[:300] + "\n..." if len(content) > 300 else content
+                projects.append(f"### {md_file.stem}\n\n{preview}")
+            except OSError:
+                pass
+        if projects:
+            sections.append(
+                f"## 项目（{len(projects)} 个）\n\n" + "\n\n".join(projects)
+            )
+
+    # 3. 技能列表
+    skills = _iter_skills()
+    if skills:
+        skill_lines = []
+        for s in skills:
+            desc = s["description"] or ""
+            triggers = s.get("triggers", [])
+            trigger_str = f"（触发: {', '.join(triggers[:3])}）" if triggers else ""
+            skill_lines.append(f"- **{s['name']}**{trigger_str}: {desc}")
+        sections.append(
+            f"## 技能（{len(skills)} 个）\n\n" + "\n".join(skill_lines)
+        )
+
+    # 4. 最近会话摘要
+    sessions_dir = LAMPSON_DIR / "memory" / "sessions"
+    if sessions_dir.exists():
+        session_files = sorted(sessions_dir.glob("*.md"), reverse=True)[:3]
+        if session_files:
+            session_lines = []
+            for sf in session_files:
+                try:
+                    content = sf.read_text(encoding="utf-8").strip()
+                    if not content:
+                        continue
+                    preview = content[:500] + "\n..." if len(content) > 500 else content
+                    session_lines.append(f"### {sf.stem}\n\n{preview}")
+                except OSError:
+                    pass
+            if session_lines:
+                sections.append(
+                    f"## 最近会话摘要\n\n" + "\n\n".join(session_lines)
+                )
+
+    if not sections:
+        return "目前还没有存储任何记忆内容。"
+
+    return "# 我的记忆\n\n" + "\n\n".join(sections)
