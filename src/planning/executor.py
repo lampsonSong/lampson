@@ -25,6 +25,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# // FIX-4: $prev.result 等引用可保留足够长度，避免只取首行
+_MAX_REF_LENGTH = 2000
+
 # 同一步内「参数类」失败时最多重试次数（不含首次执行）
 _MAX_STEP_RETRIES = 2
 # 因计划不合理触发的全局 replan 次数上限
@@ -297,10 +300,12 @@ class Executor:
 
     @staticmethod
     def _safe_replace_value(result: str) -> str:
+        # // FIX-4: 截断为前 2000 字符而非仅第一行
         if not result:
             return ""
-        first_line = result.split("\n", 1)[0].strip()
-        return first_line
+        if len(result) <= _MAX_REF_LENGTH:
+            return result
+        return result[:_MAX_REF_LENGTH] + "\n...（结果过长已截断）"
 
     def _resolve_refs(self, text: str, plan: Plan, step_index: int) -> str:
         """替换文本中的所有引用。"""

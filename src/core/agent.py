@@ -182,6 +182,29 @@ class Agent:
             self.last_total_tokens = response.usage.total_tokens
         return response.choices[0].message.content or ""
 
+    def confirm_and_execute(self) -> str:
+        """用户确认后执行当前计划。若取消计划请用 cancel_plan()。"""
+        # // FIX-2
+        if self.current_plan is None:
+            return "[错误] 没有待执行的计划"
+        plan = self.current_plan
+        if plan.status == PlanStatus.created:
+            plan.confirm()
+        result = self._executor.execute(plan)
+        self.current_plan = None
+        return result
+
+    def cancel_plan(self) -> str:
+        """取消当前计划。"""
+        # // FIX-2
+        if self.current_plan is None:
+            return "[提示] 没有待取消的计划"
+        summary = self.current_plan.plan_summary
+        self.current_plan.cancel()
+        msg = f"已取消计划：{summary}"
+        self.current_plan = None
+        return msg
+
     def run(self, user_input: str) -> str:
         """处理一轮用户输入，返回最终回复文本。
 
@@ -203,6 +226,17 @@ class Agent:
             if not intent.needs_tools:
                 self.current_plan = None
                 return self._reply_without_tools(user_input, intent)
+
+            # // FIX-1: Fast path — 高置信度且不缺信息时直接走原生 / prompt 工具循环，跳过 plan_v2
+            if intent.confidence >= 0.8 and not intent.missing_info:
+                logger.debug(
+                    f"Fast path: intent={intent.intent}, confidence={intent.confidence}"
+                )
+                self.current_plan = None
+                if self.llm.supports_native_tool_calling:
+                    return self._run_native()
+                else:
+                    return self._run_prompt_based()
 
             exploration_results = ""
             if (
@@ -230,7 +264,9 @@ class Agent:
                     f"计划生成: {plan.plan_summary} ({len(plan.steps)} 步)"
                 )
 
-            return self._executor.execute(plan)
+            # // FIX-2: 展示计划并等待用户确认后再执行（由 CLI 调 confirm_and_execute / cancel_plan）
+            plan_display = plan.format_for_display()
+            return f"{plan_display}\n\n请确认是否执行此计划？"
 
         except PlanParseError as e:
             logger.warning(f"规划失败，回退到单轮模式: {e}")

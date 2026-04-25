@@ -32,8 +32,9 @@ class PlanParseError(Exception):
     """LLM 返回的 plan JSON 无法解析。"""
 
 
-# 置信度低于此阈值时保守地认为需要工具（减少误判闲聊）
-_INTENT_CONFIDENCE_TOOL_FLOOR = 0.4
+# 置信度低于此阈值时，对部分意图保守认为需要工具（减少误判闲聊）
+# // FIX-5: 低置信度时对 needs_tools 的抬升更保守
+_INTENT_CONFIDENCE_TOOL_FLOOR = 0.3
 
 
 class Planner:
@@ -51,8 +52,9 @@ class Planner:
         raw = self._call_llm(prompt)
         result = self._parse_intent(raw, goal=goal)
         if not result.needs_tools and result.confidence < _INTENT_CONFIDENCE_TOOL_FLOOR:
-            # 没把握时保守走工具链
-            result.needs_tools = True
+            # // FIX-5: 仅对 tool_task/unknown 抬升到需要工具
+            if result.intent in ("tool_task", "unknown"):
+                result.needs_tools = True
         return result
 
     def plan_v2(

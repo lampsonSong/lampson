@@ -150,6 +150,37 @@ def _run_repl(session: Session) -> None:
                 else:
                     print(f"\nLampson> {result.reply}\n")
 
+                # // FIX-3: 计划待确认时由用户选择是否执行
+                if (
+                    not result.is_command
+                    and result.reply
+                    and "请确认是否执行此计划" in result.reply
+                ):
+                    try:
+                        confirm_input = prompt_session.prompt(
+                            [("class:prompt", "确认执行？(y/n): ")],
+                        ).strip().lower()
+                    except (KeyboardInterrupt, EOFError):
+                        confirm_input = "n"
+                    if confirm_input in ("y", "yes", "是"):
+                        exec_result = session.agent.confirm_and_execute()
+                        if exec_result:
+                            print(f"\nLampson> {exec_result}\n")
+                    else:
+                        print(f"\nLampson> {session.agent.cancel_plan()}\n")
+                    # 与 handle_input 一致：确认/取消后的回合也尝试压缩
+                    try:
+                        cr = session.agent.maybe_compact()
+                        if cr is not None:
+                            if cr.success:
+                                print(
+                                    f"[上下文压缩] 已完成，归档 {cr.archived_count} 条内容。"
+                                )
+                            else:
+                                print(f"[上下文压缩] 失败: {cr.error}")
+                    except Exception:
+                        pass
+
             if result.compaction_msg:
                 print(result.compaction_msg)
 

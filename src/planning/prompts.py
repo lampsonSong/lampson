@@ -76,6 +76,7 @@ PLAN_OUTPUT_FORMAT = """请只输出一个 JSON 对象，字段：
 
 def build_classify_prompt(goal: str, context: str, tools_desc: str) -> str:
     """阶段一：判断意图、是否需要工具、缺省信息与可能的直接回复。"""
+    # // FIX-6: 在「通用原则」后追加了「决策指引」
     return f"""你是一个任务理解助手。根据用户目标与对话上下文，判断意图并决定是否需要工具。
 
 {PERSISTENT_ENV_BLOCK}
@@ -101,6 +102,13 @@ def build_classify_prompt(goal: str, context: str, tools_desc: str) -> str:
 - "initial_plan": 可选。仅当 needs_tools 为 true 且 missing_info 非空时，提供 {{ "steps": [ ... ] }} 用于先收集信息；steps 中每项含 id, thought, action, args, reasoning
 
 通用原则：**意图含糊时，confidence 降低并列出 missing_info，让阶段二去探测，不要硬选工具**
+
+## 决策指引
+- 如果用户给的路径/名称已经足够明确（如"看一下 /Users/songyuhao/lampson/src/core/agent.py"），missing_info 应为空 []
+- 只有路径/名称真正不确定时才需要把 missing_info 设为非空（如"那个训练项目的代码"需要确认是哪个项目）
+- "帮我找一下 XXX" 类请求 → needs_tools=true，但通常一步就能完成
+- 闲聊、知识问答、代码解释类请求 → needs_tools=false
+- 如果判断 needs_tools=true 且 confidence >= 0.8 且 missing_info 为空，说明意图非常清晰，不需要信息收集
 
 示例结构：
 {{
