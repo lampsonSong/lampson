@@ -109,9 +109,7 @@ class Planner:
             messages=messages,
             temperature=0.1,  # 低温度，规划需要确定性
         )
-        content = resp.choices[0].message.content or ""
-        self.llm.messages.append({"role": "assistant", "content": content})
-        return content
+        return resp.choices[0].message.content or ""
 
     # ── 解析 ──
 

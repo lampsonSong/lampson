@@ -6,6 +6,7 @@ gateway 层（cli.py / listener.py）只需关心消息收发，
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,6 +25,9 @@ HELP_TEXT = """\
 可用命令：
   /help                          显示此帮助
   /config                        查看当前配置
+  /model                         显示当前模型和可用模型列表
+  /model <name>                  切换到指定模型
+  /model all <question>          同时向所有可用模型提问，对比回答
   /memory show                   查看核心记忆
   /memory add <text>             添加记忆条目
   /memory search <keyword>       搜索记忆
@@ -72,6 +76,9 @@ class Session:
         self.config = config
         self.skills: dict = skills or {}
         self._feishu_initialized = False
+        # 多个模型的 LLM 客户端 {model_name: LLMClient}
+        self.llm_clients: dict[str, Any] = {}
+        self._current_model_name: str = ""
 
     # ── 工厂方法 ──
 
@@ -86,13 +93,34 @@ class Session:
         core_memory = memory_mgr.load_core()
         skills = skills_mgr.load_all_skills()
 
-        llm = _create_llm(config)
+        # 构建多模型客户端字典
+        llm_clients: dict[str, Any] = {}
+
+        # 先加入 config.llm（当前激活模型）
+        primary_llm = _create_llm(config)
+        primary_name = config["llm"]["model"]
+        llm_clients[primary_name] = primary_llm
+
+        # 加入 config.models 列表中的模型（跳过已添加的主模型）
+        primary_api_key = config["llm"].get("api_key", "")
+        primary_base_url = config["llm"].get("base_url", "")
+        for model_cfg in config.get("models", []):
+            name = model_cfg["name"]
+            if name not in llm_clients:
+                llm_clients[name] = _create_llm_from_model_config(
+                    model_cfg,
+                    fallback_api_key=primary_api_key,
+                    fallback_base_url=primary_base_url,
+                )
+
         compaction_cfg = _build_compaction_config(config)
-        agent = Agent(llm, compaction_config=compaction_cfg)
+        agent = Agent(primary_llm, compaction_config=compaction_cfg)
         agent.set_context(core_memory=core_memory)
         agent.skills = skills
 
         session = cls(agent=agent, config=config, skills=skills)
+        session.llm_clients = llm_clients
+        session._current_model_name = primary_name
         session.init_feishu()
         return session
 
@@ -206,6 +234,9 @@ class Session:
             # /serve 是特殊命令，由 gateway 层处理（因为会阻塞）
             return HandleResult(reply="__SERVE__", is_command=True)
 
+        if command == "/model":
+            return HandleResult(reply=self._handle_model(parts), is_command=True)
+
         return HandleResult(
             reply=f"未知命令：{command}，输入 /help 查看帮助。",
             is_command=True,
@@ -308,6 +339,75 @@ class Session:
 
         return "用法: /feishu [send <id> <msg>|read <chat_id>]"
 
+    def _handle_model(self, parts: list[str]) -> str:
+        """处理 /model 命令。"""
+        if len(parts) == 1:
+            # /model → 显示当前模型和可用模型列表
+            lines = [f"当前模型：{self._current_model_name}", "可用模型："]
+            for name in self.llm_clients:
+                marker = " ← 当前" if name == self._current_model_name else ""
+                lines.append(f"  - {name}{marker}")
+            return "\n".join(lines)
+
+        if parts[1].lower() == "all":
+            # /model all <question> → 并行查询所有模型
+            question = " ".join(parts[2:])
+            if not question.strip():
+                return "用法: /model all <问题内容>"
+
+            results: dict[str, str] = {}
+
+            def query_model(name: str, client: Any) -> tuple[str, str]:
+                try:
+                    tmp = client.clone()
+                    # clone() 深拷贝了完整历史，但 /model all 只需要 system prompt + question
+                    # 保留 messages[0]（system prompt），丢弃其余历史
+                    if tmp.messages:
+                        tmp.messages = [tmp.messages[0]]
+                    tmp.add_user_message(question)
+                    resp = tmp.chat(tools=None)
+                    answer = resp.choices[0].message.content or "（无内容）"
+                    return name, answer
+                except Exception as e:
+                    return name, f"[请求失败: {e}]"
+
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=len(self.llm_clients)
+            ) as executor:
+                futures = {
+                    executor.submit(query_model, name, client): name
+                    for name, client in self.llm_clients.items()
+                }
+                try:
+                    for future in concurrent.futures.as_completed(futures, timeout=90):
+                        name, answer = future.result()
+                        results[name] = answer
+                except concurrent.futures.TimeoutError:
+                    # 超时的模型标记为未响应
+                    for name in self.llm_clients:
+                        if name not in results:
+                            results[name] = "[请求超时]"
+
+            # 按模型名字典序输出，便于对比
+            lines = []
+            for name in sorted(results):
+                lines.append(f"=== {name} ===")
+                lines.append(results[name])
+                lines.append("")
+            return "\n".join(lines).strip()
+
+        # /model <name> → 切换模型（方案B：迁移对话历史到新 client）
+        target_name = parts[1]
+        if target_name not in self.llm_clients:
+            available = ", ".join(sorted(self.llm_clients.keys()))
+            return f"未知模型：{target_name}，可用模型：{available}"
+
+        new_llm = self.llm_clients[target_name]
+        self._current_model_name = target_name
+        # 通过 agent.switch_llm 统一处理引用同步和历史迁移
+        self.agent.switch_llm(new_llm)
+        return f"已切换到模型：{target_name}"
+
     def _handle_update(self, parts: list[str]) -> str:
         from src.selfupdate import updater
 
@@ -337,13 +437,37 @@ def _install_default_skills() -> None:
 
 
 def _create_llm(config: dict[str, Any]) -> LLMClient:
-    """从配置创建 LLMClient。"""
+    """从配置创建 LLMClient（使用 config.llm 部分）。"""
     llm_cfg = config["llm"]
     return LLMClient(
         api_key=llm_cfg["api_key"],
         base_url=llm_cfg["base_url"],
         model=llm_cfg["model"],
         supports_native_tool_calling=llm_cfg.get("native_tool_calling", True),
+    )
+
+
+def _create_llm_from_model_config(
+    model_cfg: dict[str, Any],
+    fallback_api_key: str = "",
+    fallback_base_url: str = "",
+) -> LLMClient:
+    """从单个模型的配置字典创建 LLMClient。
+    
+    config 中的模型条目以 `name` 字段标识模型名。
+    api_key / base_url 缺失时 fallback 到主模型配置。
+    """
+    api_key = model_cfg.get("api_key", "") or fallback_api_key
+    base_url = model_cfg.get("base_url", "") or fallback_base_url
+    if not base_url:
+        raise ValueError(
+            f"模型 {model_cfg.get('name', '?')} 缺少 base_url 配置"
+        )
+    return LLMClient(
+        api_key=api_key,
+        base_url=base_url,
+        model=model_cfg["name"],  # config 用 name 字段标识模型
+        supports_native_tool_calling=model_cfg.get("native_tool_calling", True),
     )
 
 

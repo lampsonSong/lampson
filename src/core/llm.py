@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from typing import Any
 
@@ -37,6 +38,8 @@ class LLMClient:
         supports_native_tool_calling: bool = True,
     ) -> None:
         self.model = model
+        self.api_key = api_key
+        self.base_url = base_url
         self.supports_native_tool_calling = supports_native_tool_calling
         self.client = OpenAI(
             api_key=api_key if api_key else "not-needed",
@@ -155,3 +158,31 @@ class LLMClient:
 
     def get_history(self) -> list[dict[str, Any]]:
         return list(self.messages)
+
+    def set_model(self, model: str) -> None:
+        """切换当前模型（不影响 messages 历史）。"""
+        self.model = model
+        self._prompt_builder = PromptBuilder(model=model)
+
+    def clone(self) -> "LLMClient":
+        """创建一个新实例，共享 client 配置但有独立的 messages 历史（深拷贝）。"""
+        new_client = LLMClient(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            model=self.model,
+            supports_native_tool_calling=self.supports_native_tool_calling,
+        )
+        # 深拷贝 messages，避免并发竞态
+        if self.messages:
+            new_client.messages = copy.deepcopy(self.messages)
+        return new_client
+
+    def migrate_from(self, source: "LLMClient") -> None:
+        """从另一个 LLMClient 迁移对话历史（保留 system prompt 之外的记录）。
+
+        切换模型时调用：新 client 保留自己的 system prompt（因为不同模型可能
+        需要 PromptBuilder 生成不同的适配层），但继承用户的对话历史。
+        """
+        # 保留新 client 的 system prompt（messages[0]），追加旧 client 的非 system 消息
+        old_non_system = [msg for msg in source.messages if msg.get("role") != "system"]
+        self.messages.extend(copy.deepcopy(old_non_system))

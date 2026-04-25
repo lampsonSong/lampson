@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "base_url": "https://open.bigmodel.cn/api/paas/v4/",
         "model": "glm-5.1",
     },
+    "models": [],
     "feishu": {
         "app_id": "",
         "app_secret": "",
@@ -28,6 +30,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "memory_path": str(MEMORY_DIR),
     "skills_path": str(SKILLS_DIR),
 }
+
+# Pattern to match ${ENV_VAR} placeholders
+_ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
 
 def ensure_dirs() -> None:
@@ -38,6 +43,29 @@ def ensure_dirs() -> None:
     SKILLS_DIR.mkdir(exist_ok=True)
 
 
+def _expand_env_vars(value: str) -> str:
+    """Expand ${ENV_VAR} patterns with environment variable values."""
+    if not isinstance(value, str):
+        return value
+    
+    def replacer(m: re.Match) -> str:
+        var_name = m.group(1)
+        return os.environ.get(var_name, "")
+    
+    return _ENV_VAR_PATTERN.sub(replacer, value)
+
+
+def _expand_config(obj: Any) -> Any:
+    """Recursively expand env vars in config values."""
+    if isinstance(obj, str):
+        return _expand_env_vars(obj)
+    if isinstance(obj, dict):
+        return {k: _expand_config(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_expand_config(item) for item in obj]
+    return obj
+
+
 def load_config() -> dict[str, Any]:
     """加载配置文件，不存在则返回默认配置。"""
     ensure_dirs()
@@ -46,7 +74,8 @@ def load_config() -> dict[str, Any]:
     with CONFIG_PATH.open("r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     merged = _deep_merge(dict(DEFAULT_CONFIG), data)
-    return merged
+    expanded = _expand_config(merged)
+    return expanded
 
 
 def save_config(config: dict[str, Any]) -> None:

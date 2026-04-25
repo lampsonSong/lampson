@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import json
 from typing import Any, TYPE_CHECKING
 
 from src.core.llm import LLMClient
@@ -66,6 +65,24 @@ class Agent:
         self._core_memory = core_memory
         self._tools_prompt_injected = False
         self.llm.set_system_context(core_memory=core_memory)
+
+    def switch_llm(self, new_llm: LLMClient) -> None:
+        """切换底层 LLM 客户端，同步更新所有内部引用。
+
+        迁移当前对话历史到新 client（保留 system prompt 之外的消息），
+        并同步更新 planner 和 executor 的 llm 引用。
+        """
+        old_llm = self.llm
+        # 新 client 需要先设置自己的 system prompt（不同模型可能有不同适配层）
+        new_llm.set_system_context(core_memory=self._core_memory)
+        # 迁移对话历史
+        new_llm.migrate_from(old_llm)
+        # 更新所有引用
+        self.llm = new_llm
+        self._planner.llm = new_llm
+        self._executor.llm = new_llm
+        # 工具 prompt 需要重新注入（因为新 messages 里没有 tools prompt）
+        self._tools_prompt_injected = False
 
     def _inject_skill(self, user_input: str) -> str | None:
         """匹配技能并返回技能全文（已弃用，改用 skill_view 工具按需加载）。"""
