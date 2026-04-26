@@ -1,23 +1,19 @@
 """Agent 主循环：接收用户输入，调用 LLM，处理 tool calling，返回最终回复。
 
-Skills 使用索引模式（skills index 已在 system prompt 中）。
-LLM 需要某 skill 时，通过 skill_view(name) 工具按需加载。
+需要技能/项目时由语义检索在规划或 Fast Path 中注入匹配全文，不预载 skill 目录。
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import re
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable
 
+from src.core.adapters import BaseModelAdapter
 from src.core.llm import LLMClient
 from src.core import tools as tool_registry
 from src.core.compaction import CompactionConfig, CompactionResult, apply_compaction
-from src.planning.planner import Planner, PlanParseError
-from src.planning.executor import Executor
-from src.planning.steps import IntentResult, Plan, PlanStatus
-from src.planning.prompts import build_context_from_history
+from src.planning.steps import Plan, PlanStatus
 
 if TYPE_CHECKING:
     from src.skills.manager import Skill
@@ -27,39 +23,34 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_TOOL_ROUNDS = 30
 
-_TOOL_CALL_PATTERN = re.compile(
-    r"<tool_call:\s*(\w+)\s*>\s*(.*?)\s*</tool_call:\s*\1\s*>",
-    re.DOTALL,
-)
-
 
 class Agent:
     def __init__(
         self,
         llm: LLMClient,
+        adapter: BaseModelAdapter,
         compaction_config: CompactionConfig | None = None,
         max_tool_rounds: int | None = None,
     ) -> None:
         self.llm = llm
+        self.adapter = adapter
         self._tools = tool_registry.get_all_schemas()
         self.skills: dict[str, "Skill"] = {}
         self._core_memory: str = ""
         self._skills_context: str = ""
-        self._tools_prompt_injected: bool = False
-        self.last_total_tokens: int = 0  # 最近一次 LLM 调用的 total_tokens
-        self.last_stop_reason: str | None = None  # 最近一次 LLM 的 stop reason
+        self.skill_index: Any = None
+        self.project_index: Any = None
+        self.retrieval_config: dict[str, Any] = {}
+        self.last_total_tokens: int = 0
+        self.last_stop_reason: str | None = None
         self._fast_path_tool_count: int = 0
 
-        # 压缩配置（由外部注入，Agent 自己不读配置文件）
         self._compaction_config: CompactionConfig | None = compaction_config
-
-        # 工具调用最大轮次
         self.max_tool_rounds: int = max_tool_rounds or _DEFAULT_MAX_TOOL_ROUNDS
-
-        # 规划状态
         self.current_plan: Plan | None = None
-        self._planner = Planner(llm=llm, tool_schemas=self._tools)
-        self._executor = Executor(llm=llm, planner=self._planner)
+
+        # 中间过程回调：由 listener 注入，用于实时发送工具调用状态
+        self.progress_callback: Callable[[str], None] | None = None
 
     def refresh_tools(self) -> None:
         """重新加载工具列表（外部注册新工具后调用）。"""
@@ -68,258 +59,100 @@ class Agent:
     def set_context(self, core_memory: str = "") -> None:
         """设置 system prompt 上下文（启动时调用一次）。"""
         self._core_memory = core_memory
-        self._tools_prompt_injected = False
         self.llm.set_system_context(core_memory=core_memory)
 
-    def switch_llm(self, new_llm: LLMClient) -> None:
-        """切换底层 LLM 客户端，同步更新所有内部引用。
+    def switch_llm(
+        self,
+        new_llm: LLMClient,
+        new_adapter: BaseModelAdapter,
+        compaction_config: CompactionConfig | None = None,
+    ) -> None:
+        """切换底层 LLM 与适配器，并迁移对话历史。
 
-        迁移当前对话历史到新 client（保留 system prompt 之外的消息），
-        并同步更新 planner 和 executor 的 llm 引用。
+        Args:
+            new_llm: 新的 LLM 客户端。
+            new_adapter: 新的模型适配器。
+            compaction_config: 新模型的压缩配置（不同模型 context_window 不同）。
         """
         old_llm = self.llm
-        # 新 client 需要先设置自己的 system prompt（不同模型可能有不同适配层）
         new_llm.set_system_context(core_memory=self._core_memory)
-        # 迁移对话历史
         new_llm.migrate_from(old_llm)
-        # 更新所有引用
         self.llm = new_llm
-        self._planner.llm = new_llm
-        self._executor.llm = new_llm
-        # 工具 prompt 需要重新注入（因为新 messages 里没有 tools prompt）
-        self._tools_prompt_injected = False
+        self.adapter = new_adapter
+        if compaction_config is not None:
+            self._compaction_config = compaction_config
 
     def _inject_skill(self, user_input: str) -> str | None:
-        """匹配技能并返回技能全文（已弃用，改用 skill_view 工具按需加载）。"""
-        return None  # 不再自动注入，LLM 通过 skill_view 按需加载
+        """历史兼容占位；技能全文由 retrieve_for_plan 注入。"""
+        return None
 
-    def _inject_tools_prompt(self) -> None:
-        """在 messages 中注入工具描述（prompt-based 模式，只注入一次）。"""
-        if self._tools_prompt_injected:
+    def _run_tool_loop(self) -> str:
+        self._fast_path_tool_count = 0
+
+        for round_num in range(self.max_tool_rounds):
+            try:
+                response = self.adapter.chat(self.llm.messages, tools=self._tools)
+            except RuntimeError as e:
+                return f"[LLM 错误] {e}"
+
+            if response.usage:
+                self.last_total_tokens = response.usage.total_tokens
+
+            self.llm.messages.append(
+                response.choices[0].message.model_dump(exclude_none=True)
+            )
+
+            parsed = self.adapter.parse_response(response)
+            self.last_stop_reason = parsed.finish_reason
+
+            if not parsed.tool_calls:
+                logger.info(f"tool_loop round {round_num+1}: finish (no tool_calls), content_len={len(parsed.content or '')}")
+                return parsed.content or ""
+
+            for tc in parsed.tool_calls:
+                logger.info(f"tool_loop round {round_num+1}: dispatch {tc.name}({tc.raw_arguments[:200]})")
+                result = tool_registry.dispatch(tc.name, tc.raw_arguments)
+                self._fast_path_tool_count += 1
+
+                # 实时通知 listener：一个工具调用完成
+                self._on_tool_progress(round_num + 1, tc.name, tc.raw_arguments, result)
+
+                tool_msg = self.adapter.format_tool_result(tc.id, result)
+                self.llm.messages.append(tool_msg)
+
+        return "[错误] 工具调用轮次超过限制，请重新提问。"
+
+    def _on_tool_progress(self, round_num: int, tool_name: str, args: str, result: str) -> None:
+        """每个工具调用完成后实时通知 listener 更新进度卡片。"""
+        if not self.progress_callback:
             return
-        tools_prompt = LLMClient.format_tools_prompt(self._tools)
-        self.llm.messages.append({
-            "role": "system",
-            "content": tools_prompt,
-        })
-        self._tools_prompt_injected = True
-
-    def _run_native(self) -> str:
-        """原生 tool calling 主循环。"""
-        self._fast_path_tool_count = 0
-        for _ in range(self.max_tool_rounds):
-            try:
-                response = self.llm.chat(tools=self._tools)
-            except RuntimeError as e:
-                return f"[LLM 错误] {e}"
-
-            # 记录 token 用量
-            if response.usage:
-                self.last_total_tokens = response.usage.total_tokens
-
-            choice = response.choices[0]
-            finish_reason = choice.finish_reason
-            self.last_stop_reason = finish_reason
-            message = choice.message
-
-            if finish_reason == "stop" or not message.tool_calls:
-                return message.content or ""
-
-            if finish_reason in ("tool_calls", "function_call") or message.tool_calls:
-                for tool_call in message.tool_calls:
-                    tool_name = tool_call.function.name
-                    arguments = tool_call.function.arguments
-                    result = tool_registry.dispatch(tool_name, arguments)
-                    self._fast_path_tool_count += 1
-                    self.llm.add_tool_result(tool_call.id, result)
-
-        return "[错误] 工具调用轮次超过限制，请重新提问。"
-
-    def _run_prompt_based(self) -> str:
-        """prompt-based tool calling 主循环。"""
-        self._fast_path_tool_count = 0
-        for _ in range(self.max_tool_rounds):
-            try:
-                response = self.llm.chat(tools=self._tools)
-            except RuntimeError as e:
-                return f"[LLM 错误] {e}"
-
-            # 记录 token 用量
-            if response.usage:
-                self.last_total_tokens = response.usage.total_tokens
-
-            content = response.choices[0].message.content or ""
-            match = _TOOL_CALL_PATTERN.search(content)
-
-
-            if not match:
-                self.last_stop_reason = "stop"
-                return content
-
-            tool_name = match.group(1).strip()
-            raw_args = match.group(2).strip()
-
-            try:
-                arguments = json.loads(raw_args)
-            except json.JSONDecodeError:
-                arguments = {}
-
-            result = tool_registry.dispatch(tool_name, arguments)
-            self._fast_path_tool_count += 1
-            self.llm.messages.append({
-                "role": "user",
-                "content": f"<tool_result:{tool_name}>\n{result}\n</tool_result:{tool_name}>",
-            })
-
-        return "[错误] 工具调用轮次超过限制，请重新提问。"
-
-    def _reply_without_tools(self, user_input: str, phase1: IntentResult) -> str:
-        """阶段一判断无需工具时，用直接回复或主 LLM 生成自然语言回答。"""
-        if phase1.direct_reply and phase1.direct_reply.strip():
-            text = phase1.direct_reply.strip()
-            self.llm.messages.append({"role": "assistant", "content": text})
-            return text
         try:
-            response = self.llm.chat(tools=None)
-        except RuntimeError as e:
-            return f"[LLM 错误] {e}"
-        if response.usage:
-            self.last_total_tokens = response.usage.total_tokens
-        return response.choices[0].message.content or ""
+            args_preview = args[:80] + ("..." if len(args) > 80 else "")
+            result_preview = result[:120] + ("..." if len(result) > 120 else "")
+            self.progress_callback({
+                "type": "tool_progress",
+                "round": round_num,
+                "tool": tool_name,
+                "args_preview": args_preview,
+                "result_preview": result_preview,
+            })
+        except Exception:
+            pass
 
-    def confirm_and_execute(self) -> str:
-        """用户确认后执行当前计划。若取消计划请用 cancel_plan()。"""
-        # // FIX-2
-        if self.current_plan is None:
-            return "[错误] 没有待执行的计划"
-        plan = self.current_plan
-        if plan.status == PlanStatus.created:
-            plan.confirm()
-        result = self._executor.execute(plan)
+    def run(self, user_input: str) -> str:
+        """处理一轮用户输入，返回最终回复文本。"""
+        self.llm.add_user_message(user_input)
+        result = self._run_tool_loop()
 
-        # 反思与沉淀
-        reflection_hints = self._maybe_reflect(plan=plan, goal=plan.goal)
-        self.current_plan = None
-
+        tool_count = getattr(self, "_fast_path_tool_count", 0)
+        reflection_hints = self._maybe_reflect(
+            goal=user_input,
+            is_fast_path=True,
+            tool_call_count=tool_count,
+        )
         if reflection_hints:
             result += "\n\n" + "\n".join(reflection_hints)
         return result
-
-    def cancel_plan(self) -> str:
-        """取消当前计划。"""
-        # // FIX-2
-        if self.current_plan is None:
-            return "[提示] 没有待取消的计划"
-        summary = self.current_plan.plan_summary
-        self.current_plan.cancel()
-        msg = f"已取消计划：{summary}"
-        self.current_plan = None
-        return msg
-
-    def run(self, user_input: str) -> str:
-        """处理一轮用户输入，返回最终回复文本。
-
-        v2：先阶段一分类 → 不需要工具则直接答；需要工具时可选信息收集 →
-        阶段二 plan_v2 → 执行器（含重试与 replan）。
-        若分类或规划解析失败，回退到 v1/单轮模式。
-        """
-        if not self.llm.supports_native_tool_calling:
-            self._inject_tools_prompt()
-
-        self.llm.add_user_message(user_input)
-
-        # 构建上下文（供规划器使用，不污染主对话）
-        context = build_context_from_history(self.llm.get_history(), max_chars=1500)
-
-        try:
-            intent = self._planner.classify(goal=user_input, context=context)
-
-            if not intent.needs_tools:
-                self.current_plan = None
-                return self._reply_without_tools(user_input, intent)
-
-            # // FIX-1: Fast path — 高置信度且不缺信息时直接走原生 / prompt 工具循环，跳过 plan_v2
-            if intent.confidence >= 0.8 and not intent.missing_info:
-                logger.debug(
-                    f"Fast path: intent={intent.intent}, confidence={intent.confidence}"
-                )
-                if intent.matched_skill:
-                    skill_content = tool_registry.dispatch(
-                        "skill_view", {"name": intent.matched_skill}
-                    )
-                    if not skill_content.startswith("[Skill"):
-                        self.llm.messages.append({
-                            "role": "assistant",
-                            "content": (
-                                f"[系统] 已加载技能 {intent.matched_skill}，"
-                                "请按照技能指导执行。"
-                            ),
-                        })
-                        self.llm.add_user_message(skill_content)
-                self.current_plan = None
-                if self.llm.supports_native_tool_calling:
-                    fp_result = self._run_native()
-                else:
-                    fp_result = self._run_prompt_based()
-
-                # Fast Path 反思
-                fp_tool_count = getattr(self, "_fast_path_tool_count", 0)
-                reflection_hints = self._maybe_reflect(
-                    goal=user_input,
-                    is_fast_path=True,
-                    tool_call_count=fp_tool_count,
-                    intent=intent.intent,
-                )
-                if reflection_hints:
-                    fp_result += "\n\n" + "\n".join(reflection_hints)
-                return fp_result
-
-            exploration_results = ""
-            if (
-                intent.missing_info
-                and intent.initial_plan is not None
-                and len(intent.initial_plan.steps) > 0
-            ):
-                ip = intent.initial_plan
-                ip.goal = user_input
-                ex_out = self._executor.execute(ip, synthesize=False, record_to_history=False)
-                exploration_results = ex_out
-
-            plan = self._planner.plan_v2(
-                goal=user_input,
-                context=context,
-                phase1_result=intent,
-                exploration_results=exploration_results,
-            )
-            self.current_plan = plan
-
-            if plan.is_single_step:
-                logger.debug(f"1-step plan: {plan.steps[0].action}")
-            else:
-                logger.info(
-                    f"计划生成: {plan.plan_summary} ({len(plan.steps)} 步)"
-                )
-
-            # // FIX-2: 展示计划并等待用户确认后再执行（由 CLI 调 confirm_and_execute / cancel_plan）
-            plan_display = plan.format_for_display()
-            return f"{plan_display}\n\n请确认是否执行此计划？"
-
-        except PlanParseError as e:
-            logger.warning(f"规划失败，回退到单轮模式: {e}")
-            self.current_plan = None
-            # 回退：用原有逻辑
-            if self.llm.supports_native_tool_calling:
-                return self._run_native()
-            else:
-                return self._run_prompt_based()
-
-        except Exception as e:
-            logger.exception(f"规划异常，回退到单轮模式")
-            self.current_plan = None
-            if self.llm.supports_native_tool_calling:
-                return self._run_native()
-            else:
-                return self._run_prompt_based()
 
     def get_conversation_text(self) -> str:
         """导出当前对话的可读文本，供会话摘要生成使用。"""
@@ -334,38 +167,24 @@ class Agent:
         return "\n".join(lines)
 
     def _estimate_context_tokens(self) -> int:
-        """估算当前 messages 的 token 总数（粗略：UTF-8 字节数 ÷ 4）。"""
+        """估算当前 messages 的 token 总数（粗略：UTF-8 字节数 / 4）。"""
         try:
             serialized = json.dumps(self.llm.messages, ensure_ascii=False)
             return len(serialized.encode("utf-8")) // 4
         except Exception:
-            # 估算失败时保守返回 0（不触发压缩）
             return 0
 
     def maybe_compact(self) -> CompactionResult | None:
-        """检查并执行上下文压缩。
-
-        由外部调用方（cli.py / listener.py）在每轮 run() 之后调用。
-        内部处理所有判断逻辑：
-        - 压缩未配置 → 跳过
-        - plan 正在执行中 → 跳过
-        - token 未达阈值 → 跳过
-
-        Returns:
-            CompactionResult 如果执行了压缩，None 如果跳过。
-        """
+        """检查并执行上下文压缩。"""
         if self._compaction_config is None:
             return None
 
-        # 规划执行中不触发压缩
         if (
             self.current_plan is not None
             and self.current_plan.status == PlanStatus.executing
         ):
             return None
 
-        # 用实际 context 大小判断是否触发压缩，而非依赖 last_total_tokens
-        # （last_total_tokens 只记录最后一次 LLM 调用的用量，不反映整个 context size）
         actual_tokens = self._estimate_context_tokens()
 
         try:
@@ -410,7 +229,7 @@ class Agent:
         tool_call_count: int = 0,
         intent: str = "",
     ) -> list[str]:
-        """任务完成后触发反思，自动沉淀 skill 或 project 信息。返回人类可读提示列表。"""
+        """任务完成后触发反思，自动沉淀 skill 或 project 信息。"""
         from src.core.reflection import (
             should_reflect,
             reflect_and_learn,
@@ -426,7 +245,6 @@ class Agent:
         ):
             return []
 
-        # 构建执行摘要
         if plan is not None:
             exec_summary = format_execution_summary(plan)
         else:

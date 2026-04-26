@@ -12,11 +12,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from src.core.config import LAMPSON_DIR
+from src.core.config import (
+    LAMPSON_DIR,
+    get_retrieval_config,
+    INDEX_DIR,
+    SKILLS_DIR,
+    PROJECTS_DIR,
+)
+from src.core.indexer import ProjectIndex, SkillIndex
 from src.core.llm import LLMClient
+from src.core.adapters import BaseModelAdapter, create_adapter
 from src.core.compaction import CompactionConfig
 from src.core.agent import Agent
 from src.memory import manager as memory_mgr
+from src.core import skills_tools as skills_tools_reg
 from src.skills import manager as skills_mgr
 
 logger = logging.getLogger(__name__)
@@ -35,6 +44,7 @@ HELP_TEXT = """\
   /skills list                   列出所有技能
   /skills show <name>            查看技能详情
   /skills create <name>          创建新技能
+  /skills consolidate            分析并合并重复/耦合的技能
   /feishu send <id> <msg>        发送飞书消息（需配置 app_id/secret）
   /feishu read <chat_id>         读取飞书消息
   /serve                         启动飞书消息监听服务（长连接 WebSocket）
@@ -75,10 +85,15 @@ class Session:
         self.agent = agent
         self.config = config
         self.skills: dict = skills or {}
+        self.skill_index: SkillIndex | None = None
+        self.project_index: ProjectIndex | None = None
+        self.retrieval_config: dict[str, Any] = {}
         self._feishu_initialized = False
-        # 多个模型的 LLM 客户端 {model_name: LLMClient}
+        # 多个模型：{model_name: {"llm": LLMClient, "adapter": BaseModelAdapter}}
         self.llm_clients: dict[str, Any] = {}
         self._current_model_name: str = ""
+        # 待执行的技能合并操作（已废弃，保留字段防兼容问题）
+        self._pending_consolidation: list | None = None
         # 实时消息回调：由 listener 注入，用于 /model all 等流式场景
         self.partial_sender: Callable[[str], None] | None = None
 
@@ -99,9 +114,14 @@ class Session:
         llm_clients: dict[str, Any] = {}
 
         # 先加入 config.llm（当前激活模型）
-        primary_llm = _create_llm(config)
+        primary_llm, primary_adapter = _create_llm(config)
         primary_name = config["llm"]["model"]
-        llm_clients[primary_name] = primary_llm
+        primary_cw = config["llm"].get("context_window")
+        llm_clients[primary_name] = {
+            "llm": primary_llm,
+            "adapter": primary_adapter,
+            "context_window": primary_cw,
+        }
 
         # 加入 config.models 列表中的模型（跳过已添加的主模型）
         primary_api_key = config["llm"].get("api_key", "")
@@ -109,25 +129,59 @@ class Session:
         for model_cfg in config.get("models", []):
             name = model_cfg["name"]
             if name not in llm_clients:
-                llm_clients[name] = _create_llm_from_model_config(
+                llm_i, adapter_i = _create_llm_from_model_config(
                     model_cfg,
                     fallback_api_key=primary_api_key,
                     fallback_base_url=primary_base_url,
                 )
+                llm_clients[name] = {
+                    "llm": llm_i,
+                    "adapter": adapter_i,
+                    "context_window": model_cfg.get("context_window"),
+                }
 
-        compaction_cfg = _build_compaction_config(config)
+        compaction_cfg = _build_compaction_config(config, model_context_window=primary_cw)
         max_tool_rounds = config.get("max_tool_rounds")
         agent = Agent(
             primary_llm,
+            adapter=primary_adapter,
             compaction_config=compaction_cfg,
             max_tool_rounds=max_tool_rounds,
         )
         agent.set_context(core_memory=core_memory)
         agent.skills = skills
 
+        retrieval = get_retrieval_config(config)
+        skills_path = Path(str(config.get("skills_path", str(SKILLS_DIR)))).expanduser()
+        projects_path = Path(
+            str(config.get("projects_path", str(PROJECTS_DIR)))
+        ).expanduser()
+        projects_path.mkdir(parents=True, exist_ok=True)
+        model_name = str(retrieval["embedding_model"])
+        sm_raw = config.get("skills_management")
+        sidx = SkillIndex(
+            skills_path,
+            INDEX_DIR,
+            embedding_model=model_name,
+            skills_management=sm_raw if isinstance(sm_raw, dict) else None,
+        )
+        sidx.load_or_build()
+        pidx = ProjectIndex(projects_path, INDEX_DIR, embedding_model=model_name)
+        pidx.load_or_build()
+
         session = cls(agent=agent, config=config, skills=skills)
+        session.skill_index = sidx
+        session.project_index = pidx
+        session.retrieval_config = retrieval
         session.llm_clients = llm_clients
         session._current_model_name = primary_name
+        agent.skill_index = sidx
+        agent.project_index = pidx
+        agent.retrieval_config = retrieval
+        skills_tools_reg.set_retrieval_indices(sidx, pidx)
+        # 注入 LLM Client 给 reflection 的自动合并
+        from src.core import reflection
+        reflection.set_llm_client(primary_llm)
         session.init_feishu()
         return session
 
@@ -192,6 +246,13 @@ class Session:
                 memory_mgr.save_session_summary(summary)
         except Exception:
             pass
+
+    def _reload_skill_index(self) -> None:
+        """重建 skills 语义索引（合并后调用）。"""
+        if self.skill_index is not None:
+            self.skill_index.load_or_build()
+            self.agent.skill_index = self.skill_index
+            skills_tools_reg.set_retrieval_indices(self.skill_index, self.project_index)
 
     def start_feishu_listener(self) -> None:
         """启动飞书长连接监听（阻塞）。"""
@@ -313,7 +374,30 @@ class Session:
             self.skills.update(skills_mgr.load_all_skills())
             return result
 
-        return "用法: /skills [list|show <name>|create <name>]"
+        if sub == "consolidate":
+            # 获取当前模型对应的 llm client
+            bundle = self.llm_clients.get(self._current_model_name)
+            if not bundle:
+                return "[错误] 当前模型无可用的 LLM Client"
+            llm_client = bundle.get("llm")
+            if not llm_client:
+                return "[错误] 无法获取 LLM Client"
+            # 分析并直接执行合并
+            actions, analysis = skills_mgr.consolidate_skills(self.skills, llm_client)
+            if not actions:
+                if analysis.startswith("[错误]"):
+                    return analysis
+                return f"分析结果：\n{analysis}\n\n无需合并。"
+
+            # 直接执行
+            result = skills_mgr.execute_consolidation(actions)
+            # 重新加载 skills 和 index
+            self.skills.clear()
+            self.skills.update(skills_mgr.load_all_skills())
+            self._reload_skill_index()
+            return f"分析：{analysis}\n\n{result}"
+
+        return "用法: /skills [list|show <name>|create <name>|consolidate]"
 
     def _handle_feishu(self, parts: list[str]) -> str:
         if len(parts) < 2:
@@ -364,21 +448,14 @@ class Session:
 
             tools_schemas = self.agent._tools
 
-            def query_model(name: str, client: Any) -> tuple[str, str]:
-                """完整工具调用循环，每轮实时反馈，最终标记 end turn。"""
-                import json as _json
-                import re as _re
+            def query_model(name: str, client_bundle: Any) -> tuple[str, str]:
+                """完整工具调用循环（经 Model Adapter），每轮实时反馈。"""
                 from src.core import tools as _tool_reg
 
-                _TOOL_CALL_RE = _re.compile(
-                    r"<tool_call:\s*(\w+)\s*>\s*(.*?)\s*</tool_call:\s*\1\s*>",
-                    _re.DOTALL,
-                )
                 max_rounds = self.agent.max_tool_rounds
-                sender = self.partial_sender  # 闭包捕获
+                sender = self.partial_sender
 
                 def _send(text: str) -> None:
-                    """发送一条中间消息。"""
                     if sender:
                         try:
                             sender("[{}] {}".format(name, text))
@@ -386,97 +463,41 @@ class Session:
                             pass
 
                 try:
-                    tmp = client.clone_for_inference()
-                    # clone_for_inference() 只带 system prompt，避免无用的深拷贝
-                    # prompt-based 模式需要手动注入工具描述到 messages
-                    if not tmp.supports_native_tool_calling:
-                        tools_prompt = LLMClient.format_tools_prompt(tools_schemas)
-                        tmp.messages.append({"role": "system", "content": tools_prompt})
+                    base_llm: LLMClient = client_bundle["llm"]
+                    tmp = base_llm.clone_for_inference()
+                    tmp_adapter = create_adapter(tmp)
                     tmp.add_user_message(question)
 
                     for round_num in range(max_rounds):
-                        resp = tmp.chat(tools=tools_schemas)
-                        msg = resp.choices[0].message
+                        try:
+                            resp = tmp_adapter.chat(tmp.messages, tools=tools_schemas)
+                        except RuntimeError as e:
+                            _send("=== end turn ===\n[请求失败: {}]".format(e))
+                            return name, ""
 
-                        if tmp.supports_native_tool_calling:
-                            if not msg.tool_calls:
-                                final_text = msg.content or ""
-                                _send("=== end turn ===\n" + final_text)
-                                return name, ""
-                            for tc in msg.tool_calls:
-                                _send("Round {}: 调用 {}({})".format(
-                                    round_num + 1,
-                                    tc.function.name,
-                                    tc.function.arguments[:200],
-                                ))
-                                result = _tool_reg.dispatch(tc.function.name, tc.function.arguments)
-                                result_preview = result[:500] + ("..." if len(result) > 500 else "")
-                                _send("  结果: " + result_preview)
-                                tmp.add_tool_result(tc.id, result)
-                        else:
-                            content = msg.content or ""
-                            match = _TOOL_CALL_RE.search(content)
-                            _fallback = False
-                            if not match:
-                                # 兜底：尝试解析裸 JSON（部分模型不遵守 <tool_call:xxx> 格式）
-                                # 例如直接输出 {"command": "ls", "timeout": 30}
-                                _json_match = _re.search(
-                                    r'\{[^{}]*"(?:command|query|path|name)' ,
-                                    content,
-                                )
-                                if _json_match:
-                                    start = _json_match.start()
-                                    depth = 0
-                                    end = start
-                                    for i in range(start, len(content)):
-                                        if content[i] == '{':
-                                            depth += 1
-                                        elif content[i] == '}':
-                                            depth -= 1
-                                            if depth == 0:
-                                                end = i + 1
-                                                break
-                                    raw_json = content[start:end]
-                                    try:
-                                        parsed = _json.loads(raw_json)
-                                        # 根据 key 推断工具名
-                                        if "command" in parsed:
-                                            tool_name = "shell"
-                                        elif "query" in parsed and "name" not in parsed:
-                                            tool_name = "web_search"
-                                        elif "path" in parsed and "content" not in parsed:
-                                            tool_name = "file_read"
-                                        elif "path" in parsed and "content" in parsed:
-                                            tool_name = "file_write"
-                                        elif "name" in parsed:
-                                            tool_name = "project_context"
-                                        else:
-                                            _send("=== end turn ===\n" + content)
-                                            return name, ""
-                                        raw_args = raw_json
-                                        _fallback = True
-                                    except _json.JSONDecodeError:
-                                        pass
-                                if not _fallback:
-                                    _send("=== end turn ===\n" + content)
-                                    return name, ""
-                            if not _fallback:
-                                tool_name = match.group(1).strip()
-                                raw_args = match.group(2).strip()
+                        tmp.messages.append(
+                            resp.choices[0].message.model_dump(exclude_none=True)
+                        )
+                        parsed = tmp_adapter.parse_response(resp)
+
+                        if not parsed.tool_calls:
+                            final_text = parsed.content or ""
+                            _send("=== end turn ===\n" + final_text)
+                            return name, ""
+
+                        for tc in parsed.tool_calls:
+                            preview = tc.raw_arguments[:200]
                             _send("Round {}: 调用 {}({})".format(
-                                round_num + 1, tool_name, raw_args[:200],
+                                round_num + 1, tc.name, preview,
                             ))
-                            try:
-                                args = _json.loads(raw_args)
-                            except _json.JSONDecodeError:
-                                args = {}
-                            result = _tool_reg.dispatch(tool_name, args)
-                            result_preview = result[:500] + ("..." if len(result) > 500 else "")
+                            result = _tool_reg.dispatch(tc.name, tc.raw_arguments)
+                            result_preview = result[:500] + (
+                                "..." if len(result) > 500 else ""
+                            )
                             _send("  结果: " + result_preview)
-                            tmp.messages.append({
-                                "role": "user",
-                                "content": "<tool_result:{}>\n{}\n</tool_result:{}>".format(tool_name, result, tool_name),
-                            })
+                            tmp.messages.append(
+                                tmp_adapter.format_tool_result(tc.id, result)
+                            )
 
                     _send("=== end turn ===\n[超过 {} 轮限制]".format(max_rounds))
                     return name, ""
@@ -489,8 +510,8 @@ class Session:
                 max_workers=len(self.llm_clients)
             ) as executor:
                 futures = {
-                    executor.submit(query_model, name, client): name
-                    for name, client in self.llm_clients.items()
+                    executor.submit(query_model, name, bundle): name
+                    for name, bundle in self.llm_clients.items()
                 }
                 try:
                     for future in concurrent.futures.as_completed(futures, timeout=180):
@@ -513,10 +534,13 @@ class Session:
             available = ", ".join(sorted(self.llm_clients.keys()))
             return f"未知模型：{target_name}，可用模型：{available}"
 
-        new_llm = self.llm_clients[target_name]
+        bundle = self.llm_clients[target_name]
+        new_llm = bundle["llm"]
+        new_adapter: BaseModelAdapter = bundle["adapter"]
+        model_cw = bundle.get("context_window")
+        new_compaction = _build_compaction_config(self.config, model_context_window=model_cw)
         self._current_model_name = target_name
-        # 通过 agent.switch_llm 统一处理引用同步和历史迁移
-        self.agent.switch_llm(new_llm)
+        self.agent.switch_llm(new_llm, new_adapter, compaction_config=new_compaction)
         return f"已切换到模型：{target_name}"
 
     def _handle_update(self, parts: list[str]) -> str:
@@ -547,50 +571,53 @@ def _install_default_skills() -> None:
         pass
 
 
-def _create_llm(config: dict[str, Any]) -> LLMClient:
-    """从配置创建 LLMClient（使用 config.llm 部分）。"""
+def _create_llm(config: dict[str, Any]) -> tuple[LLMClient, BaseModelAdapter]:
+    """从配置创建 LLMClient 与对应 Adapter（使用 config.llm 部分）。"""
     llm_cfg = config["llm"]
-    return LLMClient(
+    llm = LLMClient(
         api_key=llm_cfg["api_key"],
         base_url=llm_cfg["base_url"],
         model=llm_cfg["model"],
-        supports_native_tool_calling=llm_cfg.get("native_tool_calling", True),
     )
+    return llm, create_adapter(llm)
 
 
 def _create_llm_from_model_config(
     model_cfg: dict[str, Any],
     fallback_api_key: str = "",
     fallback_base_url: str = "",
-) -> LLMClient:
-    """从单个模型的配置字典创建 LLMClient。
-    
-    config 中的模型条目以 `name` 字段标识模型名。
-    api_key / base_url 缺失时 fallback 到主模型配置。
-    """
+) -> tuple[LLMClient, BaseModelAdapter]:
+    """从单个模型的配置字典创建 LLMClient 与 Adapter。"""
     api_key = model_cfg.get("api_key", "") or fallback_api_key
     base_url = model_cfg.get("base_url", "") or fallback_base_url
     if not base_url:
         raise ValueError(
             f"模型 {model_cfg.get('name', '?')} 缺少 base_url 配置"
         )
-    return LLMClient(
+    llm = LLMClient(
         api_key=api_key,
         base_url=base_url,
-        model=model_cfg["name"],  # config 用 name 字段标识模型
-        supports_native_tool_calling=model_cfg.get("native_tool_calling", True),
+        model=model_cfg["name"],
     )
+    return llm, create_adapter(llm)
 
 
-def _build_compaction_config(config: dict[str, Any]) -> CompactionConfig | None:
-    """从配置字典构建 CompactionConfig。"""
+def _build_compaction_config(
+    config: dict[str, Any],
+    model_context_window: int | None = None,
+) -> CompactionConfig:
+    """从配置字典构建 CompactionConfig。
+
+    Args:
+        config: 顶层配置字典（含 compaction 段）。
+        model_context_window: 模型自身的 context_window，优先于 compaction 段的值。
+    """
     c = config.get("compaction", {})
-    if not c:
-        return CompactionConfig()
+    context_window = model_context_window or c.get("context_window", 131072)
     return CompactionConfig(
         trigger_threshold=c.get("trigger_threshold", 0.8),
         end_threshold=c.get("end_threshold", 0.3),
-        context_window=c.get("context_window", 131072),
+        context_window=context_window,
         max_iterations=c.get("max_iterations", 3),
         enable_archive=c.get("enable_archive", True),
     )

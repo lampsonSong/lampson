@@ -3,11 +3,11 @@
 参考 Hermes 的分层设计，Lampson 的 system prompt 分 8 层：
 
 Layer 1  Identity         - SOUL.md 文件内容
-Layer 2  Tool Guidance    - Memory/Skills/Tool-use 指引
+Layer 2  Tool Guidance    - Memory、~/.lampson/skills 目录块、session_search、Skills 维护指引、Tool-use
 Layer 3  Memory Block     - 核心记忆结构化文本
-Layer 4  Project Index   - 项目索引（按需加载项目上下文）
-Layer 5  Skills Index     - 技能索引（全文按需加载）
-Layer 6  Context Files    - .lampson.md / AGENTS.md
+Layer 4  Project Index   - 项目索引（projects_index + project_context）
+Layer 5  (reserved)
+Layer 6  Context Files   - .lampson.md / AGENTS.md
 Layer 7  Model Guidance   - 模型适配指引
 Layer 8  Platform Hints   - CLI 环境提示
 Layer 9  Timestamp        - 对话开始时间
@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import re
 import time
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -86,73 +87,101 @@ def _parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
 
 # ── Skills 索引构建 ──────────────────────────────────────────────────────────
 
-def _iter_skill_files() -> list[Path]:
-    """遍历 skills 目录，返回所有 SKILL.md 路径。"""
+_skills_index_cache: tuple[frozenset[tuple[str, float]], str] | None = None
+
+
+def write_skill_with_frontmatter(path: Path, meta: dict[str, Any], body: str) -> None:
+    """将 YAML frontmatter + 正文写回 SKILL.md（正文不变，仅更新 meta 时用）。"""
+    dump = yaml.dump(meta, allow_unicode=True, default_flow_style=False).strip()
+    path.write_text(f"---\n{dump}\n---\n{body}", encoding="utf-8")
+
+
+def _ensure_skill_index_fields(path: Path) -> None:
+    """若缺少 created_at / invocation_count，补填并写回（已有字段不覆盖）。"""
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    if not raw.strip():
+        return
+    meta, body = _parse_frontmatter(raw)
+    changed = False
+    today = date.today().isoformat()
+    if "created_at" not in meta or meta.get("created_at") in (None, ""):
+        meta["created_at"] = today
+        changed = True
+    if "invocation_count" not in meta:
+        meta["invocation_count"] = 0
+        changed = True
+    if not changed:
+        return
+    write_skill_with_frontmatter(path, meta, body)
+
+
+def _skill_md_paths_under_skills() -> list[Path]:
     if not SKILLS_DIR.exists():
         return []
-    return list(SKILLS_DIR.rglob("SKILL.md"))
+    out: list[Path] = []
+    for p in sorted(SKILLS_DIR.rglob("SKILL.md")):
+        if ".archived" in p.parts:
+            continue
+        out.append(p)
+    return out
+
+
+def _skills_mtime_fingerprint(paths: list[Path]) -> frozenset[tuple[str, float]]:
+    items: list[tuple[str, float]] = []
+    for p in paths:
+        try:
+            items.append((str(p.resolve()), p.stat().st_mtime))
+        except OSError:
+            items.append((str(p), 0.0))
+    return frozenset(items)
 
 
 def build_skills_index() -> str:
-    """生成紧凑的 skills 索引（全文不注入）。"""
-    skill_files = _iter_skill_files()
-    if not skill_files:
+    """扫描 ~/.lampson/skills 下 SKILL.md，生成注入 system prompt 的技能目录块。"""
+    global _skills_index_cache
+    paths = _skill_md_paths_under_skills()
+    if not paths:
+        _skills_index_cache = (frozenset(), "")
         return ""
-
-    categories: dict[str, list[tuple[str, str]]] = {}
-
-    for sf in skill_files:
+    key_before = _skills_mtime_fingerprint(paths)
+    if _skills_index_cache is not None and _skills_index_cache[0] == key_before:
+        return _skills_index_cache[1]
+    for p in paths:
+        _ensure_skill_index_fields(p)
+    paths = _skill_md_paths_under_skills()
+    key = _skills_mtime_fingerprint(paths)
+    lines: list[str] = [
+        "## Skills（按需加载）",
+        "以下是你已掌握的技能目录。当任务与某个 skill 相关时，用 skill_view(name=\"技能名\") 加载全文。",
+        "如果没有 skill 与当前任务相关，直接回答即可。",
+        "",
+    ]
+    for path in paths:
         try:
-            content = sf.read_text(encoding="utf-8")
+            raw_file = path.read_text(encoding="utf-8")
         except OSError:
             continue
-
-        meta, _ = _parse_frontmatter(content)
-        name = meta.get("name", "") or sf.parent.name
-        desc = meta.get("description", "")
-        triggers = meta.get("triggers", [])
-
-        # 从文件名推断 category（相对于 SKILLS_DIR 的路径）
-        try:
-            rel = sf.relative_to(SKILLS_DIR)
-            parts = rel.parts
-            if len(parts) >= 2:
-                category = parts[-2]
-            else:
-                category = "general"
-        except ValueError:
-            category = "general"
-
-        # 用 triggers 作为描述兜底
-        if not desc and triggers:
-            desc = "、".join(triggers[:3])
-
-        categories.setdefault(category, []).append((name, desc))
-
-    if not categories:
-        return ""
-
-    lines = []
-    for cat in sorted(categories.keys()):
-        items = sorted(categories[cat], key=lambda x: x[0])
-        names = [n for n, _ in items]
-        count = len(names)
-        names_str = ", ".join(names[:5])
-        if count > 5:
-            names_str += f" ... ({count} skills)"
-        lines.append(f"  {cat}: {names_str}")
-
-    return (
-        "## Skills (mandatory)\n"
-        "Before replying, review relevant skills below. Use skills_list(category=\"xxx\") to expand.\n"
-        "If you need a skill's full content, use skill_view(name=\"xxx\") to load it.\n"
-        "\n"
-        "<available_skills>\n"
-        + "\n".join(lines) + "\n"
-        "</available_skills>\n"
-        "\n"
-        "Only proceed without loading a skill if genuinely none are relevant."
-    )
+        meta, _body = _parse_frontmatter(raw_file)
+        if meta:
+            name = str(meta.get("name", "") or path.parent.name)
+            desc = str(meta.get("description", ""))
+            triggers = meta.get("triggers", [])
+        else:
+            name = path.parent.name
+            desc = ""
+            triggers = []
+        if isinstance(triggers, str):
+            tr_list = [triggers] if triggers.strip() else []
+        else:
+            tr_list = [str(t) for t in triggers] if isinstance(triggers, list) else []
+        trig_part = f"（触发: {', '.join(tr_list)}）" if tr_list else ""
+        lines.append(f"- **{name}**: {desc}{trig_part}")
+    text = "\n".join(lines)
+    _skills_index_cache = (key, text)
+    return text
 
 
 # ── Project Index & Context ───────────────────────────────────────────────────
@@ -285,10 +314,8 @@ PLATFORM_HINTS = """\
 本机 ~/.ssh/config 已配置好所有机器的 SSH 别名。在连接远程机器之前，**必须先用 project_context 工具加载 machines 项目**获取正确的 SSH 别名，不要猜测别名。
 在远程机器上执行 find 命令时，务必加 -maxdepth 限制深度（如 -maxdepth 5），避免搜索 NFS/NAS 大目录导致超时。
 
-# 技能加载（重要！）
-当用户请求涉及特定操作（如找代码、调试、写代码）时，先调用 skill_view 加载相关技能。
-可用 skills 列表见 system prompt，用 skills_list() 搜索，skill_view(name) 加载全文。
-加载后再执行，不要凭记忆硬编步骤。"""
+# 技能与项目
+复杂任务中若需要特定工作流，你会在单轮/规划阶段收到「匹配的技能」等检索注入内容，以注入文本为准，勿声称「未列出 skill 目录」。"""
 
 
 # ── Timestamp ────────────────────────────────────────────────────────────────
@@ -317,13 +344,17 @@ class PromptBuilder:
         # L1: Identity
         layers.append(load_identity())
 
-        # L2: Tool guidance
-        layers.extend([
-            MEMORY_GUIDANCE,
+        # L2: Tool guidance（技能目录插在记忆指引与 session_search 之间）
+        l2: list[str] = [MEMORY_GUIDANCE]
+        skills_block = build_skills_index()
+        if skills_block.strip():
+            l2.append(skills_block)
+        l2.extend([
             SESSION_SEARCH_GUIDANCE,
             SKILLS_GUIDANCE,
             TOOL_USE_ENFORCEMENT,
         ])
+        layers.extend(l2)
 
         # L3: Memory block
         if core_memory.strip():
@@ -334,12 +365,7 @@ class PromptBuilder:
         if project_index:
             layers.append(project_index)
 
-        # L5: Skills index
-        skills_index = build_skills_index()
-        if skills_index:
-            layers.append(skills_index)
-
-        # L6: Context files
+        # L5: Context files
         ctx = load_context_file(cwd)
         if ctx:
             layers.append(ctx)

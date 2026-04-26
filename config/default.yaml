@@ -12,6 +12,20 @@ feishu:
 
 memory_path: "~/.lampson/memory"   # 记忆文件存储路径
 skills_path: "~/.lampson/skills"   # 技能文件存储路径
+projects_path: "~/.lampson/projects"  # 项目记录目录（.md）
+
+# Skills 管理（冷技能归档阈值）
+skills_management:
+  cleanup_max_skills: 300      # 触发清理的 skill 总数阈值
+  cleanup_age_days: 10         # 创建超过此天数的 skill 参与清理
+  cleanup_min_invocations: 0   # 调用次数不超过此值的参与清理
+
+# 语义检索配置
+retrieval:
+  embedding_model: "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+  skill_top_k: 3
+  project_top_k: 2
+  similarity_threshold: 0.3
 
 # 上下文压缩配置
 compaction:

@@ -14,6 +14,21 @@ LAMPSON_DIR = Path.home() / ".lampson"
 CONFIG_PATH = LAMPSON_DIR / "config.yaml"
 MEMORY_DIR = LAMPSON_DIR / "memory"
 SKILLS_DIR = LAMPSON_DIR / "skills"
+INDEX_DIR = LAMPSON_DIR / "index"
+PROJECTS_DIR = LAMPSON_DIR / "projects"
+
+_DEFAULT_RETRIEVAL: dict[str, Any] = {
+    "embedding_model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    "skill_top_k": 3,
+    "project_top_k": 2,
+    "similarity_threshold": 0.3,
+}
+
+_DEFAULT_SKILLS_MANAGEMENT: dict[str, Any] = {
+    "cleanup_max_skills": 300,
+    "cleanup_age_days": 10,
+    "cleanup_min_invocations": 0,
+}
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "llm": {
@@ -29,6 +44,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "memory_path": str(MEMORY_DIR),
     "skills_path": str(SKILLS_DIR),
+    "projects_path": str(PROJECTS_DIR),
+    "retrieval": dict(_DEFAULT_RETRIEVAL),
+    "skills_management": dict(_DEFAULT_SKILLS_MANAGEMENT),
 }
 
 # Pattern to match ${ENV_VAR} placeholders
@@ -41,6 +59,50 @@ def ensure_dirs() -> None:
     MEMORY_DIR.mkdir(exist_ok=True)
     (MEMORY_DIR / "sessions").mkdir(exist_ok=True)
     SKILLS_DIR.mkdir(exist_ok=True)
+    PROJECTS_DIR.mkdir(exist_ok=True)
+    INDEX_DIR.mkdir(exist_ok=True)
+
+
+def get_skills_management_config(config: dict[str, Any]) -> dict[str, int]:
+    """合并 skills_management 段，供 SkillIndex 清理逻辑使用。"""
+    sm = config.get("skills_management")
+    if not isinstance(sm, dict):
+        sm = {}
+    base = _deep_merge(dict(_DEFAULT_SKILLS_MANAGEMENT), sm)
+    return {
+        "cleanup_max_skills": int(
+            base.get("cleanup_max_skills", _DEFAULT_SKILLS_MANAGEMENT["cleanup_max_skills"])
+        ),
+        "cleanup_age_days": int(
+            base.get("cleanup_age_days", _DEFAULT_SKILLS_MANAGEMENT["cleanup_age_days"])
+        ),
+        "cleanup_min_invocations": int(
+            base.get(
+                "cleanup_min_invocations",
+                _DEFAULT_SKILLS_MANAGEMENT["cleanup_min_invocations"],
+            )
+        ),
+    }
+
+
+def get_retrieval_config(config: dict[str, Any]) -> dict[str, Any]:
+    """合并 retrieval 段，带默认值。字段均可被 user config 覆盖。"""
+    r = config.get("retrieval")
+    if not isinstance(r, dict):
+        r = {}
+    base = _deep_merge(dict(_DEFAULT_RETRIEVAL), r)
+    return {
+        "embedding_model": str(
+            base.get("embedding_model", _DEFAULT_RETRIEVAL["embedding_model"])
+        ),
+        "skill_top_k": int(base.get("skill_top_k", _DEFAULT_RETRIEVAL["skill_top_k"])),
+        "project_top_k": int(
+            base.get("project_top_k", _DEFAULT_RETRIEVAL["project_top_k"])
+        ),
+        "similarity_threshold": float(
+            base.get("similarity_threshold", _DEFAULT_RETRIEVAL["similarity_threshold"])
+        ),
+    }
 
 
 def _expand_env_vars(value: str) -> str:

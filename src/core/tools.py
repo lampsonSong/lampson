@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 from typing import Any, Callable
 
 from src.tools import shell as shell_tool
@@ -31,10 +33,47 @@ _register(fileops_tool.FILE_WRITE_SCHEMA, fileops_tool.run_file_write)
 _register(web_tool.SCHEMA, web_tool.run)
 _register(feishu_client.FEISHU_SEND_SCHEMA, feishu_client.tool_feishu_send)
 _register(feishu_client.FEISHU_READ_SCHEMA, feishu_client.tool_feishu_read)
-_register(skills_tools.SKILL_VIEW_SCHEMA, skills_tools.skill_view)
-_register(skills_tools.SKILLS_LIST_SCHEMA, skills_tools.skills_list)
+_register(feishu_client.FEISHU_CARD_SCHEMA, feishu_client.tool_feishu_card)
 _register(skills_tools.PROJECT_CONTEXT_SCHEMA, skills_tools.project_context)
-_register(skills_tools.MEMORY_SHOW_SCHEMA, skills_tools.memory_show)
+_register(skills_tools.SKILL_VIEW_SCHEMA, skills_tools.skill_view)
+_register(skills_tools.SEARCH_SKILLS_SCHEMA, skills_tools.search_skills)
+_register(skills_tools.SEARCH_PROJECTS_SCHEMA, skills_tools.search_projects)
+
+
+# ─── 飞书客户端懒加载初始化 ────────────────────────────────────────────────
+
+_feishu_initialized = False
+
+
+def _ensure_feishu_client() -> bool:
+    """确保飞书客户端已初始化（懒加载）。"""
+    global _feishu_initialized
+    if _feishu_initialized:
+        return True
+    
+    # 读取配置
+    config_paths = [
+        Path("~/.lampson/config.yaml").expanduser(),
+        Path("config/default.yaml").expanduser(),
+    ]
+    
+    for config_path in config_paths:
+        if config_path.exists():
+            try:
+                import yaml
+                with open(config_path) as f:
+                    config = yaml.safe_load(f)
+                feishu_cfg = config.get("feishu", {})
+                app_id = feishu_cfg.get("app_id", "").strip()
+                app_secret = feishu_cfg.get("app_secret", "").strip()
+                if app_id and app_secret:
+                    feishu_client.init_client(app_id=app_id, app_secret=app_secret)
+                    _feishu_initialized = True
+                    return True
+            except Exception:
+                pass
+    
+    return False
 
 
 def get_all_schemas() -> list[dict[str, Any]]:
@@ -46,6 +85,10 @@ def dispatch(tool_name: str, arguments_raw: str | dict[str, Any]) -> str:
     """根据工具名分发执行，arguments_raw 可以是 JSON 字符串或字典。"""
     if tool_name not in _REGISTRY:
         return f"[错误] 未知工具：{tool_name}"
+
+    # 飞书工具需要先确保客户端已初始化
+    if tool_name.startswith("feishu_"):
+        _ensure_feishu_client()
 
     if isinstance(arguments_raw, str):
         try:

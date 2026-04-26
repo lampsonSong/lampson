@@ -99,6 +99,9 @@ class IntentResult:
     initial_plan: "Plan | None" = None
     # 阶段一 classify 中若用户目标匹配某 skill 的 trigger，填技能名；否则为 None
     matched_skill: str | None = None
+    # 自然语言描述「需要什么技能 / 什么项目背景」，由语义检索使用（非具体 skill 名）
+    skill_needs: str = ""
+    project_needs: str = ""
 
 
 @dataclass

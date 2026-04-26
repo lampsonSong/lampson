@@ -18,10 +18,6 @@ from src.planning.steps import (
     StepResult,
     StepStatus,
 )
-from src.planning.prompts import build_synthesize_prompt
-
-if TYPE_CHECKING:
-    from src.planning.planner import Planner
 
 logger = logging.getLogger(__name__)
 
@@ -343,17 +339,14 @@ class Executor:
         return text
 
     def _synthesize(self, plan: Plan) -> str:
-        """汇总所有步骤结果，统一经 LLM 整理后返回给用户。
-
-        无论单步还是多步，工具的原始输出对用户来说都是"数据"而非"回答"。
-        LLM 会根据用户意图提炼要点、组织语言。
-        """
+        """汇总所有步骤结果，统一经 LLM 整理后返回给用户。"""
 
         step_results = self._format_step_results(plan)
 
-        prompt = build_synthesize_prompt(
-            goal=plan.goal,
-            step_results=step_results,
+        prompt = (
+            f"你已经执行完以下步骤：\n{step_results}\n\n"
+            f"用户原始目标：{plan.goal}\n\n"
+            "请根据用户的实际意图，整理以上执行结果，给出一个有条理、用户能直接理解的自然语言回答。"
         )
         try:
             temp_client = LLMClient(

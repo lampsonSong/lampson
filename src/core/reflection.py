@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +34,15 @@ _last_reflect_time: float = 0.0
 _MIN_SKILL_CONTENT_LEN = 200
 # 新建 skill 至少需要多少个 trigger
 _MIN_TRIGGER_COUNT = 3
+
+# 全局 LLM Client（由 Session 初始化时注入，供 _auto_consolidate 使用）
+_llm_client: Any = None
+
+
+def set_llm_client(client: Any) -> None:
+    """由 Session 初始化时调用，注入当前 LLM Client。"""
+    global _llm_client
+    _llm_client = client
 
 # ── 反思 Prompt ──────────────────────────────────────────────────────────────
 
@@ -260,6 +269,9 @@ def _create_skill(
     skill_content = f"---\n{frontmatter}\n---\n\n{content}"
     skill_file.write_text(skill_content, encoding="utf-8")
     logger.info(f"已创建技能: {target} ({reason})")
+
+    # 自动合并检查
+    _auto_consolidate(target)
     return f"已创建技能: {target}（以后遇到类似问题会自动使用）"
 
 
@@ -418,3 +430,29 @@ def _extract_json(text: str) -> dict | None:
         return json.loads(cleaned)
     except json.JSONDecodeError:
         return None
+
+
+# ── 自动合并 ──────────────────────────────────────────────────────────────
+
+def _auto_consolidate(new_skill_name: str) -> None:
+    """新建 skill 后自动用 LLM 分析并合并重复/耦合的 skill。"""
+    global _llm_client
+    if _llm_client is None:
+        logger.debug("自动合并跳过：LLM Client 未注入")
+        return
+
+    # 重新加载所有 skills
+    from src.skills.manager import load_all_skills, consolidate_skills, execute_consolidation
+
+    skills = load_all_skills()
+    if len(skills) < 2:
+        return
+
+    actions, analysis = consolidate_skills(skills, _llm_client)
+    if not actions:
+        logger.debug(f"自动合并：{analysis}")
+        return
+
+    # 直接执行，不需要确认
+    result = execute_consolidation(actions)
+    logger.info(f"自动合并完成：{result}")

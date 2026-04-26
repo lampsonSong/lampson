@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any, Optional
 
@@ -62,11 +63,10 @@ class FeishuClient:
             text: 消息文本内容
             receive_id_type: ID 类型，默认 user_id
         """
-        import json as _json
         payload = {
             "receive_id": receive_id,
             "msg_type": "text",
-            "content": _json.dumps({"text": text}, ensure_ascii=False),
+            "content": json.dumps({"text": text}, ensure_ascii=False),
         }
         resp = self._http.post(
             f"{FEISHU_BASE}/im/v1/messages",
@@ -79,6 +79,201 @@ class FeishuClient:
         if data.get("code") != 0:
             raise RuntimeError(f"飞书发送消息失败：{data.get('msg')} (code={data.get('code')})")
         return data
+
+    def send_card(
+        self,
+        receive_id: str,
+        card: dict[str, Any],
+        receive_id_type: str = "user_id",
+    ) -> dict[str, Any]:
+        """发送卡片消息到指定用户或群。
+
+        Args:
+            receive_id: 接收者 ID
+            card: 卡片内容字典，参考飞书卡片格式
+            receive_id_type: ID 类型，默认 user_id
+        """
+        payload = {
+            "receive_id": receive_id,
+            "msg_type": "interactive",
+            "content": json.dumps(card, ensure_ascii=False),
+        }
+        resp = self._http.post(
+            f"{FEISHU_BASE}/im/v1/messages",
+            params={"receive_id_type": receive_id_type},
+            headers=self._headers(),
+            json=payload,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") != 0:
+            raise RuntimeError(f"飞书发送卡片失败：{data.get('msg')} (code={data.get('code')})")
+        return data
+
+    def update_message(
+        self,
+        message_id: str,
+        card: dict[str, Any],
+    ) -> dict[str, Any]:
+        """更新已发送的卡片消息内容（飞书 PATCH API）。
+
+        Args:
+            message_id: 已发送消息的 ID
+            card: 新的卡片内容字典
+
+        Returns:
+            飞书 API 响应
+        """
+        resp = self._http.patch(
+            f"{FEISHU_BASE}/im/v1/messages/{message_id}",
+            headers=self._headers(),
+            json={"content": json.dumps(card, ensure_ascii=False)},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") != 0:
+            raise RuntimeError(f"飞书更新消息失败：{data.get('msg')} (code={data.get('code')})")
+        return data
+
+    def build_card(
+        self,
+        title: str,
+        header: Optional[dict[str, str]] = None,
+        elements: Optional[list[dict[str, Any]]] = None,
+    ) -> dict[str, Any]:
+        """构建一个简单的卡片消息。
+
+        Args:
+            title: 卡片标题
+            header: 头部信息 {"title": "标题", "subtitle": "副标题", "template": "blue|red|yellow|green|purple|orange|grey"}
+            elements: 卡片内容元素列表
+
+        Returns:
+            符合飞书卡片格式的字典
+        """
+        card: dict[str, Any] = {
+            "schema": "2.0",
+            "body": {"elements": elements or []},
+        }
+        if header:
+            card["header"] = {
+                "title": {"tag": "plain_text", "content": header.get("title", "")},
+                "subtitle": {"tag": "plain_text", "content": header.get("subtitle", "")},
+                "template": header.get("template", "blue"),
+            }
+        return card
+
+    def build_table_card(
+        self,
+        title: str,
+        columns: list[dict[str, Any]],
+        rows: list[list[str]],
+        header_template: str = "blue",
+    ) -> dict[str, Any]:
+        """构建带表格的卡片消息。
+
+        Args:
+            title: 卡片标题
+            columns: 列定义 [{"title": "列名", "width": 百分比}, ...]
+            rows: 行数据 [[cell1, cell2, ...], ...]
+            header_template: 表头背景色
+
+        Returns:
+            符合飞书卡片格式的字典
+        """
+        # 构建表头
+        header_cells = [
+            {"tag": "markdown", "content": f"**{col.get('title', '')}**"}
+            for col in columns
+        ]
+
+        # 构建表格元素
+        elements: list[dict[str, Any]] = [
+            {
+                "tag": "table",
+                "columns": [{"title": col.get("title", ""), "width": col.get("width", "auto")} for col in columns],
+                "fields": [
+                    {
+                        "value": {"tag": "plain_text", "content": cell},
+                        "is_short": True,
+                    }
+                    for row in rows
+                    for cell in row
+                ],
+            }
+        ]
+
+        card = self.build_card(title=title, elements=elements)
+        card["header"] = {
+            "title": {"tag": "plain_text", "content": title},
+            "template": header_template,
+        }
+        return card
+
+    def build_form_card(
+        self,
+        title: str,
+        fields: list[dict[str, str]],
+        header_template: str = "blue",
+    ) -> dict[str, Any]:
+        """构建带表单布局的卡片消息（每行两个字段，适合展示键值对）。
+
+        Args:
+            title: 卡片标题
+            fields: 字段列表 [{"label": "标签", "value": "值"}, ...]
+            header_template: 表头背景色
+
+        Returns:
+            符合飞书卡片格式的字典
+        """
+        elements: list[dict[str, Any]] = [
+            {
+                "tag": "div",
+                "fields": [
+                    {
+                        "is_short": i % 2 == 0,
+                        "long_form": i % 2 == 1,
+                        "value": {
+                            "tag": "lark_md",
+                            "content": f"**{f.get('label', '')}**\n{f.get('value', '')}",
+                        },
+                    }
+                    for i, f in enumerate(fields)
+                ],
+            }
+        ]
+        card = self.build_card(title=title, elements=elements)
+        card["header"] = {
+            "title": {"tag": "plain_text", "content": title},
+            "template": header_template,
+        }
+        return card
+
+    def build_md_card(
+        self,
+        title: str,
+        content: str,
+        header_template: str = "blue",
+    ) -> dict[str, Any]:
+        """构建纯 Markdown 内容的卡片消息。
+
+        Args:
+            title: 卡片标题
+            content: Markdown 格式的内容
+            header_template: 表头背景色
+
+        Returns:
+            符合飞书卡片格式的字典
+        """
+        elements: list[dict[str, Any]] = [
+            {"tag": "markdown", "content": content}
+        ]
+        card = self.build_card(title=title, elements=elements)
+        card["header"] = {
+            "title": {"tag": "plain_text", "content": title},
+            "template": header_template,
+        }
+        return card
 
     def get_messages(
         self,
@@ -136,11 +331,27 @@ def get_client() -> FeishuClient:
 
 # ─── 工具函数（供 tools.py 注册） ────────────────────────────────────────────
 
+def _detect_id_type(receive_id: str, explicit_type: str | None = None) -> str:
+    """根据 ID 前缀自动判断类型，显式指定时优先用显式值。"""
+    if explicit_type and explicit_type != "user_id":
+        return explicit_type
+    rid = receive_id.strip()
+    if rid.startswith("ou_"):
+        return "open_id"
+    if rid.startswith("oc_"):
+        return "chat_id"
+    if "@" in rid:
+        return "email"
+    if rid.startswith("on_"):
+        return "union_id"
+    return explicit_type or "open_id"
+
+
 def tool_feishu_send(params: dict[str, Any]) -> str:
     """工具实现：发送飞书消息。"""
     receive_id = params.get("receive_id", "").strip()
     text = params.get("text", "").strip()
-    receive_id_type = params.get("receive_id_type", "user_id")
+    receive_id_type = _detect_id_type(receive_id, params.get("receive_id_type"))
 
     if not receive_id:
         return "[错误] 缺少 receive_id 参数。"
@@ -183,7 +394,6 @@ def tool_feishu_read(params: dict[str, Any]) -> str:
             body = item.get("body", {})
             content = body.get("content", "")
             try:
-                import json
                 parsed = json.loads(content)
                 text = parsed.get("text", content)
             except Exception:
@@ -191,6 +401,42 @@ def tool_feishu_read(params: dict[str, Any]) -> str:
             lines.append(f"  [{create_time}] {sender}: {text}")
 
         return "\n".join(lines)
+    except RuntimeError as e:
+        return f"[飞书错误] {e}"
+    except httpx.HTTPError as e:
+        return f"[网络错误] {e}"
+
+
+def tool_feishu_card(params: dict[str, Any]) -> str:
+    """工具实现：发送飞书卡片消息。
+
+    支持三种卡片格式：
+    - form: 表单格式，适合展示键值对
+    - md: Markdown 格式，适合多行文本
+    - table: 表格格式（通过 elements 手动构建）
+    """
+    receive_id = params.get("receive_id", "").strip()
+    card_type = params.get("card_type", "form")
+    title = params.get("title", "信息")
+    header_template = params.get("header_template", "blue")
+    fields = params.get("fields", [])  # form 类型用 [{"label": "", "value": ""}]
+    content = params.get("content", "")  # md 类型用
+    receive_id_type = _detect_id_type(receive_id, params.get("receive_id_type"))  # 自动检测 ID 类型
+
+    if not receive_id:
+        return "[错误] 缺少 receive_id 参数。"
+
+    try:
+        client = get_client()
+        if card_type == "form":
+            card = client.build_form_card(title=title, fields=fields, header_template=header_template)
+        elif card_type == "md":
+            card = client.build_md_card(title=title, content=content, header_template=header_template)
+        else:
+            return f"[错误] 不支持的 card_type: {card_type}，支持: form, md"
+
+        client.send_card(receive_id=receive_id, card=card, receive_id_type=receive_id_type)
+        return f"卡片已发送给 {receive_id}：{title}"
     except RuntimeError as e:
         return f"[飞书错误] {e}"
     except httpx.HTTPError as e:
@@ -249,6 +495,57 @@ FEISHU_READ_SCHEMA: dict[str, Any] = {
                 },
             },
             "required": ["container_id"],
+        },
+    },
+}
+
+FEISHU_CARD_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "feishu_card",
+        "description": "发送飞书卡片消息，支持表单/Markdown格式，适合结构化信息展示",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "receive_id": {
+                    "type": "string",
+                    "description": "接收者的 user_id、open_id 或 chat_id",
+                },
+                "receive_id_type": {
+                    "type": "string",
+                    "description": "ID 类型：user_id / open_id / chat_id，默认 user_id",
+                    "enum": ["user_id", "open_id", "union_id", "email", "chat_id"],
+                },
+                "card_type": {
+                    "type": "string",
+                    "description": "卡片类型：form(表单) / md(Markdown)",
+                    "enum": ["form", "md"],
+                },
+                "title": {
+                    "type": "string",
+                    "description": "卡片标题",
+                },
+                "header_template": {
+                    "type": "string",
+                    "description": "表头颜色：blue / red / yellow / green / purple / orange / grey",
+                },
+                "fields": {
+                    "type": "array",
+                    "description": "表单字段列表（form类型用），每个字段包含 label 和 value",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string"},
+                            "value": {"type": "string"},
+                        },
+                    },
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Markdown 内容（md类型用）",
+                },
+            },
+            "required": ["receive_id", "card_type"],
         },
     },
 }

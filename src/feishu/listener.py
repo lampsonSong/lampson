@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import json
+import queue
+import re
 import threading
 import time
 from typing import TYPE_CHECKING
@@ -85,8 +87,42 @@ class FeishuListener:
             .build()
         )
 
+    # ─── 发送方法 ───────────────────────────────────────────────────────────
+
     def _send_reply(self, chat_id: str, text: str) -> None:
-        """向指定 chat_id 发送文本消息。"""
+        """发送最终回复，自动判断用卡片还是文本。"""
+        if self._should_use_card(text):
+            self._send_reply_as_card(chat_id, text)
+        else:
+            self._send_reply_as_text(chat_id, text)
+
+    @staticmethod
+    def _should_use_card(text: str) -> bool:
+        """判断回复是否含结构化数据（表格/指标），适合用卡片展示。"""
+        # 包含 markdown 表格
+        if "|---" in text or "| ---" in text:
+            return True
+        return False
+
+    def _send_reply_as_card(self, chat_id: str, text: str) -> None:
+        """用 Markdown 卡片发送回复（表格/指标等结构化数据）。"""
+        from src.feishu.client import get_client
+        try:
+            client = get_client()
+            # 提取标题：取第一个 ## 或 **加粗**
+            title = "Lampson 回复"
+            m = re.search(r"##\s*(.+)", text) or re.search(r"\*\*(.+?)\*\*", text)
+            if m:
+                title = m.group(1).strip()
+            card = client.build_md_card(title=title, content=text, header_template="green")
+            client.send_card(receive_id=chat_id, card=card, receive_id_type="chat_id")
+            print("[listener] 卡片消息发送成功", flush=True)
+        except Exception as e:
+            print(f"[listener] 卡片发送失败({e})，降级为文本", flush=True)
+            self._send_reply_as_text(chat_id, text)
+
+    def _send_reply_as_text(self, chat_id: str, text: str) -> None:
+        """发送纯文本消息。"""
         request = (
             CreateMessageRequest.builder()
             .receive_id_type("chat_id")
@@ -107,6 +143,52 @@ class FeishuListener:
             )
         else:
             print("[listener] 消息发送成功", flush=True)
+
+    # ─── 进度卡片（发一条 + update，不刷屏）─────────────────────────────
+
+    def _make_progress_card(self, lines: list[str], finished: bool = False) -> dict:
+        """构建工具调用进度卡片。"""
+        status = "已完成" if finished else "处理中..."
+        elements = [
+            {"tag": "markdown", "content": f"**{status}** ({len(lines)} 个工具调用)"},
+        ]
+        shown = lines[-15:]
+        if len(lines) > 15:
+            elements.append({"tag": "markdown", "content": f"_...前 {len(lines) - 15} 条省略_"})
+        for line in shown:
+            elements.append({"tag": "markdown", "content": line})
+        return {
+            "schema": "2.0",
+            "header": {
+                "title": {"tag": "plain_text", "content": "Lampson 工作进度"},
+                "template": "green" if finished else "blue",
+            },
+            "body": {"elements": elements},
+        }
+
+    def _send_progress_card(self, chat_id: str, lines: list[str], finished: bool = False) -> str | None:
+        """发送进度卡片，返回 message_id。"""
+        from src.feishu.client import get_client
+        card = self._make_progress_card(lines, finished=finished)
+        try:
+            client = get_client()
+            data = client.send_card(receive_id=chat_id, card=card, receive_id_type="chat_id")
+            return data.get("data", {}).get("message_id")
+        except Exception as e:
+            print(f"[listener] 发送进度卡片失败: {e}", flush=True)
+            return None
+
+    def _update_progress_card(self, message_id: str, lines: list[str], finished: bool = False) -> None:
+        """更新已有的进度卡片。"""
+        from src.feishu.client import get_client
+        card = self._make_progress_card(lines, finished=finished)
+        try:
+            client = get_client()
+            client.update_message(message_id=message_id, card=card)
+        except Exception as e:
+            print(f"[listener] 更新进度卡片失败: {e}", flush=True)
+
+    # ─── 消息处理 ─────────────────────────────────────────────────────────
 
     def _handle_message(self, data: P2ImMessageReceiveV1) -> None:
         """处理收到的消息事件。"""
@@ -160,12 +242,84 @@ class FeishuListener:
 
             # 走 Session（推荐）或直接走 agent（向后兼容）
             if self._session is not None:
-                # 注入实时消息回调，供 /model all 等流式场景使用
                 self._session.partial_sender = lambda text: self._send_reply(chat_id, text)
+
+                _progress_queue: queue.Queue = queue.Queue()
+                _progress_done = threading.Event()
+
+                def _progress_worker() -> None:
+                    """后台线程：收集工具调用进度，用卡片 + update 不刷屏。"""
+                    progress_lines: list[str] = []
+                    progress_msg_id: str | None = None
+                    last_update_ts = 0.0
+                    update_interval = 1.5
+
+                    while True:
+                        try:
+                            event = _progress_queue.get(timeout=0.5)
+                        except queue.Empty:
+                            if _progress_done.is_set():
+                                # 最终更新：标记为已完成
+                                if progress_lines:
+                                    if progress_msg_id is None:
+                                        self._send_progress_card(
+                                            chat_id, progress_lines, finished=True
+                                        )
+                                    else:
+                                        self._update_progress_card(
+                                            progress_msg_id, progress_lines, finished=True
+                                        )
+                                return
+                            continue
+
+                        if not isinstance(event, dict) or event.get("type") != "tool_progress":
+                            continue
+
+                        round_n = event["round"]
+                        tool = event["tool"]
+                        args_p = event["args_preview"]
+                        result_p = event["result_preview"]
+                        is_error = (
+                            result_p.startswith("[错误]")
+                            or result_p.startswith("[飞书错误]")
+                            or result_p.startswith("[网络错误]")
+                        )
+                        icon = "x" if is_error else ">"
+                        progress_lines.append(
+                            f"**{round_n}.** `{tool}`({args_p})\n  {icon} {result_p}"
+                        )
+
+                        # 节流：每 1.5 秒最多更新一次卡片
+                        now = time.monotonic()
+                        if now - last_update_ts < update_interval:
+                            continue
+
+                        if progress_msg_id is None:
+                            progress_msg_id = self._send_progress_card(
+                                chat_id, progress_lines
+                            )
+                        else:
+                            self._update_progress_card(progress_msg_id, progress_lines)
+                        last_update_ts = time.monotonic()
+
+                _worker = threading.Thread(
+                    target=_progress_worker,
+                    daemon=True,
+                    name="feishu-progress",
+                )
+                _worker.start()
+
+                def _progress_cb(event):
+                    _progress_queue.put(event)
+
+                self._session.agent.progress_callback = _progress_cb
                 try:
                     result = self._session.handle_input(text)
                 finally:
+                    _progress_done.set()
+                    _worker.join(timeout=3.0)
                     self._session.partial_sender = None
+                    self._session.agent.progress_callback = None
                 reply = result.reply
                 if result.compaction_msg:
                     print(f"[listener] {result.compaction_msg}", flush=True)

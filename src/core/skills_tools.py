@@ -1,4 +1,4 @@
-"""Skills 工具：skill_view、skills_list、project_context，供 Agent 调用。"""
+"""Skills / Project 相关工具：project_context、skill_view、search_skills、search_projects；skill 解析供 indexer 等复用。"""
 
 from __future__ import annotations
 
@@ -8,67 +8,87 @@ from typing import Any
 
 import yaml
 
-
 LAMPSON_DIR = Path.home() / ".lampson"
 SKILLS_DIR = LAMPSON_DIR / "skills"
 PROJECTS_DIR = LAMPSON_DIR / "projects"
+
+# Session 在启动时通过 set_retrieval_indices 注入，供 search_skills/search_projects 使用
+_active_skill_index: Any = None
+_active_project_index: Any = None
 
 SKILL_VIEW_SCHEMA = {
     "type": "function",
     "function": {
         "name": "skill_view",
-        "description": "加载指定 skill 的全文内容。",
+        "description": (
+            "加载指定技能的完整内容。当你从 Skills 目录中看到与任务相关的技能时，用此工具加载全文。"
+        ),
         "parameters": {
             "type": "object",
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "skill 名称，例如 '文件搜索' 或 'lampson/文件搜索'"
-                }
-            },
-            "required": ["name"]
-        }
-    }
-}
-
-SKILLS_LIST_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "skills_list",
-        "description": "列出或搜索 skills。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "category": {
-                    "type": "string",
-                    "description": "按 category 过滤（可选）"
+                    "description": "技能名称，例如 'code-writing', 'reverse-tracking'",
                 },
-                "query": {
-                    "type": "string",
-                    "description": "按 keyword 搜索（可选）"
-                }
-            }
-        }
-    }
+            },
+            "required": ["name"],
+        },
+    },
 }
 
-MEMORY_SHOW_SCHEMA = {
+SEARCH_SKILLS_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "memory_show",
+        "name": "search_skills",
         "description": (
-            "展示你记住的所有内容，包括：核心记忆(core.md)、项目列表及摘要、"
-            "技能列表、最近会话摘要。"
-            "当用户问'你都记了啥'、'你记住了什么'、'看看你的记忆'、"
-            "'show me your memory'等查看记忆类问题时使用此工具。"
-            "这是一个聚合查询，一次性返回所有已存储的内容。"
+            "在技能名称与描述中做简单关键词匹配（子串），辅助在技能很多时查找。"
+            "名称已从 system prompt 目录可知时，优先使用 skill_view(name)。"
         ),
         "parameters": {
             "type": "object",
-            "properties": {}
-        }
-    }
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "用自然语言描述你需要的能力或工作流类型",
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "返回最多几个结果，默认 3",
+                    "default": 3,
+                },
+            },
+            "required": ["query"],
+        },
+    },
 }
+
+SEARCH_PROJECTS_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "search_projects",
+        "description": (
+            "根据自然语言描述搜索匹配的项目上下文。"
+            "当你需要查找某个项目或仓库的背景信息时使用此工具。"
+            "用自然语言描述你需要什么项目的什么信息，例如 '模型平台的工程目录'、'hermes 代码结构'。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "用自然语言描述你需要哪类项目/仓库背景",
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "返回最多几个结果，默认 2",
+                    "default": 2,
+                },
+            },
+            "required": ["query"],
+        },
+    },
+}
+
 
 PROJECT_CONTEXT_SCHEMA = {
     "type": "function",
@@ -91,34 +111,12 @@ PROJECT_CONTEXT_SCHEMA = {
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
 
-def _format_memory_file_entry(md_file: Path, base_dir: Path, preview_len: int) -> str | None:
-    """读取 markdown 并格式化为 `### 标题` + 预览；标题优先用首行 ``#``，子目录下加路径前缀。"""
-    try:
-        content = md_file.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    if not content:
-        return None
-    preview = content[:preview_len] + "\n..." if len(content) > preview_len else content
-    rel_path = md_file.relative_to(base_dir)
-    title = md_file.stem
-    first_line = content.split("\n", 1)[0].strip()
-    if first_line.startswith("# "):
-        parsed = first_line[2:].strip()
-        if parsed:
-            title = parsed
-    if rel_path.parent != Path("."):
-        parent_name = " > ".join(rel_path.parent.parts)
-        if parent_name:
-            title = f"{parent_name} > {title}"
-    return f"### {title}\n\n{preview}"
+def set_retrieval_indices(skill_index: Any, project_index: Any) -> None:
+    """由 Session 在索引构建后调用，供 search_skills/search_projects 使用。"""
+    global _active_skill_index, _active_project_index
+    _active_skill_index = skill_index
+    _active_project_index = project_index
 
-
-def _safe_mtime(path: Path) -> float:
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return 0.0
 
 
 def _parse_skill(path: Path) -> dict[str, Any] | None:
@@ -149,71 +147,6 @@ def _parse_skill(path: Path) -> dict[str, Any] | None:
     }
 
 
-def _iter_skills() -> list[dict[str, Any]]:
-    if not SKILLS_DIR.exists():
-        return []
-    results = []
-    for sf in SKILLS_DIR.rglob("SKILL.md"):
-        s = _parse_skill(sf)
-        if s:
-            results.append(s)
-    return results
-
-
-def skill_view(params: dict[str, Any]) -> str:
-    """加载指定 skill 的全文内容。"""
-    name = params.get("name", "")
-    if not name:
-        return "skill_view 需要 name 参数，例如：skill_view(name=\"文件搜索\")"
-
-    skills = _iter_skills()
-    for s in skills:
-        if s["name"] == name:
-            return s["full_content"]
-
-    available = ", ".join(s["name"] for s in skills)
-    return f"[Skill '{name}' not found]\n\nAvailable skills: {available or '(none)'}"
-
-
-def skills_list(params: dict[str, Any]) -> str:
-    """列出或搜索 skills。"""
-    category = params.get("category")
-    query = params.get("query")
-
-    skills = _iter_skills()
-
-    if query:
-        q = query.lower()
-        skills = [s for s in skills
-                  if q in s["name"].lower()
-                  or q in s["description"].lower()
-                  or any(q in t.lower() for t in s["triggers"])]
-
-    if category:
-        skills = [s for s in skills
-                  if s["name"].startswith(f"{category}/")
-                  or category in s["name"]]
-
-    if not skills:
-        return "[No skills found]"
-
-    lines = []
-    for s in skills:
-        desc = s["description"] or ""
-        triggers = s["triggers"]
-        trigger_str = f" (触发: {', '.join(triggers)})" if triggers else ""
-        lines.append(f"- **{s['name']}**{trigger_str}\n  {desc}")
-
-    total = len(skills)
-    header = f"Skills ({total} found)"
-    if category:
-        header += f", category={category}"
-    if query:
-        header += f", query={query}"
-
-    return f"# {header}\n\n" + "\n".join(lines)
-
-
 def project_context(params: dict[str, Any]) -> str:
     """加载指定项目的完整上下文。"""
     from src.core.prompt_builder import load_project_context as _load
@@ -223,62 +156,107 @@ def project_context(params: dict[str, Any]) -> str:
     return _load(name)
 
 
-def memory_show(params: dict[str, Any]) -> str:
-    """展示所有已存储的记忆内容（核心记忆 + 项目 + 技能 + 会话摘要）。"""
-    sections: list[str] = []
 
-    # 1. 核心记忆
-    core_path = LAMPSON_DIR / "memory" / "core.md"
-    if core_path.exists():
+def _increment_invocation(skill_path: Path) -> int:
+    """递增 SKILL.md 的 invocation_count，保留正文；返回新计数。"""
+    from src.core.prompt_builder import _parse_frontmatter, write_skill_with_frontmatter
+
+    try:
+        raw = skill_path.read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    meta, body = _parse_frontmatter(raw)
+    try:
+        ic = int(meta.get("invocation_count", 0))
+    except (TypeError, ValueError):
+        ic = 0
+    meta["invocation_count"] = ic + 1
+    write_skill_with_frontmatter(skill_path, meta, body)
+    return int(meta["invocation_count"])
+
+
+def skill_view(params: dict[str, Any]) -> str:
+    """按名称加载 SKILL.md 全文，并递增 invocation_count。"""
+    name = str(params.get("name", "")).strip()
+    if not name:
+        return "[错误] name 参数不能为空"
+    global _active_skill_index
+    if _active_skill_index is None:
+        return "[提示] 技能索引未初始化"
+    entries = getattr(_active_skill_index, "_entries", None)
+    if not entries:
+        return f"[错误] 未找到名为「{name}」的技能"
+    path: Path | None = None
+    for e in entries:
+        if str(e.get("name", "")) == name:
+            path = Path(str(e["path"]))
+            break
+    if path is None:
+        low = name.lower()
+        for e in entries:
+            if str(e.get("name", "")).lower() == low:
+                path = Path(str(e["path"]))
+                break
+    if path is None or not path.is_file():
+        return f"[错误] 未找到名为「{name}」的技能"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as ex:
+        return f"[错误] 读取技能文件失败：{ex}"
+    new_c = _increment_invocation(path)
+    for e in entries:
+        if str(e.get("path", "")) == str(path.resolve()):
+            e["invocation_count"] = new_c
+            break
+    return text
+
+
+def search_skills(params: dict[str, Any]) -> str:
+    """在 name / description 中做子串匹配，返回匹配的 SKILL.md 全文。"""
+    query = params.get("query", "").strip()
+    top_k = int(params.get("top_k", 3))
+    if not query:
+        return "[错误] query 参数不能为空"
+    global _active_skill_index
+    if _active_skill_index is None:
+        return "[提示] 技能索引未初始化"
+    q_lower = query.lower()
+    results: list[str] = []
+    for e in _active_skill_index._entries:  # type: ignore[union-attr]
+        name = str(e.get("name", ""))
+        desc = str(e.get("description", ""))
+        blob = f"{name}\n{desc}"
+        if q_lower not in blob.lower():
+            continue
+        p = str(e.get("path", ""))
+        if not p:
+            continue
         try:
-            content = core_path.read_text(encoding="utf-8").strip()
-            if content:
-                sections.append(f"## 核心记忆\n\n{content}")
+            content = Path(p).read_text(encoding="utf-8")
         except OSError:
-            pass
+            continue
+        if content.strip():
+            results.append(content)
+        if len(results) >= top_k:
+            break
+    if not results:
+        return "未找到匹配的技能。"
+    return "\n\n---\n\n".join(results)
 
-    # 2. 项目列表
-    if PROJECTS_DIR.exists():
-        projects: list[str] = []
-        for md_file in sorted(PROJECTS_DIR.rglob("*.md")):
-            block = _format_memory_file_entry(md_file, PROJECTS_DIR, 300)
-            if block:
-                projects.append(block)
-        if projects:
-            sections.append(
-                f"## 项目（{len(projects)} 个）\n\n" + "\n\n".join(projects)
-            )
 
-    # 3. 技能列表
-    skills = _iter_skills()
-    if skills:
-        skill_lines = []
-        for s in skills:
-            desc = s["description"] or ""
-            triggers = s.get("triggers", [])
-            trigger_str = f"（触发: {', '.join(triggers[:3])}）" if triggers else ""
-            skill_lines.append(f"- **{s['name']}**{trigger_str}: {desc}")
-        sections.append(
-            f"## 技能（{len(skills)} 个）\n\n" + "\n".join(skill_lines)
-        )
-
-    # 4. 最近会话摘要（按修改时间，含子目录）
-    sessions_dir = LAMPSON_DIR / "memory" / "sessions"
-    if sessions_dir.exists():
-        all_session_files = [p for p in sessions_dir.rglob("*.md") if p.is_file()]
-        session_files = sorted(all_session_files, key=_safe_mtime, reverse=True)[:3]
-        if session_files:
-            session_lines: list[str] = []
-            for sf in session_files:
-                block = _format_memory_file_entry(sf, sessions_dir, 500)
-                if block:
-                    session_lines.append(block)
-            if session_lines:
-                sections.append(
-                    f"## 最近会话摘要\n\n" + "\n\n".join(session_lines)
-                )
-
-    if not sections:
-        return "目前还没有存储任何记忆内容。"
-
-    return "# 我的记忆\n\n" + "\n\n".join(sections)
+def search_projects(params: dict[str, Any]) -> str:
+    """语义搜索项目，返回匹配的项目全文。"""
+    query = params.get("query", "").strip()
+    top_k = int(params.get("top_k", 2))
+    if not query:
+        return "[错误] query 参数不能为空"
+    global _active_project_index
+    if _active_project_index is None:
+        return "[提示] 项目索引未初始化"
+    try:
+        results = _active_project_index.search(query, top_k=top_k)  # type: ignore[union-attr]
+    except Exception as e:
+        return f"[错误] 搜索项目失败：{e}"
+    if not results:
+        return "未找到匹配的项目。"
+    return "\n\n---\n\n".join(results)

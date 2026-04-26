@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import re
 import shutil
+from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -204,3 +206,243 @@ def install_default_skills(default_skills_dir: Path) -> None:
         dest = SKILLS_DIR / skill_dir.name
         if not dest.exists():
             shutil.copytree(str(skill_dir), str(dest))
+
+
+# ── Consolidation ─────────────────────────────────────────────────────────────
+
+@dataclass
+class ConsolidationAction:
+    """一次合并操作。"""
+
+    keep: str  # 保留的 skill 名称
+    delete: list[str]  # 要删除的 skill 名称
+    merged_body: str  # 合并后的正文
+    keep_invocation_count: int  # 取要合并的 skills 中最大的 invocation_count
+
+
+def consolidate_skills(skills: dict[str, Skill], llm_client: Any) -> tuple[list[ConsolidationAction], str]:
+    """让 LLM 分析所有 skills 的重复/耦合，返回合并建议列表和原始分析文本。
+
+    返回 (actions, analysis)：actions 是可执行的合并操作列表；analysis 是 LLM 的分析文本。
+    如果 skills 数量 < 2，直接返回空列表。
+    """
+    if len(skills) < 2:
+        return [], ""
+
+    # 构造 skill 摘要供 LLM 分析
+    lines: list[str] = []
+    for name, s in skills.items():
+        triggers_str = ", ".join(s.triggers) if s.triggers else "(无)"
+        lines.append(
+            f"### {name}\n"
+            f"description: {s.description}\n"
+            f"triggers: {triggers_str}\n"
+            f"invocation_count: {s.path.exists() and _get_invocation_count(s.path) or 0}\n"
+            f"---\n"
+            f"{s.body[:500]}"
+        )
+
+    skills_text = "\n\n".join(lines)
+
+    prompt = (
+        "你是一个技能库管理员，负责找出重复或功能重叠的技能并提出合并方案。\n\n"
+        "## 判断标准\n"
+        "- **A 包含 B**：如果 skill A 的正文几乎覆盖了 skill B 的所有功能点，B 应该被删除，A 保留并补充 B 的独特部分到正文。\n"
+        "- **同功能不同实现**：如果 A 和 B 做的是同一件事但实现方式/触发词不同，合并成一个，用更好的描述和触发词。\n"
+        "- **各自独立**：如果两个 skill 关注点完全不同，保留各自。\n\n"
+        "## 当前 Skills\n\n"
+        f"{skills_text}\n\n"
+        "## 输出格式\n"
+        "请仔细分析，输出以下 JSON 格式（只输出 JSON，不要其他文字）：\n\n"
+        "```json\n"
+        "{\n"
+        '  "analysis": "你的分析说明（2-5句话），解释为什么这些技能需要或不需要合并",\n'
+        '  "actions": [\n'
+        '    {\n'
+        '      "keep": "保留的 skill 名称",\n'
+        '      "delete": ["要删除的 skill 名称列表"],\n'
+        '      "merged_body": "合并后的完整正文（包含被删除 skill 的有价值内容）",\n'
+        '      "keep_invocation_count": 保留的 invocation_count 值（取被合并 skills 中最大的）\n'
+        '    }\n'
+        "  ]\n"
+        "}\n"
+        "```\n\n"
+        "如果不需要任何合并，输出：\n"
+        "```json\n"
+        '{"analysis": "...", "actions": []}\n'
+        "```"
+    )
+
+    try:
+        # 用 clone_for_inference 创建干净实例，避免污染原有 messages
+        if hasattr(llm_client, "clone_for_inference"):
+            client = llm_client.clone_for_inference()
+            client.set_system_context()
+            client.add_user_message(prompt)
+            response = client.chat()
+        else:
+            raise ValueError("llm_client 不支持 clone_for_inference")
+    except Exception as e:
+        return [], f"[错误] 调用 LLM 失败：{e}"
+
+    raw = (response.choices[0].message.content or "").strip()
+
+    # 提取 JSON
+    try:
+        import json
+
+        # 找 ```json ... ``` 或直接 {...}
+        json_start = raw.find("```json")
+        if json_start != -1:
+            json_end = raw.find("```", json_start + 6)
+            json_str = raw[json_start + 7 : json_end].strip()
+        else:
+            json_start = raw.find("{")
+            json_end = raw.rfind("}") + 1
+            json_str = raw[json_start:json_end]
+
+        data = json.loads(json_str)
+    except Exception:
+        return [], f"[错误] 解析 LLM 返回失败：\n{raw}"
+
+    analysis = data.get("analysis", "")
+    raw_actions: list[dict] = data.get("actions", [])
+    actions: list[ConsolidationAction] = []
+
+    for raw_a in raw_actions:
+        keep = str(raw_a.get("keep", ""))
+        delete = [str(d) for d in raw_a.get("delete", [])]
+        merged_body = str(raw_a.get("merged_body", ""))
+        keep_ic = int(raw_a.get("keep_invocation_count", 0))
+
+        if keep and keep in skills:
+            actions.append(
+                ConsolidationAction(
+                    keep=keep,
+                    delete=delete,
+                    merged_body=merged_body,
+                    keep_invocation_count=keep_ic,
+                )
+            )
+
+    return actions, analysis
+
+
+def _get_invocation_count(path: Path) -> int:
+    """读取 SKILL.md 的 invocation_count。"""
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    match = _FRONTMATTER_RE.match(content)
+    if not match:
+        return 0
+    try:
+        meta = yaml.safe_load(match.group(1)) or {}
+        return int(meta.get("invocation_count", 0))
+    except (yaml.YAMLError, ValueError, TypeError):
+        return 0
+
+
+def _write_skill(path: Path, name: str, body: str, invocation_count: int, description: str, triggers: list[str]) -> None:
+    """写回 SKILL.md（保留 frontmatter，更新 body 和 invocation_count）。"""
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        raw = ""
+
+    match = _FRONTMATTER_RE.match(raw)
+    if match:
+        try:
+            meta = yaml.safe_load(match.group(1)) or {}
+        except yaml.YAMLError:
+            meta = {}
+        old_body = raw[match.end() :]
+    else:
+        meta = {}
+        old_body = raw
+
+    # 更新 meta
+    meta["name"] = name
+    meta["description"] = description
+    meta["triggers"] = triggers
+    meta["invocation_count"] = invocation_count
+    if "created_at" not in meta:
+        meta["created_at"] = date.today().isoformat()
+
+    dump = yaml.dump(meta, allow_unicode=True, default_flow_style=False).strip()
+    path.write_text(f"---\n{dump}\n---\n{body}", encoding="utf-8")
+
+
+def execute_consolidation(actions: list[ConsolidationAction]) -> str:
+    """执行合并操作：删被合并的 skill 目录，更新保留的 SKILL.md。"""
+    if not actions:
+        return "没有需要合并的技能。"
+
+    lines: list[str] = []
+    for action in actions:
+        keep_path = SKILLS_DIR / action.keep / "SKILL.md"
+        if not keep_path.is_file():
+            lines.append(f"[跳过] 保留的 skill '{action.keep}' 文件不存在")
+            continue
+
+        # 获取当前 skill 的 meta
+        try:
+            raw = keep_path.read_text(encoding="utf-8")
+        except OSError:
+            raw = ""
+        match = _FRONTMATTER_RE.match(raw)
+        if match:
+            try:
+                meta = yaml.safe_load(match.group(1)) or {}
+            except yaml.YAMLError:
+                meta = {}
+        else:
+            meta = {}
+
+        description = meta.get("description", "")
+        triggers: list[str] = meta.get("triggers", [])
+
+        # 收集被合并 skill 的 triggers（去重追加）
+        for del_name in action.delete:
+            del_path = SKILLS_DIR / del_name / "SKILL.md"
+            if del_path.is_file():
+                try:
+                    del_raw = del_path.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                del_match = _FRONTMATTER_RE.match(del_raw)
+                if del_match:
+                    try:
+                        del_meta = yaml.safe_load(del_match.group(1)) or {}
+                    except yaml.YAMLError:
+                        del_meta = {}
+                    del_triggers: list[str] = del_meta.get("triggers", [])
+                    for t in del_triggers:
+                        if t not in triggers:
+                            triggers.append(t)
+                    del_desc = del_meta.get("description", "")
+                    if del_desc and del_desc != description:
+                        description = f"{description} / {del_desc}"
+
+        # 写回
+        _write_skill(
+            keep_path,
+            name=action.keep,
+            body=action.merged_body,
+            invocation_count=action.keep_invocation_count,
+            description=description,
+            triggers=triggers,
+        )
+
+        # 删除被合并的目录
+        deleted_names: list[str] = []
+        for del_name in action.delete:
+            del_dir = SKILLS_DIR / del_name
+            if del_dir.is_dir():
+                shutil.rmtree(del_dir)
+                deleted_names.append(del_name)
+
+        lines.append(f"合并完成：保留 '{action.keep}'，删除 {deleted_names}，invocation_count={action.keep_invocation_count}")
+
+    return "\n".join(lines)
