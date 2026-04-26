@@ -120,7 +120,23 @@ class Agent:
                 tool_msg = self.adapter.format_tool_result(tc.id, result)
                 self.llm.messages.append(tool_msg)
 
-        return "[错误] 工具调用轮次超过限制，请重新提问。"
+        # ── 达到最大轮数，请求 LLM 总结 ──
+        logger.info(f"tool_loop: reached max_tool_rounds ({self.max_tool_rounds}), requesting summary")
+        summary_prompt = (
+            "你已达到工具调用的最大轮数限制。请总结当前进展："
+            "1) 已经完成了什么；2) 还没完成什么；3) 用户后续可以怎么做。"
+            "直接回复，不要再调用任何工具。"
+        )
+        self.llm.messages.append({"role": "user", "content": summary_prompt})
+        try:
+            response = self.adapter.chat(self.llm.messages, tools=None)
+            self.llm.messages.append(
+                response.choices[0].message.model_dump(exclude_none=True)
+            )
+            return (response.choices[0].message.content or "").strip()
+        except Exception as e:
+            logger.warning(f"summary call failed after max iterations: {e}")
+            return "[提示] 工具调用轮次已达上限，且总结请求失败。请继续提问以推进任务。"
 
     def _on_tool_progress(self, round_num: int, tool_name: str, args: str, result: str) -> None:
         """每个工具调用完成后实时通知 listener 更新进度卡片。"""

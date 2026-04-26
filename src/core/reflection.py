@@ -348,14 +348,19 @@ def _merge_triggers(skill_content: str, new_triggers: list[str]) -> str:
 
 def _get_existing_skills_summary() -> str:
     """获取已有 skills 的摘要列表。"""
-    from src.core.skills_tools import _iter_skills
-    skills = _iter_skills()
+    from src.skills.manager import load_all_skills
+    
+    try:
+        skills = load_all_skills()
+    except Exception:
+        return "（无）"
+    
     if not skills:
         return "（无）"
     lines = []
-    for s in skills:
-        desc = s.get("description", "") or ""
-        lines.append(f"- {s['name']}: {desc}")
+    for name, skill in skills.items():
+        desc = getattr(skill, 'description', '') or ""
+        lines.append(f"- {name}: {desc}")
     return "\n".join(lines)
 
 
