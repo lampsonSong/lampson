@@ -19,7 +19,8 @@ from src.core.config import (
     run_setup_wizard,
     LAMPSON_DIR,
 )
-from src.core.session import Session
+from src.core.session_manager import get_session_manager
+from src.memory import session_store
 
 
 PROMPT_STYLE = Style.from_dict({
@@ -106,8 +107,10 @@ def _parse_args() -> tuple[str | None, bool]:
     return None, False
 
 
-def _run_repl(session: Session) -> None:
+def _run_repl(config: dict) -> None:
     """交互式 REPL 循环。"""
+    mgr = get_session_manager(config)
+    session = mgr.get_or_create("cli", "default")
     skill_count = len(session.skills)
     feishu_status = "已连接" if session.feishu_ready else "未配置"
     print(f"Lampson 已启动（技能: {skill_count} 个，飞书: {feishu_status}）。输入 /help 查看命令，Ctrl+C 或 /exit 退出。\n")
@@ -150,7 +153,7 @@ def _run_repl(session: Session) -> None:
                 else:
                     print(f"\nLampson> {result.reply}\n")
 
-                # // FIX-3: 计划待确认时由用户选择是否执行
+                # 计划待确认时由用户选择是否执行
                 if (
                     not result.is_command
                     and result.reply
@@ -170,7 +173,10 @@ def _run_repl(session: Session) -> None:
                         print(f"\nLampson> {session.agent.cancel_plan()}\n")
                     # 与 handle_input 一致：确认/取消后的回合也尝试压缩
                     try:
-                        cr = session.agent.maybe_compact()
+                        cr = session.agent.maybe_compact(
+                            session_store=session_store,
+                            session_id=session.session_id or "",
+                        )
                         if cr is not None:
                             if cr.success:
                                 print(
@@ -194,14 +200,25 @@ def main() -> None:
     """程序入口。"""
     non_interactive_input, is_slash_command = _parse_args()
 
-    # 非交互模式
-    if non_interactive_input is not None:
-        config = load_config()
-        if not is_config_complete(config):
+    config = load_config()
+    if not is_config_complete(config):
+        if non_interactive_input is not None:
             print("Lampson 未配置，请先运行 lampson 进入交互模式完成配置。")
             sys.exit(1)
+        try:
+            config = run_setup_wizard()
+        except (KeyboardInterrupt, EOFError):
+            print("\n配置已取消，退出。")
+            sys.exit(0)
+        if not is_config_complete(config):
+            print("API Key 未填写，无法启动。")
+            sys.exit(1)
 
-        session = Session.from_config(config)
+    mgr = get_session_manager(config)
+
+    # 非交互模式
+    if non_interactive_input is not None:
+        session = mgr.get_or_create("cli", "default")
         result = session.handle_input(non_interactive_input)
 
         if result.reply == "__SERVE__":
@@ -214,19 +231,7 @@ def main() -> None:
         return
 
     # 交互模式
-    config = load_config()
-    if not is_config_complete(config):
-        try:
-            config = run_setup_wizard()
-        except (KeyboardInterrupt, EOFError):
-            print("\n配置已取消，退出。")
-            sys.exit(0)
-        if not is_config_complete(config):
-            print("API Key 未填写，无法启动。")
-            sys.exit(1)
-
-    session = Session.from_config(config)
-    _run_repl(session)
+    _run_repl(config)
 
 
 if __name__ == "__main__":

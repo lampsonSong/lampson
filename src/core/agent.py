@@ -51,6 +51,8 @@ class Agent:
 
         # 中间过程回调：由 listener 注入，用于实时发送工具调用状态
         self.progress_callback: Callable[[str], None] | None = None
+        # 工具调用计数器（跨多次 tool_loop 累计，用于判断是否应继续循环）
+        self._total_tool_calls: int = 0
 
     def refresh_tools(self) -> None:
         """重新加载工具列表（外部注册新工具后调用）。"""
@@ -89,54 +91,67 @@ class Agent:
     def _run_tool_loop(self) -> str:
         self._fast_path_tool_count = 0
 
-        for round_num in range(self.max_tool_rounds):
+        while True:
+            for round_num in range(self.max_tool_rounds):
+                try:
+                    response = self.adapter.chat(self.llm.messages, tools=self._tools)
+                except RuntimeError as e:
+                    return f"[LLM 错误] {e}"
+
+                if response.usage:
+                    self.last_total_tokens = response.usage.total_tokens
+
+                self.llm.messages.append(
+                    response.choices[0].message.model_dump(exclude_none=True)
+                )
+
+                parsed = self.adapter.parse_response(response)
+                self.last_stop_reason = parsed.finish_reason
+
+                if not parsed.tool_calls:
+                    logger.info(f"tool_loop round {round_num+1}: finish (no tool_calls), content_len={len(parsed.content or '')}")
+                    return parsed.content or ""
+
+                for tc in parsed.tool_calls:
+                    logger.info(f"tool_loop round {round_num+1}: dispatch {tc.name}({tc.raw_arguments[:200]})")
+                    result = tool_registry.dispatch(tc.name, tc.raw_arguments)
+                    self._fast_path_tool_count += 1
+
+                    # 实时通知 listener：一个工具调用完成
+                    self._on_tool_progress(round_num + 1, tc.name, tc.raw_arguments, result)
+
+                    tool_msg = self.adapter.format_tool_result(tc.id, result)
+                    self.llm.messages.append(tool_msg)
+
+            # ── 达到最大轮数：总结现状，清空计数器，继续解决 ──
+            logger.info(f"tool_loop: reached max_tool_rounds ({self.max_tool_rounds}), summarizing and continuing")
+            summary_prompt = (
+                "你已达到本轮工具调用上限（"
+                + str(self.max_tool_rounds)
+                + " 轮）。请简洁总结当前进展："
+                "1) 已经完成了什么；2) 还在尝试什么；3) 下一步计划。"
+                "直接回复内容，不要调用任何工具。"
+            )
+            self.llm.messages.append({"role": "user", "content": summary_prompt})
             try:
-                response = self.adapter.chat(self.llm.messages, tools=self._tools)
-            except RuntimeError as e:
-                return f"[LLM 错误] {e}"
+                response = self.adapter.chat(self.llm.messages, tools=None)
+                self.llm.messages.append(
+                    response.choices[0].message.model_dump(exclude_none=True)
+                )
+                # 检查 LLM 是否认为任务已完成（回复中包含"完成了"、"结束"等意图）
+                content = (response.choices[0].message.content or "").strip().lower()
+                done_indicators = ["已完成", "任务完成", "搞定了", "完成了所有", "all done", "done!", "completed"]
+                if any(ind in content for ind in done_indicators):
+                    logger.info("tool_loop: LLM indicated task done after summary")
+                    return response.choices[0].message.content or ""
+            except Exception as e:
+                logger.warning(f"summary call failed after max iterations: {e}")
 
-            if response.usage:
-                self.last_total_tokens = response.usage.total_tokens
-
-            self.llm.messages.append(
-                response.choices[0].message.model_dump(exclude_none=True)
-            )
-
-            parsed = self.adapter.parse_response(response)
-            self.last_stop_reason = parsed.finish_reason
-
-            if not parsed.tool_calls:
-                logger.info(f"tool_loop round {round_num+1}: finish (no tool_calls), content_len={len(parsed.content or '')}")
-                return parsed.content or ""
-
-            for tc in parsed.tool_calls:
-                logger.info(f"tool_loop round {round_num+1}: dispatch {tc.name}({tc.raw_arguments[:200]})")
-                result = tool_registry.dispatch(tc.name, tc.raw_arguments)
-                self._fast_path_tool_count += 1
-
-                # 实时通知 listener：一个工具调用完成
-                self._on_tool_progress(round_num + 1, tc.name, tc.raw_arguments, result)
-
-                tool_msg = self.adapter.format_tool_result(tc.id, result)
-                self.llm.messages.append(tool_msg)
-
-        # ── 达到最大轮数，请求 LLM 总结 ──
-        logger.info(f"tool_loop: reached max_tool_rounds ({self.max_tool_rounds}), requesting summary")
-        summary_prompt = (
-            "你已达到工具调用的最大轮数限制。请总结当前进展："
-            "1) 已经完成了什么；2) 还没完成什么；3) 用户后续可以怎么做。"
-            "直接回复，不要再调用任何工具。"
-        )
-        self.llm.messages.append({"role": "user", "content": summary_prompt})
-        try:
-            response = self.adapter.chat(self.llm.messages, tools=None)
-            self.llm.messages.append(
-                response.choices[0].message.model_dump(exclude_none=True)
-            )
-            return (response.choices[0].message.content or "").strip()
-        except Exception as e:
-            logger.warning(f"summary call failed after max iterations: {e}")
-            return "[提示] 工具调用轮次已达上限，且总结请求失败。请继续提问以推进任务。"
+            # 追加继续提示，让 LLM 继续解决
+            self.llm.messages.append({
+                "role": "user",
+                "content": "请继续解决上述问题。如果已解决请直接回复结论，不需要再调用工具。",
+            })
 
     def _on_tool_progress(self, round_num: int, tool_name: str, args: str, result: str) -> None:
         """每个工具调用完成后实时通知 listener 更新进度卡片。"""
@@ -190,8 +205,17 @@ class Agent:
         except Exception:
             return 0
 
-    def maybe_compact(self) -> CompactionResult | None:
-        """检查并执行上下文压缩。"""
+    def maybe_compact(
+        self,
+        session_store: Any = None,
+        session_id: str = "",
+    ) -> CompactionResult | None:
+        """检查并执行上下文压缩。
+
+        Args:
+            session_store: session_store 模块，用于写入 segment_boundary。
+            session_id: 当前会话 id，需与 JSONL 一致；空字符串则仍执行压缩逻辑但不落 segment 边界。
+        """
         if self._compaction_config is None:
             return None
 
@@ -201,14 +225,18 @@ class Agent:
         ):
             return None
 
-        actual_tokens = self._estimate_context_tokens()
+        msg_count = sum(1 for m in self.llm.messages if m.get("role") != "system")
+        estimated_tokens = self._estimate_context_tokens()
 
         try:
             return apply_compaction(
                 agent_llm=self.llm,
                 config=self._compaction_config,
-                last_total_tokens=actual_tokens,
+                message_count=msg_count,
+                estimated_tokens=estimated_tokens,
                 stop_reason=self.last_stop_reason,
+                session_id=session_id,
+                session_store=session_store,
             )
         except Exception as e:
             logger.warning(f"压缩异常: {e}")

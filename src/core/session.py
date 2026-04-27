@@ -7,7 +7,9 @@ gateway 层（cli.py / listener.py）只需关心消息收发，
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -25,6 +27,8 @@ from src.core.adapters import BaseModelAdapter, create_adapter
 from src.core.compaction import CompactionConfig
 from src.core.agent import Agent
 from src.memory import manager as memory_mgr
+from src.memory import session_store
+from src.memory.session_search import search_sessions
 from src.core import skills_tools as skills_tools_reg
 from src.skills import manager as skills_mgr
 
@@ -41,6 +45,7 @@ HELP_TEXT = """\
   /memory add <text>             添加记忆条目
   /memory search <keyword>       搜索记忆
   /memory forget <keyword>       删除含关键词的记忆条目
+  /search <keyword>              搜索历史对话记录
   /skills list                   列出所有技能
   /skills show <name>            查看技能详情
   /skills create <name>          创建新技能
@@ -54,6 +59,70 @@ HELP_TEXT = """\
   /exit                          退出
 
 直接输入自然语言即可与 Lampson 对话。"""
+
+
+def _assistant_content_as_text(content: Any) -> str:
+    """从 assistant content 提取可检索的纯文本（含多段 text block）。"""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(str(block.get("text", "")))
+        return "\n".join(parts)
+    return str(content) if content else ""
+
+
+def _infer_referenced_tool_call_ids(msgs: list, assistant_msg: dict) -> list[str]:
+    """根据本回合 assistant 正文与此前列 tool 结果，推断引用的 tool_call_id。
+
+    与 memory-design 一致：只记录“回复内容实际引用/依据”的 prior tool 结果，而非当条里的 tool_calls。
+    """
+    content_text = _assistant_content_as_text(assistant_msg.get("content", ""))
+    if not content_text.strip():
+        return []
+    try:
+        idx = next(i for i, m in enumerate(msgs) if m is assistant_msg)
+    except StopIteration:
+        return []
+
+    prior_ids: list[str] = []
+    for m in msgs[:idx]:
+        if m.get("role") != "tool":
+            continue
+        tid = m.get("tool_call_id") or m.get("id") or ""
+        if tid:
+            prior_ids.append(tid)
+    if not prior_ids:
+        return []
+
+    referenced: list[str] = []
+    seen: set[str] = set()
+    for tid in prior_ids:
+        if tid in content_text:
+            if tid not in seen:
+                seen.add(tid)
+                referenced.append(tid)
+            continue
+        # 单条 tool 且回复较长时，常见指代词视为引用该结果（启发式）
+        if len(prior_ids) == 1 and len(content_text) > 30:
+            if any(
+                k in content_text
+                for k in (
+                    "结果",
+                    "返回",
+                    "输出",
+                    "上面",
+                    "根据",
+                    "如下",
+                    "显示",
+                )
+            ):
+                if tid not in seen:
+                    seen.add(tid)
+                    referenced.append(tid)
+    return referenced
 
 
 @dataclass
@@ -96,6 +165,11 @@ class Session:
         self._pending_consolidation: list | None = None
         # 实时消息回调：由 listener 注入，用于 /model all 等流式场景
         self.partial_sender: Callable[[str], None] | None = None
+        # session 生命周期标识（JSONL 写入用）
+        self.session_id: str = ""
+        self._current_segment: int = 0
+        # SessionManager 引用（用于 start_feishu_listener 传给 FeishuListener）
+        self._session_manager: Any = None
 
     # ── 工厂方法 ──
 
@@ -170,6 +244,10 @@ class Session:
         pidx.load_or_build()
 
         session = cls(agent=agent, config=config, skills=skills)
+        # 创建 session（JSONL 写入需要 session_id）
+        si = session_store.create_session(source="cli")
+        session.session_id = si.session_id
+        session._current_segment = 0
         session.skill_index = sidx
         session.project_index = pidx
         session.retrieval_config = retrieval
@@ -195,19 +273,36 @@ class Session:
         if user_input.startswith("/"):
             return self._handle_command(user_input)
 
+        # 写入 user 消息到 JSONL
+        if self.session_id:
+            session_store.append_message(
+                session_id=self.session_id,
+                role="user",
+                content=user_input,
+                segment=self._current_segment,
+            )
+
         # 自然语言
         try:
             reply = self.agent.run(user_input)
         except Exception as e:
             return HandleResult(reply=f"[错误] {e}")
 
+        # 写入 assistant 消息到 JSONL
+        if self.session_id:
+            self._write_assistant_to_jsonl()
+
         # 压缩
         compaction_msg = ""
         try:
-            cr = self.agent.maybe_compact()
+            cr = self.agent.maybe_compact(
+                session_store=session_store,
+                session_id=self.session_id or "",
+            )
             if cr is not None:
                 if cr.success:
                     compaction_msg = f"[上下文压缩] 已完成，归档 {cr.archived_count} 条内容。"
+                    self._current_segment += 1
                 else:
                     compaction_msg = f"[上下文压缩] 失败: {cr.error}"
         except Exception:
@@ -239,11 +334,55 @@ class Session:
         return self._feishu_initialized
 
     def save_summary(self) -> None:
-        """保存会话摘要（退出时调用）。"""
+        """保存会话摘要并结束 session（退出时调用）。"""
+        # 写入 session_end
+        if self.session_id:
+            try:
+                session_store.end_session(self.session_id)
+            except Exception:
+                pass
+
+        # core.md 更新检查（累计 archive > 5 或距上次更新 > 24h）
+        try:
+            self._maybe_update_core_md()
+        except Exception:
+            pass
+
+        # 旧摘要逻辑（保留兼容）
         try:
             summary = self.agent.generate_session_summary()
             if summary.strip():
                 memory_mgr.save_session_summary(summary)
+        except Exception:
+            pass
+
+    def _write_assistant_to_jsonl(self) -> None:
+        """将 agent.llm.messages 中的最后一条 assistant 消息写入 JSONL。"""
+        msgs = self.agent.llm.messages
+        if not msgs:
+            return
+        # 找最后一条 role=assistant 的消息
+        assistant_msg = None
+        for msg in reversed(msgs):
+            if msg.get("role") == "assistant":
+                assistant_msg = msg
+                break
+        if not assistant_msg:
+            return
+
+        content = assistant_msg.get("content", "")
+        tool_calls = assistant_msg.get("tool_calls")
+        referenced_ids = _infer_referenced_tool_call_ids(msgs, assistant_msg)
+
+        try:
+            session_store.append_message(
+                session_id=self.session_id,
+                role="assistant",
+                content=content or "",
+                tool_calls=tool_calls,
+                referenced_tool_results=referenced_ids if referenced_ids else None,
+                segment=self._current_segment,
+            )
         except Exception:
             pass
 
@@ -255,7 +394,7 @@ class Session:
             skills_tools_reg.set_retrieval_indices(self.skill_index, self.project_index)
 
     def start_feishu_listener(self) -> None:
-        """启动飞书长连接监听（阻塞）。"""
+        """启动飞书长连接监听（daemon thread，不阻塞 REPL）。"""
         feishu_cfg = self.config.get("feishu", {})
         app_id = feishu_cfg.get("app_id", "").strip()
         app_secret = feishu_cfg.get("app_secret", "").strip()
@@ -264,8 +403,18 @@ class Session:
             raise RuntimeError("飞书未配置，请在 config.yaml 中填写 feishu.app_id 和 feishu.app_secret")
 
         from src.feishu.listener import FeishuListener
-        listener = FeishuListener(app_id=app_id, app_secret=app_secret, session=self)
-        listener.start()
+
+        # 通过 SessionManager 启动，确保 feishu 消息路由到正确的 Session
+        mgr = self._session_manager
+        if mgr is None:
+            raise RuntimeError("Session 未绑定到 SessionManager，无法启动飞书监听")
+
+        listener = FeishuListener(
+            app_id=app_id,
+            app_secret=app_secret,
+            session_manager=mgr,
+        )
+        listener.start()  # daemon thread，立即返回
 
     # ── 命令路由 ──
 
@@ -304,6 +453,9 @@ class Session:
 
         if command == "/model":
             return HandleResult(reply=self._handle_model(parts), is_command=True)
+
+        if command == "/search":
+            return HandleResult(reply=self._handle_search(parts), is_command=True)
 
         return HandleResult(
             reply=f"未知命令：{command}，输入 /help 查看帮助。",
@@ -558,6 +710,111 @@ class Session:
         description = " ".join(parts[1:])
         return updater.run_update(description, self.agent.llm)
 
+    def _handle_search(self, parts: list[str]) -> str:
+        """处理 /search 命令：搜索历史对话。"""
+        if len(parts) < 2:
+            return "用法: /search <关键词>"
+
+        query = " ".join(parts[1:])
+        try:
+            results = search_sessions(query=query, limit=5)
+        except Exception as e:
+            return f"[错误] 搜索失败: {e}"
+
+        if not results:
+            return f"没有找到与 \"{query}\" 相关的历史对话。"
+
+        from datetime import datetime
+
+        lines = [f"找到 {len(results)} 条与 \"{query}\" 相关的记录：\n"]
+        for i, r in enumerate(results, 1):
+            role_label = "用户" if r.role == "user" else "Lampson"
+            try:
+                dt = datetime.fromtimestamp(r.ts / 1000).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                dt = str(r.ts)
+            lines.append(f"--- 结果 {i} ---\n[{dt}] {role_label}（session: {r.session_id}）\n{r.snippet}\n")
+
+        return "\n".join(lines)
+
+    def _maybe_update_core_md(self) -> None:
+        """检查是否需要更新 core.md（退出时调用）。
+
+        触发条件：累计 archive 次数 > 5 或距上次更新超过 24 小时。
+        """
+        from src.core.compaction import COMPACTION_LOG
+        import os
+
+        # 读取 compaction_log 统计 archive 次数
+        archive_count = 0
+        if COMPACTION_LOG.exists():
+            try:
+                with open(COMPACTION_LOG, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        entry = json.loads(line)
+                        targets = entry.get("archive_targets", [])
+                        if targets:
+                            archive_count += len(targets)
+            except Exception:
+                pass
+
+        # 读取 core.md 最后修改时间
+        core_md_path = LAMPSON_DIR / "core.md"
+        hours_since_update = float("inf")
+        if core_md_path.exists():
+            mtime = core_md_path.stat().st_mtime
+            hours_since_update = (time.time() - mtime) / 3600
+
+        if archive_count <= 5 and hours_since_update < 24:
+            return
+
+        # 需要更新：收集 skill/project 精华
+        skill_summaries: list[str] = []
+        for p in SKILLS_DIR.glob("*.md"):
+            try:
+                content = p.read_text(encoding="utf-8").strip()
+                if content:
+                    skill_summaries.append(f"### {p.stem}\n{content[:500]}")
+            except OSError:
+                pass
+
+        project_summaries: list[str] = []
+        for p in PROJECTS_DIR.glob("*.md"):
+            try:
+                content = p.read_text(encoding="utf-8").strip()
+                if content:
+                    project_summaries.append(f"### {p.stem}\n{content[:500]}")
+            except OSError:
+                pass
+
+        if not skill_summaries and not project_summaries:
+            return
+
+        # LLM 抽取精华
+        all_content = "\n\n".join(skill_summaries + project_summaries)
+        prompt = (
+            "以下是 Lampson 的归档知识（skill 和 project），"
+            "请抽取对长期记忆最有价值的精华，生成简洁的 core.md 内容。\n"
+            "只保留：用户偏好、关键决策、重要约束、常用工具技巧。\n"
+            "每条一行，用简洁的中文描述。不要超过 50 行。\n\n"
+            f"## Skills\n{all_content}\n"
+        )
+        try:
+            result = self.agent.run(prompt)
+            if result and result.strip():
+                core_md_path.parent.mkdir(parents=True, exist_ok=True)
+                # 写前备份
+                if core_md_path.exists():
+                    import shutil
+                    shutil.copy2(core_md_path, core_md_path.with_suffix(".md.bak"))
+                core_md_path.write_text(result.strip(), encoding="utf-8")
+                print(f"[core.md] 已更新（archive={archive_count}, 距上次 {hours_since_update:.0f}h）")
+        except Exception as e:
+            logger.warning(f"core.md 更新失败: {e}")
+
 
 # ── 模块级辅助函数（Session 内部使用，不暴露给 gateway） ──
 
@@ -610,14 +867,13 @@ def _build_compaction_config(
 
     Args:
         config: 顶层配置字典（含 compaction 段）。
-        model_context_window: 模型自身的 context_window，优先于 compaction 段的值。
+        model_context_window: 模型自身的 context_window（未使用，保留接口兼容）。
     """
     c = config.get("compaction", {})
-    context_window = model_context_window or c.get("context_window", 131072)
     return CompactionConfig(
-        trigger_threshold=c.get("trigger_threshold", 0.8),
-        end_threshold=c.get("end_threshold", 0.3),
-        context_window=context_window,
-        max_iterations=c.get("max_iterations", 3),
-        enable_archive=c.get("enable_archive", True),
+        trigger_msg_count=c.get("trigger_msg_count", 150),
+        trigger_token_estimate=c.get("trigger_token_estimate", 60_000),
+        end_threshold_percent=c.get("end_threshold_percent", 80.0),
+        max_archive_per_compaction=c.get("max_archive_per_compaction", 20),
+        compaction_log_max_bytes=c.get("compaction_log_max_bytes", 10 * 1024 * 1024),
     )

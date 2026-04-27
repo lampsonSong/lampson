@@ -1,6 +1,6 @@
 # Lampson 项目文档
 
-> 文档版本：2026-04-25（Session 三层架构重构）
+> 文档版本：2026-04-27（SessionManager 多渠道架构）
 > 项目版本：v0.2.0-dev
 
 ---
@@ -26,70 +26,102 @@
 
 ## 二、技术架构
 
-### 2.1 三层架构
+### 2.1 架构演进
+
+#### 旧架构（v0.1）：单 Session 全局共享
 
 ```
-┌──────────────────── Gateway 层 ────────────────────┐
-│                                                     │
-│  cli.py                 feishu/listener.py          │
-│  参数解析 + REPL 循环    WebSocket 收发 + 去重       │
-│  结果展示               消息解析                     │
-│                                                     │
-└─────────────────────┬──────────────────────────────┘
-                      │ session.handle_input(text)
-                      ▼
-┌──────────────────── Session 层 ────────────────────┐
-│                                                     │
-│  core/session.py                                    │
-│  Agent 生命周期 / 命令路由 / 压缩触发 / 飞书初始化   │
-│                                                     │
-│  Session.from_config(config)  工厂方法               │
-│  Session.handle_input(text)   统一入口 → HandleResult│
-│                                                     │
-└─────────────────────┬──────────────────────────────┘
-                      │ agent.run() / agent.maybe_compact()
-                      ▼
-┌──────────────────── Agent 层 ──────────────────────┐
-│                                                     │
-│  core/agent.py          planning/                   │
-│  LLM 主循环 + 工具分发   规划器 + 执行器 + 状态机    │
-│                                                     │
-└────────┬───────────────────────┬───────────────────┘
-         │                       │
-    ┌────┴────┐           ┌──────┴───────┐
-    │         │           │              │
-    ▼         ▼           ▼              ▼
-┌──────┐  ┌──────────────┐  ┌──────────┐  ┌─────────┐
-│ LLM  │  │ Tool Registry│  │ Prompt   │  │Compaction│
-│Client│  └──────┬───────┘  │ Builder  │  │ 归档+摘要│
-└──┬───┘         │          └──────────┘  └─────────┘
-   │         ┌────┴────┬──────────┬──────────┐
-   │         ▼         ▼          ▼          ▼
-   │     ┌────────┐ ┌────────┐ ┌────────┐ ┌─────────┐
-   │     │ Shell  │ │FileOps │ │  Web   │ │ Feishu │
-   │     └────────┘ └────────┘ └────────┘ └─────────┘
+cli.py ──────────────────→ Session (ONE) ──→ Agent ──→ LLM(messages)
+feishu/listener.py (blocking start()) ↗
+```
+
+问题：所有渠道共享同一个 LLM context；Feishu start() 阻塞，CLI 无法并发。
+
+#### 新架构（v0.2+）：SessionManager + 多 Session
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                      Gateway 层                           │
+│                                                           │
+│   cli.py                     feishu/listener.py           │
+│   REPL 循环                   WebSocket 非阻塞（daemon）  │
+│   结果展示                    消息解析 + 去重              │
+│                               ↓ route_to_session()         │
+└───────────────────────────────┬──────────────────────────┘
+                                │
+                                ▼
+┌──────────────────────────────────────────────────────────┐
+│              SessionManager (src/core/session_manager.py) │
+│                                                           │
+│   session_manager.get_or_create(channel, sender_id)       │
+│   └─→ 返回一个独立的 Session 实例                           │
+│                                                           │
+│   channel 路由规则：                                      │
+│     "cli"        → 全局唯一一个 Session（开发者专用）      │
+│     "feishu:*"   → 每个 sender_id 一个独立 Session         │
+│     "telegram:*" → 每个 sender_id 一个独立 Session        │
+│     "discord:*"  → 每个 sender_id 一个独立 Session         │
+└───────────────────────────────┬──────────────────────────┘
+                                │ session.handle_input(text)
+                                ▼
+┌──────────────────────────────────────────────────────────┐
+│              Session 层（每渠道/用户独立）                  │
+│                                                           │
+│   core/session.py                                          │
+│   独立的 Agent 实例 / 独立的 LLM.messages / 独立压缩触发   │
+│                                                           │
+│   Session.from_config(config)  工厂方法（每个 Session 调用一次）│
+│   Session.handle_input(text)   统一入口 → HandleResult     │
+│   Session.exit()               退出时保存摘要 + 触发压缩    │
+└───────────────────────────────┬──────────────────────────┘
+                                │
+                                ▼
+┌──────────────────────────────────────────────────────────┐
+│                      Agent 层                             │
+│                                                           │
+│   core/agent.py             planning/                     │
+│   LLM 主循环 + 工具分发      规划器 + 执行器 + 状态机      │
+│   max_tool_rounds 循环模式（30轮自动继续，不交用户选择）    │
+└────────┬────────────────────────┬───────────────────────┘
+         │                        │
+    ┌────┴────┐            ┌───────┴────────┐
+    │         │            │                │
+    ▼         ▼            ▼                ▼
+┌──────┐  ┌────────┐  ┌──────────┐  ┌─────────┐
+│ LLM  │  │Tool    │  │ Prompt   │  │Compaction│
+│Client│  │Registry│  │ Builder  │  │ 归档+摘要│
+└──┬───┘  └────┬───┘  └──────────┘  └─────────┘
+   │            │
+   │       ┌────┴────┬──────────┬──────────┐
+   │       ▼         ▼          ▼          ▼
+   │   ┌────────┐ ┌────────┐ ┌────────┐ ┌─────────┐
+   │   │ Shell  │ │FileOps │ │  Web   │ │ Feishu │
+   │   └────────┘ └────────┘ └────────┘ └─────────┘
    │
    ▼
  智谱 API
 
-              ┌───┴────┐      ┌──────▼────┐
-              │ Memory  │      │  Skills    │
-              │ Manager │      │  Manager   │
-              └────┬────┘      └──────┬────┘
-                   │                   │
-              ┌────┴────┐        ┌────▼─────┐
-              │ core.md │        │ ~/.lampson/
-              │sessions/│        │ skills/  │
-              └─────────┘        └──────────┘
+         ┌───┴────┐         ┌──────▼─────┐
+         │ Memory  │         │  Skills    │
+         │ Manager │         │  Manager   │
+         └────┬────┘         └──────┬─────┘
+              │                    │
+         ┌────┴────┐         ┌────▼─────┐
+         │ core.md │         │ ~/.lampson/
+         │sessions/│         │ skills/  │
+         └─────────┘         └──────────┘
 ```
+
+**核心原则**：每个渠道（channel + sender_id）拥有独立的 Session，各自的 LLM context 独立累积、互不干扰。
 
 ### 2.2 核心模块
 
 | 模块 | 文件 | 职责 |
 |------|------|------|
+| SessionManager | `src/core/session_manager.py` | **新增**：管理多个 Session 实例，按 channel+sender_id 路由 |
 | CLI 入口 | `src/cli.py` | 参数解析 + REPL 循环 + 结果展示（纯 Gateway） |
 | Session | `src/core/session.py` | Agent 生命周期 + 命令路由 + 压缩触发 + 飞书初始化 |
-| Agent | `src/core/agent.py` | LLM 主循环，工具调用分发，规划执行 |
+| Agent | `src/core/agent.py` | LLM 主循环，工具调用分发，规划执行，max_tool_rounds 循环 |
 | Planning | `src/planning/` | 任务规划器 + 步骤执行器 + Plan 状态机 |
 | LLM | `src/core/llm.py` | 封装 OpenAI SDK，支持原生/prompt-based 两种 tool calling |
 | PromptBuilder | `src/core/prompt_builder.py` | 分层构建 system prompt（9层） |
@@ -99,15 +131,13 @@
 | Skills | `src/skills/manager.py` | 技能发现、匹配、加载 |
 | Skills Tools | `src/core/skills_tools.py` | Agent 可调用的 skill_view / skills_list / project_context |
 | Feishu Client | `src/feishu/client.py` | 飞书 REST API 封装（发送/读取消息） |
-| Feishu Listener | `src/feishu/listener.py` | WebSocket 收发 + 去重（纯 Gateway，走 Session） |
-| Feishu Poller | `src/feishu/poller.py` | 轮询方式接收飞书消息（备选） |
+| Feishu Listener | `src/feishu/listener.py` | WebSocket 非阻塞监听（daemon thread），消息路由到 SessionManager |
 | Self-update | `src/selfupdate/updater.py` | 自更新流程（LLM生成方案 → 用户确认 → git分支执行） |
 | Shell Tool | `src/tools/shell.py` | 执行 shell 命令，带危险命令拦截 |
 | FileOps Tool | `src/tools/fileops.py` | 文件读写，带大小限制保护 |
 | Web Tool | `src/tools/web.py` | DuckDuckGo 网页搜索 |
 | Compaction | `src/core/compaction.py` | 上下文压缩：归档+摘要，可迭代 |
 
----
 
 ## 三、功能清单
 
@@ -154,9 +184,9 @@
 #### 飞书通信
 - 发送消息（支持 user_id / open_id / chat_id）
 - 读取最近消息（按时间倒序）
-- WebSocket 长连接监听（`/serve` 命令）
-- 轮询方式监听（备选）
+- WebSocket 长连接监听（非阻塞 daemon thread，路由到 SessionManager）
 - 消息去重器（基于 message_id 的滑动窗口 TTL）
+- `/serve` 启动后 CLI 与飞书监听并发运行，独立 Session 互不干扰
 
 #### 自更新
 - `/update <需求描述>`：LLM 分析需求 → 生成代码修改方案 → 用户确认 → git 分支执行
@@ -168,8 +198,8 @@
 #### 命令行接口
 - `/help`、`/config`、`/exit`
 - `/memory`、`/skills`、`/feishu`、`/update`
-- `/serve`：启动飞书 WebSocket 监听
 - 全套 `--memory`、`--skills`、`--feishu`、`--update`、`--serve` 等命令行参数
+- `--serve` 启动后飞书监听以 daemon 线程运行，CLI 继续交互
 
 #### 上下文压缩（Context Compaction）
 - 自动检测：agent.run() 返回后检查 token 用量，超过阈值（默认 80%）触发
@@ -236,7 +266,7 @@ class Session:
         └─ 自然语言 → agent.run() → maybe_compact()
 
     def init_feishu(self) -> bool              # 飞书客户端初始化
-    def start_feishu_listener(self) -> None    # 启动 WebSocket 监听（阻塞）
+    def start_feishu_listener(self) -> None    # 启动 WebSocket 监听（daemon thread，非阻塞）
     def save_summary(self) -> None             # 退出时保存会话摘要
 ```
 
@@ -342,22 +372,22 @@ triggers:
 - `FeishuClient`：封装所有 REST API 调用
 - **自动刷新 token**：每 2 小时刷新，留 200s 余量
 - `send_message()`：发送文本消息
-- `get_messages()`：拉取历史消息（轮询方式）
+- `get_messages()`：拉取历史消息（REST API，非 WebSocket 轮询）
 - 全局单例模式：`init_client()` → `get_client()`
 
 ### 4.10 飞书监听 (`src/feishu/listener.py`)
 
-纯 Gateway 层，基于 `lark_oapi` WebSocket 长连接：
+纯 Gateway 层，基于 `lark_oapi` WebSocket 长连接，非阻塞（daemon thread）：
 
 ```
 start()
-  ├─ lark.ws.Client(app_id, app_secret, handler)
-  └─ ws_client.start()  阻塞运行
+  ├─ threading.Thread(target=ws_client.start, daemon=True)
+  └─ t.start()  立即返回，REPL 继续
 ```
 
 - `MessageDeduplicator`：基于 message_id 的滑动窗口 TTL 去重
-- `_handle_message()`：解析消息 → `session.handle_input(text)` → 回复
-- 向后兼容：可传 `agent` 或 `session`（推荐 session）
+- `_handle_message()`：解析消息 → `session_manager.get_or_create(...)` 取得 `Session` → `session.handle_input()` → 回复
+- 路由：消息根据 channel + sender_id 分发到对应 Session
 
 ### 4.11 自更新 (`src/selfupdate/updater.py`)
 
@@ -658,7 +688,7 @@ vim ~/.lampson/config.yaml
 | clone_for_inference | `llm.py` | 只带 system prompt 的轻量克隆，用于 /model all 避免深拷贝 |
 | 裸 JSON 工具调用解析 | `session.py` | GPTOssModel 有时输出 `{"command":"..."}` 不走 `<tool_call:xxx>` 格式，加 json.loads fallback |
 | PLATFORM_HINTS 远程机器提示 | `prompt_builder.py` | 强制要求先 `project_context("machines")` 获取 SSH 别名，find 加 `-maxdepth` |
-| max_tool_rounds 可配置 | `config.yaml`, `agent.py` | 从 config 读取，默认 30 |
+| max_tool_rounds 循环模式 | `config.yaml`, `agent.py` | 从 config 读取，默认 30。30轮内解决则返回；达到上限则 LLM 总结现状后**自动继续**（不交用户选择），直到 LLM 主动声明完成 |
 | MessageDeduplicator TTL | `listener.py` | 60s → 600s，/model all 工具调用耗时超过 60s 导致重复处理 |
 | 过期消息丢弃 | `listener.py` | 投递延迟超过 60 秒的消息直接丢弃，防止飞书 WebSocket 积压后补投旧消息 |
 | executor `_safe_replace_value` | `executor.py` | 多行 `$step[N].result` 引用截断为第一行，避免破坏 shell 命令语法 |
