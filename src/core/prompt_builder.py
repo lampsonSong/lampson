@@ -54,17 +54,15 @@ SKILLS_GUIDANCE = (
 )
 
 TOOL_USE_ENFORCEMENT = (
-    "# 工具使用强制要求\n"
-    "你必须使用工具采取行动——不能只描述你要做什么而不实际执行。\n"
-    "当你说要执行某个操作时，必须在同一回复中立即调用相应工具。\n"
-    "不要用总结'下一步计划'来结束回合——立即执行。\n"
-    "每轮回复必须：(a) 包含推进任务的工具调用，或 (b) 向用户交付最终结果。\n"
-    "只描述意图而不行动是不可接受的。"
+    "执行具体任务时（写代码、查文件、改配置等），必须立即使用工具行动，不许只描述意图。"
+    "回答提问、聊天、确认等场景直接回复即可，不需要硬塞工具调用。"
 )
 
-SESSION_SEARCH_GUIDANCE = (
-    "当用户提到过去对话的内容，或你怀疑存在跨会话的相关上下文，\n"
-    "使用 session_search 工具搜索历史记录，不要让用户重复自己。"
+SESSION_CONTINUITY_GUIDANCE = (
+    "当用户提到\"上次\"、\"继续\"、\"之前那个\"等暗示延续旧对话时，使用 session_load 恢复上一次对话历史。\n"
+    "session_load 会把旧 session 的消息加载到当前对话中，你就能自然延续上下文。\n"
+    "如果用户只是泛泛提问（如\"上次让我干啥\"），先调 session_load 加载最近 session，再回答。\n"
+    "用 session_search 搜索跨多个 session 的历史内容。"
 )
 
 # ── Frontmatter 解析 ─────────────────────────────────────────────────────────
@@ -155,8 +153,9 @@ def build_skills_index() -> str:
     key = _skills_mtime_fingerprint(paths)
     lines: list[str] = [
         "## Skills（按需加载）",
-        "以下是你已掌握的技能目录。当任务与某个 skill 相关时，用 skill_view(name=\"技能名\") 加载全文。",
-        "如果没有 skill 与当前任务相关，直接回答即可。",
+        "以下是你已掌握的技能目录，每项包含触发词。",
+        "**规则**：当用户输入匹配某个 skill 的触发词时，你必须在回复之前先调用 skill_view(name=\"技能名\") 加载全文，然后按 skill 指导执行任务。",
+        "如果没有 skill 的触发词与当前任务相关，直接回答即可。",
         "",
     ]
     for path in paths:
@@ -350,7 +349,7 @@ class PromptBuilder:
         if skills_block.strip():
             l2.append(skills_block)
         l2.extend([
-            SESSION_SEARCH_GUIDANCE,
+            SESSION_CONTINUITY_GUIDANCE,
             SKILLS_GUIDANCE,
             TOOL_USE_ENFORCEMENT,
         ])

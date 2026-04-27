@@ -17,30 +17,26 @@
 
 | 条件 | 阈值 | 说明 |
 |------|------|------|
-| 消息数量 | 累计 150 条消息 | 保护 context 不溢出 |
-| Token 估算 | 触发时 ~60k tokens | 预留空间 |
+| Token 估算 | `tokens / context_window >= trigger_threshold`（百分比，默认 80%） | 保护 context 不溢出 |
 | stopReason 白名单 | `end_turn` 或 `aborted` | 防止工具调用中途被打断时触发 |
 
 ```python
 STOP_REASONS = {"end_turn", "aborted"}
-TRIGGER_MSG_COUNT = 150
-TRIGGER_TOKEN_ESTIMATE = 60_000
+# trigger_threshold 从 config.yaml 读取（默认 0.8，即 context_window 的 80%）
+# context_window 从 config.yaml 读取（GLM-5.1 = 131072）
 END_THRESHOLD_PERCENT = 80   # 归档完成后，context 应降到 80% 以下
 ```
 
 ### 触发流程
 
 ```
-触发条件满足
-    │
-    ▼
-等待 stopReason in STOP_REASONS
+触发条件满足（Token 占比 >= trigger_threshold 且 stopReason in STOP_REASONS）
     │
     ▼
 执行 Archive Phase（见下文）
     │
     ▼
-校验: 剩余消息 token < END_THRESHOLD_PERCENT * context_limit
+校验: 剩余消息 token < END_THRESHOLD_PERCENT * context_window
     │
     ├── 通过 → 完成，写入 .compaction_log.jsonl
     └── 未通过 → 报警（LLM 归档不充分，需人工 review）
@@ -249,12 +245,13 @@ lampson/
 ├── projects/            # Project 文件（按项目组织）
 │   ├── my-website.md
 │   └── cli-tool.md
-├── sessions/            # 原始对话 JSONL（按日期/session 组织）
-│   ├── 2025-04-27/
-│   │   ├── session_abc.jsonl
-│   │   └── session_def.jsonl
-│   └── 2025-04-28/
-│       └── session_ghi.jsonl
+├── memory/
+│   └── sessions/    # 原始对话 JSONL（按日期/session 组织）
+│       ├── 2025-04-27/
+│       │   ├── session_abc.jsonl
+│       │   └── session_def.jsonl
+│       └── 2025-04-28/
+│           └── session_ghi.jsonl
 ├── compaction.py       # 压缩模块
 └── .compaction_log.jsonl  # 压缩操作日志（可审计）
 ```
@@ -284,9 +281,20 @@ PROJECTS_DIR = Path("~/.lampson/projects").expanduser()
 COMPACTION_LOG = Path("~/.lampson/.compaction_log.jsonl")
 
 STOP_REASONS = {"end_turn", "aborted"}
-TRIGGER_MSG_COUNT = 150
-TRIGGER_TOKEN_ESTIMATE = 60_000  # ~150 条消息 × 400 tokens/条
+# trigger_threshold 和 context_window 从 config.yaml 读取
 END_THRESHOLD_PERCENT = 80.0
+
+
+def _estimate_tokens(messages: list[dict]) -> int:
+    """估算消息列表的总 token 数（简化实现）。"""
+    import tiktoken
+    enc = tiktoken.get_encoding("cl100k_base")
+    total = 0
+    for msg in messages:
+        content = msg.get("content", "")
+        if content:
+            total += len(enc.encode(content))
+    return total
 
 
 class Decision(TypedDict):
@@ -307,19 +315,13 @@ class ClassifyResult(TypedDict):
     tool_refs: dict[str, ToolRef]
 
 
-def should_trigger(messages: list[dict], stop_reason: str) -> bool:
+def should_trigger(messages: list[dict], stop_reason: str, config: CompactionConfig) -> bool:
     """判断是否应该触发归档。"""
     if stop_reason not in STOP_REASONS:
         return False
-    if len(messages) < TRIGGER_MSG_COUNT:
-        return False
-    # Token 估算：按平均每条消息 400 tokens 估算（user+assistant 往返），
-    # 触发阈值 60k ~150 条消息量级。若实际 token 超限但条数不足，
-    # 下次 compaction 会继续触发，不漏检。
-    estimated_tokens = len(messages) * 400
-    if estimated_tokens < TRIGGER_TOKEN_ESTIMATE:
-        return False
-    return True
+    estimated_tokens = _estimate_tokens(messages)
+    threshold = config.context_window * config.trigger_threshold
+    return estimated_tokens >= threshold
 
 
 def classify_messages(messages: list[dict], existing_files: dict[str, str]) -> ClassifyResult:
@@ -373,7 +375,7 @@ def run_compaction(messages: list[dict]) -> list[dict]:
 
     **调用方**：Agent 运行时由 `maybe_compact()` 调用，不在 Session 退出时调用。
 
-    触发条件：消息数 ≥ 150 条 或 Token 估算 ≥ 60k，且 stopReason 为 end_turn/aborted。
+    触发条件：Token 估算 / context_window >= trigger_threshold，且 stopReason 为 end_turn/aborted。
 
     步骤顺序（原子性保障）：
     1. LLM 分类（不涉及写入）
@@ -547,11 +549,38 @@ compaction、core.md 更新、session_end 写入发生在不同阶段：
 
 | 阶段 | 触发时机 | 操作 |
 |------|----------|------|
-| **运行时** | 消息数 ≥ 150 或 Token ≥ 60k，stopReason 为 end_turn/aborted | `run_compaction()` → 写 segment_boundary + skill/project |
+| **运行时** | Token 占比 >= trigger_threshold，stopReason 为 end_turn/aborted | `run_compaction()` → 写 segment_boundary + skill/project |
 | **退出时** | 用户结束对话 / 断连 | core.md 更新检查（累计 archive 次数 > 5 或距上次更新 > N 小时） |
 | **退出时** | 同上 | 写入 `session_end` 行到 JSONL |
 
 三者互不干扰：compaction 是运行时多次触发，core.md 更新和 session_end 是退出时一次性执行。
+
+| **新 session 启动** | 新 session 创建时 | 检查上一条 session 有无 summary；无则读 JSONL 补生成后写入 sessions 表，再 inject 到当前 session |
+
+---
+
+**新 session 启动时的 summary 补生成流程**：
+
+```
+新 session 创建
+    │
+    ▼
+查上一条 session 的 summary（sessions 表）
+    │
+    ├── 有 summary → 直接 inject 到 system prompt 末尾
+    │
+    └── 没有 summary
+            ▼
+        读上一条 session 的 JSONL 消息（session_store.get_session_messages）
+            ▼
+        调用 LLM 生成 progress summary（session_resume.generate_session_summary）
+            ▼
+        写入 sessions 表（补上 summary 字段）
+            ▼
+        inject 到当前 session 的 system prompt 末尾
+```
+
+> **为什么不用"退出时生成"**：退出时机不可靠（用户强制退出、crash 等）；改为"启动时检查并补生成"更稳定，同时覆盖正常退出和异常退出场景。
 
 ---
 
@@ -573,7 +602,7 @@ Session 退出
 ```
 
 **为什么不每次 compaction 都更新 core.md**：
-- compaction 频繁（每 150 条消息），core.md 膨胀会每次拖慢启动
+- compaction 触发频率取决于 context 使用速度，core.md 膨胀会每次拖慢启动
 - core.md 内容本身需要人工可读可维护，频繁改写不利
 
 **召回路径优先级**：
@@ -585,7 +614,7 @@ Session 退出
 
 ## 验收标准
 
-- [ ] 触发条件正确：150 条消息 + stopReason 白名单 + token 估算
+- [ ] 触发条件正确：Token 占比 >= trigger_threshold（百分比）+ stopReason 白名单
 - [ ] Step 1 输出有效 JSON，无写入操作
 - [ ] Step 2 读取已有文件（支持 skill / project 两种 target）
 - [ ] Step 3 写前备份，写后校验

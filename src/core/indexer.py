@@ -1,11 +1,10 @@
-"""Skill / Project 语义索引：JSONL 存储、增量更新、可选 sentence-transformers 与关键词降级。"""
+"""Skill / Project 语义索引：JSONL 存储、增量更新、远程 Embedding API + 关键词降级。"""
 
 from __future__ import annotations
 
 import json
 import logging
 import math
-import os
 import re
 import shutil
 from dataclasses import dataclass, field
@@ -13,39 +12,78 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import openai
 import yaml
 
 logger = logging.getLogger(__name__)
 
-# 国内环境默认使用 HuggingFace 镜像
-if not os.environ.get("HF_ENDPOINT"):
-    os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-
 from src.core.skills_tools import _parse_skill
 
-try:
-    from sentence_transformers import SentenceTransformer  # type: ignore[import-untyped]
-except ImportError:  # pragma: no cover - 环境无重依赖
-    SentenceTransformer = None  # type: ignore[misc, assignment]
-
-_HAS_ST = SentenceTransformer is not None
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 _WORD_RE = re.compile(r"[a-z0-9]+|[\u4e00-\u9fff]+", re.IGNORECASE)
 
 
 @dataclass
-class _LoadedModel:
-    """延迟加载的 embedding 模型。"""
+class _EmbeddingClient:
+    """远程 Embedding API 客户端（OpenAI 兼容接口）。"""
 
-    name: str
-    _model: Any = field(default=None, repr=False)
+    provider: str
+    model: str
+    api_key: str
+    base_url: str
+    _client: openai.OpenAI | None = field(default=None, repr=False)
 
-    def get(self) -> Any:
-        if not _HAS_ST:
-            return None
-        if self._model is None:
-            self._model = SentenceTransformer(self.name)  # type: ignore[union-attr]
-        return self._model
+    def _get_client(self) -> openai.OpenAI:
+        if self._client is None:
+            self._client = openai.OpenAI(
+                api_key=self.api_key, base_url=self.base_url
+            )
+        return self._client
+
+    def embed(self, text: str) -> list[float]:
+        """单条文本 embedding，失败返回空列表。"""
+        if not text.strip() or not self.api_key or not self.base_url:
+            return []
+        try:
+            resp = self._get_client().embeddings.create(
+                model=self.model, input=[text]
+            )
+            return [float(x) for x in resp.data[0].embedding]
+        except Exception as ex:
+            logger.warning("Embedding API failed for provider=%s: %s", self.provider, ex)
+            return []
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """批量 embedding，失败逐条降级重试，最终仍失败返回空列表。"""
+        if not texts or not self.api_key or not self.base_url:
+            return [[] for _ in texts]
+        # 过滤空文本
+        results: list[list[float]] = []
+        non_empty_indices: list[int] = []
+        non_empty_texts: list[str] = []
+        for i, t in enumerate(texts):
+            if t.strip():
+                non_empty_indices.append(i)
+                non_empty_texts.append(t)
+            results.append([])
+        if not non_empty_texts:
+            return results
+        try:
+            resp = self._get_client().embeddings.create(
+                model=self.model, input=non_empty_texts
+            )
+            for idx, data in zip(non_empty_indices, resp.data):
+                results[idx] = [float(x) for x in data.embedding]
+            return results
+        except Exception as ex:
+            logger.warning(
+                "Batch embedding failed for provider=%s, falling back to single: %s",
+                self.provider, ex,
+            )
+            # 逐条降级
+            for idx, text in zip(non_empty_indices, non_empty_texts):
+                results[idx] = self.embed(text)
+            return results
 
 
 def _parse_project_body(content: str) -> str:
@@ -181,10 +219,10 @@ class SkillIndex:
         self,
         skills_dir: Path,
         index_dir: Path,
-        embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        embedding_config: dict[str, str] | None = None,
         skills_management: dict[str, Any] | None = None,
     ) -> None:
-        _ = embedding_model  # 保留参数以兼容 Session 调用；Skill 索引不再使用 embedding
+        _ = embedding_config  # Skill 索引不使用 embedding
         self.skills_dir = skills_dir
         self.index_dir = index_dir
         self._skills_management = skills_management
@@ -369,26 +407,30 @@ class ProjectIndex:
         self,
         projects_dir: Path,
         index_dir: Path,
-        embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        embedding_config: dict[str, str] | None = None,
     ) -> None:
         self.projects_dir = projects_dir
         self.index_dir = index_dir
-        self._model = _LoadedModel(embedding_model)
+        if embedding_config and embedding_config.get("api_key") and embedding_config.get("base_url"):
+            self._embed_client = _EmbeddingClient(
+                provider=embedding_config["provider"],
+                model=embedding_config["model"],
+                api_key=embedding_config["api_key"],
+                base_url=embedding_config["base_url"],
+            )
+        else:
+            self._embed_client = None
         self._entries: list[dict[str, Any]] = []
         self._by_path: dict[str, dict[str, Any]] = {}
 
     @property
     def _use_embedding(self) -> bool:
-        return _HAS_ST
+        return self._embed_client is not None
 
     def _embed(self, text: str) -> list[float]:
-        if not text.strip() or not self._use_embedding:
+        if not text.strip() or not self._embed_client:
             return []
-        m = self._model.get()
-        if m is None:
-            return []
-        vec = m.encode(text, normalize_embeddings=True, show_progress_bar=False)
-        return [float(x) for x in vec.tolist()]
+        return self._embed_client.embed(text)
 
     def load_or_build(self) -> None:
         self.index_dir.mkdir(parents=True, exist_ok=True)
@@ -476,3 +518,112 @@ class ProjectIndex:
                 }
             )
         return items
+
+
+# ── EmbeddingIndexer: 异步批量队列 ─────────────────────────────────────
+# 设计文档 §4.7
+
+import queue
+import threading
+import time
+
+
+class EmbeddingIndexer:
+    """后台线程批量计算 embedding 并写入 messages_embedding 表。
+
+    攒 batch（默认 32 条或每 5 秒）后调远程 API 批量算向量，
+    写入 SQLite messages_embedding 表。
+    """
+
+    def __init__(
+        self,
+        provider: str,
+        model: str,
+        api_key: str,
+        base_url: str,
+        batch_size: int = 32,
+    ) -> None:
+        self._provider = provider
+        self._model = model
+        self._client = _EmbeddingClient(
+            provider=provider,
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+        )
+        self._batch_size = batch_size
+        self._queue: queue.Queue[dict[str, Any]] = queue.Queue()
+        self._stop = threading.Event()
+        self._worker = threading.Thread(target=self._run, daemon=True)
+        self._worker.start()
+        logger.info(
+            "EmbeddingIndexer started: provider=%s, model=%s, batch_size=%d",
+            provider, model, batch_size,
+        )
+
+    def enqueue(self, msg_id: str, session_id: str, ts: int, content: str) -> None:
+        """将一条消息加入待计算队列。"""
+        self._queue.put({
+            "msg_id": msg_id,
+            "session_id": session_id,
+            "ts": ts,
+            "content": content,
+        })
+
+    def stop(self) -> None:
+        """停止后台线程（会 flush 剩余）。"""
+        self._stop.set()
+        self._worker.join(timeout=10)
+
+    def _run(self) -> None:
+        batch: list[dict[str, Any]] = []
+        while not self._stop.wait(5.0):  # 每 5 秒醒来 flush 一次
+            while len(batch) < self._batch_size and not self._queue.empty():
+                try:
+                    batch.append(self._queue.get_nowait())
+                except queue.Empty:
+                    break
+            if batch:
+                self._flush(batch)
+                batch = []
+        # 退出前 flush 剩余
+        while not self._queue.empty():
+            try:
+                batch.append(self._queue.get_nowait())
+            except queue.Empty:
+                break
+        if batch:
+            self._flush(batch)
+        logger.info("EmbeddingIndexer stopped")
+
+    def _flush(self, batch: list[dict[str, Any]]) -> None:
+        """批量调 embedding API 并写入 SQLite。"""
+        texts = [b["content"] for b in batch]
+        vectors = self._client.embed_batch(texts)
+        if not vectors or len(vectors) != len(batch):
+            logger.warning("Embedding batch size mismatch: %d items, %d vectors",
+                           len(batch), len(vectors) if vectors else 0)
+            return
+
+        import sqlite3
+        import struct as _struct
+        from src.memory.session_store import _get_db
+
+        conn = _get_db()
+        try:
+            now = int(time.time() * 1000)
+            for item, vec in zip(batch, vectors):
+                if not vec:
+                    continue
+                blob = _struct.pack(f"{len(vec)}f", *vec)
+                conn.execute(
+                    "INSERT OR REPLACE INTO messages_embedding(msg_id, session_id, ts, embedding, provider, indexed_at) "
+                    "VALUES(?, ?, ?, ?, ?, ?)",
+                    (item["msg_id"], item["session_id"], item["ts"], blob, self._provider, now),
+                )
+            conn.commit()
+            logger.debug("EmbeddingIndexer flushed %d vectors", len(batch))
+        except Exception as ex:
+            logger.error("EmbeddingIndexer flush failed: %s", ex)
+        finally:
+            conn.close()

@@ -17,6 +17,7 @@ from typing import Any, Callable
 from src.core.config import (
     LAMPSON_DIR,
     get_retrieval_config,
+    get_embedding_config,
     INDEX_DIR,
     SKILLS_DIR,
     PROJECTS_DIR,
@@ -46,6 +47,8 @@ HELP_TEXT = """\
   /memory search <keyword>       搜索记忆
   /memory forget <keyword>       删除含关键词的记忆条目
   /search <keyword>              搜索历史对话记录
+  /resume                        列出最近 5 个 session
+  /resume <id>                   加载指定 session 到当前对话
   /skills list                   列出所有技能
   /skills show <name>            查看技能详情
   /skills create <name>          创建新技能
@@ -216,6 +219,12 @@ class Session:
                     "context_window": model_cfg.get("context_window"),
                 }
 
+        # 构建 fallback_models（排除主模型，保留 llm_clients 中的顺序）
+        fallback_models: list[tuple[LLMClient, BaseModelAdapter]] = []
+        for name, cw in llm_clients.items():
+            if name != primary_name:
+                fallback_models.append((cw["llm"], cw["adapter"]))
+
         compaction_cfg = _build_compaction_config(config, model_context_window=primary_cw)
         max_tool_rounds = config.get("max_tool_rounds")
         agent = Agent(
@@ -223,26 +232,27 @@ class Session:
             adapter=primary_adapter,
             compaction_config=compaction_cfg,
             max_tool_rounds=max_tool_rounds,
+            fallback_models=fallback_models,
         )
         agent.set_context(core_memory=core_memory)
         agent.skills = skills
 
         retrieval = get_retrieval_config(config)
+        embedding_cfg = get_embedding_config(config)
         skills_path = Path(str(config.get("skills_path", str(SKILLS_DIR)))).expanduser()
         projects_path = Path(
             str(config.get("projects_path", str(PROJECTS_DIR)))
         ).expanduser()
         projects_path.mkdir(parents=True, exist_ok=True)
-        model_name = str(retrieval["embedding_model"])
         sm_raw = config.get("skills_management")
         sidx = SkillIndex(
             skills_path,
             INDEX_DIR,
-            embedding_model=model_name,
+            embedding_config=embedding_cfg,
             skills_management=sm_raw if isinstance(sm_raw, dict) else None,
         )
         sidx.load_or_build()
-        pidx = ProjectIndex(projects_path, INDEX_DIR, embedding_model=model_name)
+        pidx = ProjectIndex(projects_path, INDEX_DIR, embedding_config=embedding_cfg)
         pidx.load_or_build()
 
         session = cls(agent=agent, config=config, skills=skills)
@@ -262,6 +272,9 @@ class Session:
         # 注入 LLM Client 给 reflection 的自动合并
         from src.core import reflection
         reflection.set_llm_client(primary_llm)
+        # 注入 Session 引用给 session_load 工具
+        from src.tools import session_load as session_load_tool
+        session_load_tool.set_current_session(session)
         session.init_feishu()
         return session
 
@@ -339,7 +352,7 @@ class Session:
         return self._feishu_initialized
 
     def save_summary(self) -> None:
-        """保存会话摘要并结束 session（退出时调用）。"""
+        """结束 session（退出时调用）。"""
         # 写入 session_end
         if self.session_id:
             try:
@@ -352,37 +365,6 @@ class Session:
             self._maybe_update_core_md()
         except Exception:
             pass
-
-        # 旧摘要逻辑（保留兼容）
-        try:
-            summary = self.agent.generate_session_summary()
-            if summary.strip():
-                memory_mgr.save_session_summary(summary)
-        except Exception:
-            pass
-
-    def _inject_resume_summary(self, summary: str) -> None:
-        """把上一条 session 的进度 summary 注入到当前 system prompt 末尾。
-
-        在 SessionManager 检测到 idle 超时、创建新 session 时调用。
-        """
-        from src.core.session_resume import build_resume_injection
-
-        if not summary:
-            return
-        injection = build_resume_injection(summary)
-        if not injection:
-            return
-
-        # 追加到 system prompt 末尾
-        primary_name = self._current_model_name
-        llm_bundle = self.llm_clients.get(primary_name)
-        if not llm_bundle:
-            return
-        llm = llm_bundle["llm"]
-        if llm.messages and llm.messages[0].get("role") == "system":
-            original = llm.messages[0]["content"]
-            llm.messages[0]["content"] = original + injection
 
     def _write_assistant_to_jsonl(self) -> None:
         """将 agent.llm.messages 中的最后一条 assistant 消息写入 JSONL。"""
@@ -420,6 +402,55 @@ class Session:
             self.skill_index.load_or_build()
             self.agent.skill_index = self.skill_index
             skills_tools_reg.set_retrieval_indices(self.skill_index, self.project_index)
+
+    def load_session(self, session_id: str = "", limit: int = 50) -> str:
+        """加载指定或最近 session 的对话历史到当前 llm.messages。
+
+        Args:
+            session_id: 要加载的 session ID。为空则加载最近的。
+            limit: 最多加载最近 N 条消息。
+
+        Returns:
+            加载结果摘要。
+        """
+        if not session_id:
+            # 找最近一个已结束的 session
+            sessions = session_store.list_recent_sessions(limit=1)
+            if not sessions:
+                return "没有找到历史 session。"
+            session_id = sessions[0]["session_id"]
+
+        messages = session_store.get_session_messages(session_id, limit=limit)
+        if not messages:
+            return f"Session {session_id} 没有消息记录。"
+
+        # 追加到当前 llm.messages（system prompt 之后）
+        llm = self.agent.llm
+        inject_msgs: list[dict] = []
+        for msg in messages:
+            role = msg.get("role", "")
+            if role not in ("user", "assistant"):
+                continue
+            entry: dict[str, Any] = {"role": role}
+            content = msg.get("content", "")
+            if role == "assistant" and msg.get("tool_calls"):
+                entry["content"] = content or ""
+                entry["tool_calls"] = msg["tool_calls"]
+            else:
+                entry["content"] = content
+            inject_msgs.append(entry)
+
+        if not inject_msgs:
+            return f"Session {session_id} 没有可加载的对话消息。"
+
+        # 在 system prompt 之后插入
+        if llm.messages and llm.messages[0].get("role") == "system":
+            llm.messages[1:1] = inject_msgs
+        else:
+            llm.messages[:0] = inject_msgs
+
+        loaded_count = len(inject_msgs)
+        return f"已加载 session {session_id} 的最近 {loaded_count} 条消息。"
 
     def start_feishu_listener(self) -> None:
         """启动飞书长连接监听（daemon thread，不阻塞 REPL）。"""
@@ -484,6 +515,9 @@ class Session:
 
         if command == "/search":
             return HandleResult(reply=self._handle_search(parts), is_command=True)
+
+        if command == "/resume":
+            return HandleResult(reply=self._handle_resume(parts), is_command=True)
 
         return HandleResult(
             reply=f"未知命令：{command}，输入 /help 查看帮助。",
@@ -765,6 +799,35 @@ class Session:
 
         return "\n".join(lines)
 
+    def _handle_resume(self, parts: list[str]) -> str:
+        """处理 /resume 命令：列出或加载历史 session。"""
+        if len(parts) >= 2:
+            # /resume <id> → 加载指定 session
+            session_id = parts[1]
+            return self.load_session(session_id=session_id)
+
+        # /resume → 列出最近 5 个 session
+        try:
+            sessions = session_store.list_recent_sessions(limit=5)
+        except Exception as e:
+            return f"[错误] 获取历史 session 失败: {e}"
+
+        if not sessions:
+            return "没有找到历史 session。"
+
+        lines = ["最近的 session：\n"]
+        for i, s in enumerate(sessions, 1):
+            sid = s["session_id"]
+            from datetime import datetime
+            try:
+                dt = datetime.fromtimestamp(s["started_at"] / 1000).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                dt = str(s["started_at"])
+            msg_count = s.get("message_count", "?")
+            lines.append(f"  {i}. [{dt}] {sid} ({msg_count} 条消息)")
+        lines.append("\n使用 /resume <id> 加载指定 session。")
+        return "\n".join(lines)
+
     def _maybe_update_core_md(self) -> None:
         """检查是否需要更新 core.md（退出时调用）。
 
@@ -899,8 +962,8 @@ def _build_compaction_config(
     """
     c = config.get("compaction", {})
     return CompactionConfig(
-        trigger_msg_count=c.get("trigger_msg_count", 150),
-        trigger_token_estimate=c.get("trigger_token_estimate", 60_000),
+        context_window=int(c.get("context_window", 131_072)),
+        trigger_threshold=float(c.get("trigger_threshold", 0.8)),
         end_threshold_percent=c.get("end_threshold_percent", 80.0),
         max_archive_per_compaction=c.get("max_archive_per_compaction", 20),
         compaction_log_max_bytes=c.get("compaction_log_max_bytes", 10 * 1024 * 1024),

@@ -1,12 +1,10 @@
 """
-Memory 模块：管理 Lampson 的两层记忆系统。
+Memory 模块：管理 Lampson 的记忆系统。
 
-新架构（JSONL + SQLite FTS5）：
+JSONL + SQLite FTS5 架构：
 - session_store: JSONL 写入 + SQLite 索引同步
 - session_search: FTS5 搜索 + LIKE 降级 + 召回 API
-
-旧架构（摘要写 .md 文件）：
-- manager: load_core, add_memory, search_memory, save_session_summary 等
+- manager: core.md 核心记忆读写（load_core, add_memory, search_memory 等）
 """
 
 from __future__ import annotations
@@ -23,6 +21,7 @@ from .session_store import (
     get_latest_segment_boundary,
     load_resume_context,
     rebuild_index,
+    rebuild_jsonl,
     SEARCH_DB,
     SESSIONS_DIR,
 )
@@ -33,7 +32,7 @@ from .session_search import (
 )
 
 __all__ = [
-    # 旧接口（保留兼容）
+    # manager 模块（保留兼容）
     "manager",
     # 新接口
     "create_session",
@@ -46,6 +45,7 @@ __all__ = [
     "get_latest_segment_boundary",
     "load_resume_context",
     "rebuild_index",
+    "rebuild_jsonl",
     "search_sessions",
     "SearchResult",
     "SEARCH_DB",

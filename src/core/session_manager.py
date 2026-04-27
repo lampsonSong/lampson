@@ -1,7 +1,5 @@
 """SessionManager：管理多个 Session 实例，按 channel+sender_id 路由。
 
-设计文档：docs/PROJECT.md §2.1
-
 路由规则：
   "cli"         → 全局唯一一个 Session（开发者专用）
   "feishu:{id}" → 每个 sender_id 一个独立 Session
@@ -12,7 +10,8 @@
   session_manager.get_or_create(channel, sender_id) → Session
 
 Idle 超时重置：
-  Session 3 小时无活动自动结束 → 生成 summary → 新 session 加载旧 summary。
+  Session 3 小时无活动自动结束 → 创建新空白 session。
+  LLM 根据 SESSION_CONTINUITY_GUIDANCE 判断是否需要 session_load 恢复旧对话。
 """
 
 from __future__ import annotations
@@ -99,20 +98,10 @@ class SessionManager:
     # ── Session 创建 ────────────────────────────────────────────────────
 
     def _create_session(self, channel: str, sender_id: str) -> "Session":
-        """创建新 Session（调用时须持有 self._lock）。
-
-        如果存在同 channel 的上一条已结束 session，自动加载其 summary 注入到 system prompt。
-        """
+        """创建新 Session（调用时须持有 self._lock）。"""
         from src.core.session import Session
 
         from src.memory import session_store as ss
-
-        # 尝试加载上一条 session 的 summary
-        prev_summary = ""
-        try:
-            prev_summary = ss.get_last_session_summary(channel, sender_id) or ""
-        except Exception:
-            pass
 
         try:
             si = ss.create_session(source=channel)
@@ -126,21 +115,16 @@ class SessionManager:
         session._session_manager = self
         session.last_activity_at = time.time()
 
-        # 注入上一条 session 的 summary
-        if prev_summary:
-            session._inject_resume_summary(prev_summary)
-
         return session
 
     # ── Idle 重置 ──────────────────────────────────────────────────────
 
     def _reset_session(self, channel: str, sender_id: str, is_cli: bool) -> None:
-        """结束旧 session、生成 summary、注入新 session 并加载旧 summary。
+        """结束旧 session，创建新空白 session。
 
         调用时须持有 self._lock。
         """
         from src.memory import session_store as ss
-        from src.core import session_resume
 
         # 获取旧 session（在 lock 内操作，缓存引用不变）
         old_session = self._cli_session if is_cli else self._sessions.get(sender_id)
@@ -148,29 +132,17 @@ class SessionManager:
             return
 
         old_id = old_session.session_id
-        cache_key = "cli" if is_cli else sender_id
 
         print(f"[session_manager] Session {old_id} idle 超时，触发重置", flush=True)
 
-        # 生成 summary（使用旧 session 的 LLM client）
-        summary = ""
-        if old_id:
-            messages = ss.get_session_messages(old_id)
-            if messages:
-                llm_bundle = old_session.llm_clients.get(old_session._current_model_name)
-                if llm_bundle:
-                    summary = session_resume.generate_session_summary(messages, llm_bundle["llm"])
-                    if summary:
-                        print(f"[session_manager] summary: {summary[:80]}...", flush=True)
-
-        # 结束旧 session（写入 summary）
+        # 结束旧 session（不生成 summary）
         if old_id:
             try:
-                ss.end_session(old_id, summary=summary)
+                ss.end_session(old_id)
             except Exception as e:
                 print(f"[session_manager] end_session 失败: {e}", flush=True)
 
-        # 创建新 session（在 lock 内；_create_session 会自动加载旧 summary）
+        # 创建新 session（空白，不注入任何旧信息）
         new_session = self._create_session(channel=channel, sender_id=sender_id)
 
         # 更新缓存
@@ -180,8 +152,7 @@ class SessionManager:
             self._sessions[sender_id] = new_session
 
         print(
-            f"[session_manager] 新 session {new_session.session_id} 已创建"
-            f"{'，已注入旧 summary' if summary else ''}",
+            f"[session_manager] 新 session {new_session.session_id} 已创建",
             flush=True,
         )
 

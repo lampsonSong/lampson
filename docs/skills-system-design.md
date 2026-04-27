@@ -119,64 +119,35 @@ skill body 应包含以下结构（不是强制，但建议遵循）：
 
 ## 3. 触发机制
 
-### 当前实现（被动式）
-
-```
-用户消息 → system prompt 包含 skill 索引 → LLM 自己判断是否需要 skill_view
-```
-
-问题：LLM 经常**不主动调用** skill_view，而是自己瞎搞。
-
-### 目标实现（主动式）
-
-在 planner 的 **阶段一（意图分类）** 加入 skill 触发检查：
+Skill 触发通过 **system prompt 索引块 + 强指引** 在 LLM 工具调用循环中实现，无需独立的 classify 阶段：
 
 ```
 用户消息
-  → 阶段一 classify（判断意图 + 检查是否匹配 skill trigger）
-    → 如果匹配 → 阶段二 plan 的第一步自动加入 skill_view(name="xxx")
-    → 进入计划执行时，第一步先加载 skill 内容到上下文
+  → LLM 读取 system prompt 中的 Skills 索引（含触发词）
+    → 如果匹配触发词 → LLM 自行调用 skill_view(name="xxx")
+    → 加载 skill 全文到上下文 → 按指导执行任务
 ```
 
-### 具体改动
+### 3.1 System prompt 中的 Skills 索引块
 
-#### 3.1 classify prompt 增加 skill 触发判断
-
-在 `build_classify_prompt()` 中，除了输出 `intent/confidence/missing_info` 外，增加：
-
-```json
-{
-  "matched_skill": "reverse-tracking"  // 或 null
-}
-```
-
-classify prompt 中注入所有 skill 的 triggers 列表（很轻量）：
+`build_skills_index()` 在 system prompt 中注入完整的技能目录，每项包含触发词：
 
 ```
-## Skills 触发词
-- reverse-tracking: 找代码, 找项目, 代码在哪, 项目在哪, where is, locate
-- debug: debug, 调试, 报错, 错误, error, exception, traceback, fix
-- code-writing: 写代码, 写一个, 创建文件, 编写, implement, 实现
+## Skills（按需加载）
+以下是你已掌握的技能目录，每项包含触发词。
+**规则**：当用户输入匹配某个 skill 的触发词时，你必须在回复之前先调用 skill_view(name="技能名") 加载全文，然后按 skill 指导执行任务。
+如果没有 skill 的触发词与当前任务相关，直接回答即可。
+
+- **reverse-tracking**: 代码反向追踪方法（触发: 找代码, 找项目, 代码在哪, where is, locate）
+- **debug**: 调试方法论（触发: debug, 调试, 报错, error, traceback, fix）
+- **code-writing**: 代码编写规范（触发: 写代码, 写一个, 创建文件, implement, 实现）
 ```
 
-#### 3.2 planner 阶段二自动注入 skill
+LLM 在工具调用循环中根据触发词自主决定是否调用 skill_view。
 
-如果 phase1 结果中 `matched_skill` 非空，plan 的第一步自动设为：
+### 3.2 缓存与增量更新
 
-```json
-{"id": 0, "thought": "加载相关技能", "action": "skill_view", "args": {"name": "reverse-tracking"}, "reasoning": "用户要找代码，先加载反向追踪技能"}
-```
-
-#### 3.3 Fast Path 场景处理
-
-如果 confidence >= 0.8 且 matched_skill 非空（Fast Path 跳过 plan_v2），在 agent.py 的 fast path 逻辑中：
-
-```python
-if phase1.get("matched_skill"):
-    # 先调用 skill_view 加载 skill 内容
-    skill_content = tools.dispatch("skill_view", {"name": phase1["matched_skill"]})
-    # 将 skill 内容注入到后续的对话上下文中
-```
+索引构建后会被缓存（基于文件 mtime），只有当 SKILL.md 文件被修改时才重新生成，保证性能。
 
 ---
 
@@ -194,28 +165,26 @@ if phase1.get("matched_skill"):
 ┌─────────────────────────────────────────────────────┐
 │  prompt_builder.py                                   │
 │  build_skills_index() → 生成索引注入 system prompt    │
-│  （只注入 name + description，不注入全文）            │
+│  （注入 name + description + triggers）              │
+│  索引带缓存，文件 mtime 变化时重新生成               │
 └─────────────────────┬───────────────────────────────┘
                       │
         ┌─────────────┼──────────────┐
         ▼             ▼              ▼
   ┌──────────┐  ┌──────────┐  ┌──────────────┐
-  │ classify │  │ plan_v2  │  │ plan execute │
-  │ 阶段一   │  │ 阶段二   │  │ 执行阶段     │
-  │          │  │          │  │              │
-  │ 检查     │  │ 自动注入 │  │ skill_view   │
-  │ triggers │  │ skill    │  │ 加载全文     │
-  │ 匹配     │  │ 到 step0 │  │ → 指导执行   │
+  │ LLM 工具 │  │ 触发词   │  │ skill_view   │
+  │ 调用循环 │  │ 匹配     │  │ 加载全文     │
+  │          │  │ (system  │  │ → 指导执行   │
+  │          │  │  prompt) │  │              │
   └──────────┘  └──────────┘  └──────────────┘
-        │             │              │
-        └─────────────┼──────────────┘
-                      ▼
-              ┌──────────────┐
-              │ skills_tools │
-              │              │
-              │ skill_view() │ → 返回 SKILL.md 全文
-              │ skills_list()│ → 返回所有 skill 的摘要列表
-              └──────────────┘
+        │
+        ▼
+  ┌──────────────┐
+  │ skills_tools │
+  │              │
+  │ skill_view() │ → 返回 SKILL.md 全文
+  │ skills_list()│ → 返回所有 skill 的摘要列表
+  └──────────────┘
 ```
 
 ### 涉及文件
@@ -224,11 +193,10 @@ if phase1.get("matched_skill"):
 |------|------|
 | `~/.lampson/skills/<name>/SKILL.md` | Skill 知识文件 |
 | `src/core/skills_tools.py` | skill_view / skills_list 工具函数 |
-| `src/core/prompt_builder.py` | build_skills_index() 生成索引注入 system prompt |
+| `src/core/prompt_builder.py` | build_skills_index() 生成索引（含触发词）注入 system prompt |
+| `src/core/indexer.py` | SkillIndex 索引管理（关键词检索、增量构建） |
 | `src/core/tools.py` | 注册 skill_view / skills_list 到工具注册表 |
-| `src/planning/prompts.py` | classify prompt 中增加 trigger 匹配引导 |
-| `src/planning/planner.py` | 阶段一结果中提取 matched_skill |
-| `src/core/agent.py` | Fast Path 中处理 matched_skill |
+| `src/core/agent.py` | 工具调用循环（LLM 自行决定何时调用 skill_view） |
 
 ---
 
@@ -236,7 +204,7 @@ if phase1.get("matched_skill"):
 
 ### 5.1 创建 Skill
 
-目前没有 create/delete 的管理工具。采用**文件系统即接口**的方式：
+采用**文件系统即接口**的方式：
 
 - 创建 skill = 在 `~/.lampson/skills/<name>/` 下创建 `SKILL.md`
 - 更新 skill = 直接编辑 `SKILL.md`
@@ -252,27 +220,9 @@ lampson 可以通过 `file_write` 工具创建/更新 skill 文件。
 | lampson 遇到 skill 没覆盖的坑 | 追加"踩坑经验"到 body |
 | 用户指出 skill 方法不对 | 修正错误步骤 |
 
-### 5.3 未来可选：skill_manage 工具
-
-如果文件系统方式不够方便，可以后续添加一个 `skill_manage` 工具：
-
-```python
-SKILL_MANAGE_SCHEMA = {
-    "name": "skill_manage",
-    "description": "管理技能：创建、更新、删除",
-    "parameters": {
-        "action": "create | update | delete",
-        "name": "技能名称",
-        "content": "SKILL.md 完整内容（create/update 时必填）"
-    }
-}
-```
-
 ---
 
 ## 6. 从 Prompt 迁移到 Skill 的计划
-
-当前有方法论硬编码在两个地方，需要迁移到 skill：
 
 ### 6.1 迁移清单
 
@@ -281,15 +231,7 @@ SKILL_MANAGE_SCHEMA = {
 | `prompts.py` L24-37 PERSISTENT_ENV_BLOCK | "定位代码/项目的方法论" | `~/.lampson/skills/reverse-tracking/SKILL.md` |
 | `prompt_builder.py` L288-296 PLATFORM_HINTS | "定位代码/项目的方法论" | 同上（删除重复） |
 
-### 6.2 迁移步骤
-
-1. **创建 skill 文件**：`~/.lampson/skills/reverse-tracking/SKILL.md`
-2. **删除 prompts.py 中的硬编码**：去掉 PERSISTENT_ENV_BLOCK 里的"定位代码/项目的方法论"段落
-3. **删除 prompt_builder.py 中的硬编码**：去掉 PLATFORM_HINTS 里的"定位代码/项目的方法论"段落
-4. **在 classify prompt 中加入 trigger 匹配**：当用户说"找代码"、"找项目"时，自动匹配到 reverse-tracking skill
-5. **测试**：验证 lampson 遇到"找一下XX代码"时，会先 skill_view 加载方法论
-
-### 6.3 迁移后效果
+### 6.2 迁移后效果
 
 - system prompt 更短（少了一段方法论硬编码）
 - 方法论可以独立迭代（改 SKILL.md 不用改代码）
@@ -427,68 +369,6 @@ def _reflect_and_learn(self, plan: Plan) -> None:
             self._create_skill(learning)
         elif learning.type == "skill_update":
             self._update_skill(learning)
-
-
-def _reflect_and_learn_fast_path(self, user_input: str, tool_history: list) -> None:
-    """Fast Path 完成后的轻量反思。"""
-    # 同上，但 execution_summary 从 tool_history 构建
-    # 且如果 tool_history 很简单（0-1步），直接跳过
-    if len(tool_history) <= 1:
-        return
-    ...
-```
-
-#### 7.4.3 沉淀执行
-
-```python
-def _save_to_project(self, learning) -> None:
-    """将项目信息追加到 projects/<项目名>.md"""
-    project_file = Path.home() / ".lampson" / "projects" / f"{learning.target}.md"
-    if project_file.exists():
-        # 追加到已有文件
-        existing = project_file.read_text()
-        if learning.content in existing:
-            return  # 已存在，跳过
-        updated = existing + f"\n\n## {datetime.now():%Y-%m-%d}\n{learning.content}"
-    else:
-        updated = f"# {learning.target}\n\n{learning.content}"
-    
-    # 通过 file_write 工具写入
-    tools.dispatch("file_write", {"path": str(project_file), "content": updated})
-
-
-def _create_skill(self, learning) -> None:
-    """创建新的 skill 文件"""
-    skill_dir = Path.home() / ".lampson" / "skills" / learning.target
-    skill_dir.mkdir(parents=True, exist_ok=True)
-    
-    # 构建 SKILL.md
-    frontmatter = yaml.dump({
-        "name": learning.target,
-        "description": learning.reason,
-        "triggers": learning.triggers,
-    }, allow_unicode=True)
-    
-    skill_content = f"---\n{frontmatter}---\n\n{learning.content}"
-    
-    skill_file = skill_dir / "SKILL.md"
-    tools.dispatch("file_write", {"path": str(skill_file), "content": skill_content})
-
-
-def _update_skill(self, learning) -> None:
-    """更新已有 skill"""
-    skill_content = tools.dispatch("skill_view", {"name": learning.target})
-    if skill_content.startswith("[Skill"):
-        # skill 不存在，降级为创建
-        self._create_skill(learning)
-        return
-    
-    # 追加新内容（踩坑经验、补充步骤等）
-    updated = skill_content + f"\n\n## 更新 ({datetime.now():%Y-%m-%d})\n{learning.content}"
-    
-    # 同时更新 triggers（合并新旧 triggers）
-    # 重新解析 frontmatter，合并 triggers，写回
-    ...
 ```
 
 ### 7.5 Trigger 词自动更新
@@ -499,11 +379,8 @@ def _update_skill(self, learning) -> None:
 |------|-----------------|
 | **创建新 skill** | 由 LLM 在反思时生成初始 triggers（中英文各覆盖） |
 | **更新 skill** | 如果 LLM 认为需要新增 trigger，合并到已有 triggers 中，不删除已有 trigger |
-| **发现新表达方式** | 用户用了一种新的说法触发了这个 skill（如"代码藏哪了"匹配了 reverse-tracking），把这种新说法追加到 triggers |
 
-trigger 更新时机：
-1. 反思 LLM 输出 `skill_create` / `skill_update` 时，可以附带新 triggers
-2. 如果某次 classify 阶段通过**模糊匹配**命中了 skill（不是精确 trigger 匹配），事后把用户的原始表达追加到 trigger 列表
+trigger 更新时机：反思 LLM 输出 `skill_create` / `skill_update` 时，可以附带新 triggers。
 
 ### 7.6 反思频率控制
 
@@ -547,7 +424,6 @@ trigger 更新时机：
 1. **去重检查**：写入前检查已有 skills/projects 是否已有相同内容
 2. **内容长度下限**：skill body 至少 200 字（太短说明方法论不成熟）
 3. **trigger 数量下限**：新建 skill 至少 3 个 trigger
-4. **人工确认（可选）**：可以在 config.yaml 中配置 `reflection.require_confirm: true`，每次沉淀前问用户
 
 ---
 
@@ -555,89 +431,75 @@ trigger 更新时机：
 
 ### 8.1 单元测试
 
-**文件**: `tests/test_skills.py`
+**文件**: `tests/test_skills.py` + `tests/test_skills_on_demand.py`
 
 ```python
-# 测试用例清单
-
 # 1. SKILL.md 解析
 test_parse_skill_with_frontmatter()      # 正常解析 name/desc/triggers
 test_parse_skill_without_frontmatter()   # 无 frontmatter 时 name=目录名
 test_parse_skill_invalid_yaml()          # YAML 格式错误时 fallback
 
-# 2. skills_list 工具
-test_skills_list_all()                   # 列出所有 skill
-test_skills_list_by_query()              # 按 trigger 关键词搜索
-test_skills_list_by_category()           # 按 category 过滤
-test_skills_list_empty()                 # skills 目录为空
+# 2. skill_view / search_skills 工具
+test_skill_view_and_search_skills_keyword()  # 精确匹配返回全文，关键词搜索返回匹配
 
-# 3. skill_view 工具
-test_skill_view_found()                  # 精确匹配返回全文
-test_skill_view_not_found()              # 不存在时列出可用 skill
-test_skill_view_empty_name()             # name 为空时提示
+# 3. build_skills_index()
+test_empty_skills_dir()                  # 空 skills 目录返回空字符串
+test_skills_index_contains_trigger_hint() # 索引包含触发词和 skill_view 强指引
+test_skills_index_cache_invalidation()    # 修改文件后缓存失效
+test_skills_index_format()               # 格式正确（## Skills、**bold**、触发:）
 
-# 4. build_skills_index()
-test_build_skills_index()                # 生成格式正确的索引文本
-test_build_skills_index_empty()          # 空 skills 目录返回空字符串
-test_build_skills_index_with_category()  # 子目录下 skill 的 category 归类
+# 4. SkillIndex 关键词检索
+test_search_finds_by_description()       # 按 description 搜索
+test_search_finds_by_trigger()           # 按 trigger 搜索
+test_search_top_k()                     # top_k 参数限制返回数量
+test_search_empty_query()               # 空查询返回空列表
 
-# 5. 触发匹配（新增功能）
-test_classify_matches_skill_trigger()    # "找一下代码" 匹配 reverse-tracking
-test_classify_no_skill_match()           # "今天天气" 不匹配任何 skill
+# 5. 增量构建
+test_unmodified_file_skipped()           # 未修改文件复用旧索引
+test_modified_file_rebuilt()             # 修改文件重新解析
 ```
 
-### 8.2 集成测试
-
-```python
-# 端到端测试（mock LLM 调用）
-
-# 1. classify 阶段输出 matched_skill
-test_classify_returns_matched_skill()
-
-# 2. plan 阶段自动注入 skill_view 作为第一步
-test_plan_includes_skill_view_step()
-
-# 3. Fast Path 也能处理 matched_skill
-test_fast_path_with_matched_skill()
-
-# 4. 反思机制
-test_reflect_creates_skill()            # 复杂任务后自动创建 skill
-test_reflect_updates_project()          # 项目事实记录到 projects/
-test_reflect_skips_simple_task()        # 简单任务跳过反思
-test_reflect_skips_duplicate()          # 已有信息不重复记录
-test_reflect_trigger_auto_update()      # 新表达方式自动追加到 triggers
-```
-
-### 8.4 反思机制专项测试
+### 8.2 反思机制测试
 
 **文件**: `tests/test_reflection.py`
 
 ```python
 # 1. 反思判断逻辑
-test_reflect_classify_project_info()    # "项目路径是 X" → project
-test_reflect_classify_new_method()      # "发现一种新方法" → skill_create
-test_reflect_classify_update_skill()    # "之前的方法有坑" → skill_update
-test_reflect_classify_skip()            # 闲聊/简单查询 → should_learn=false
+test_should_reflect_cooldown()          # 5分钟内不重复反思
+test_should_reflect_fast_path_simple()  # 0-1 步 Fast Path 跳过
+test_should_reflect_fast_path_complex() # 3+ 步必须反思
+test_should_reflect_chat_intent()       # 闲聊跳过
+test_should_reflect_plan_3steps()       # 3步计划必须反思
 
-# 2. 沉淀执行
+# 2. JSON 解析
+test_extract_json_plain()                # 纯 JSON
+test_extract_json_in_code_block()       # markdown 代码块包裹
+test_extract_json_with_think()          # 包含 <think> 标签
+test_extract_json_invalid()             # 无效 JSON 返回 None
+
+# 3. 沉淀执行
 test_save_to_project_new()              # 新项目文件创建
-test_save_to_project_append()           # 已有项目追加信息
-test_save_to_project_no_duplicate()     # 重复信息不写入
-test_create_skill_with_triggers()       # 创建 skill 并写入 triggers
-test_update_skill_preserves_existing()  # 更新不丢失已有内容
+test_save_to_project_duplicate()        # 重复内容不写入
+test_create_skill()                    # 创建 skill
+test_create_skill_too_short()          # 内容太短不创建
+test_create_skill_few_triggers()       # trigger 太少不创建
+test_update_skill_append()             # 追加内容并合并 triggers
+test_content_already_exists()          # 前100字符去重
 
-# 3. 频率控制
-test_reflect_skip_simple_fast_path()    # 0-1 步 Fast Path 跳过
-test_reflect_skip_chat_intent()         # intent=chat 跳过
-test_reflect_skip_failed_plan()         # 执行失败跳过
-test_reflect_must_complex_task()        # 3+ 步计划必须反思
-test_reflect_must_error_recovery()      # 错误恢复必须反思
+# 4. Trigger 合并
+test_merge_triggers_no_duplicate()      # 不重复
+test_merge_triggers_invalid_yaml()      # 无 frontmatter 时不修改
 
-# 4. Trigger 自动更新
-test_trigger_merge_on_create()          # 新建时写入初始 triggers
-test_trigger_merge_on_update()          # 更新时合并新旧 triggers
-test_trigger_auto_discover()            # 模糊匹配后追加新 trigger
-test_trigger_minimum_count()            # 新 skill 至少 3 个 trigger
+# 5. execute_learnings
+test_execute_learnings_project()        # project 类型沉淀
+test_execute_learnings_empty()          # 空列表直接返回
+
+# 6. reflect_and_learn
+test_reflect_and_learn_no_learning()   # should_learn=false
+test_reflect_and_learn_with_project()  # 沉淀 project
+
+# 7. 格式化
+test_format_execution_summary()         # 生成执行摘要
 ```
 
 ### 8.3 手动验证场景
@@ -645,31 +507,28 @@ test_trigger_minimum_count()            # 新 skill 至少 3 个 trigger
 | 场景 | 输入 | 期望行为 |
 |------|------|---------|
 | 找代码 | "找一下 hermes 的代码" | 自动 skill_view("reverse-tracking") → which → head → ls |
-| 找项目 | "那个训练项目的代码在哪" | skill_view → 查 projects_index → ls ~ |
 | 普通问题 | "python 怎么读文件" | 不加载任何 skill，直接回答 |
 | 调试 | "这段代码报错了" | 自动 skill_view("debug") → 按步骤排查 |
-| 反思-新建skill | 复杂调试后成功修复 | 任务完成后自动沉淀 "调试远程服务" skill |
+| 反思-新建skill | 复杂调试后成功修复 | 任务完成后自动沉淀 skill |
 | 反思-记录project | 首次探索某项目结构 | 自动在 projects/ 下创建项目信息文件 |
-| 反思-更新skill | 用 reverse-tracking 遇到特殊情况 | 自动追加踩坑经验到 reverse-tracking skill |
-| 反思-跳过 | "今天星期几" | 不触发反思，无额外提示 |
+| 反思-跳过 | "今天星期几" | 不触发反思，静默 |
 
 ---
 
 ## 9. 实现优先级
 
-| 优先级 | 任务 | 预估工作量 |
-|--------|------|-----------|
-| P0 | 创建 reverse-tracking SKILL.md | 10 分钟 |
-| P0 | 删除 prompts.py / prompt_builder.py 中的硬编码方法论 | 10 分钟 |
-| P0 | 写 test_skills.py 单元测试 | 30 分钟 |
-| P1 | classify prompt 增加 trigger 匹配 + matched_skill 输出 | 30 分钟 |
-| P1 | plan_v2 自动注入 skill_view step0 | 20 分钟 |
-| P1 | Fast Path 处理 matched_skill | 20 分钟 |
-| P1 | 反思机制（_reflect_and_learn） | 1 小时 |
-| P1 | 反思 prompt + 沉淀执行器 | 30 分钟 |
-| P2 | skill_manage 管理工具（create/update/delete） | 1 小时 |
-| P2 | trigger 自动发现（模糊匹配后追加） | 30 分钟 |
-| P2 | SKILL_GUIDANCE 中加入"使用 skill 后发现过时则更新"的自省引导 | 10 分钟 |
+| 优先级 | 任务 | 状态 |
+|--------|------|------|
+| P0 | Skill 文件格式定义 | ✅ 已完成 |
+| P0 | skill_view / skills_list 工具 | ✅ 已完成 |
+| P0 | build_skills_index() + 缓存 | ✅ 已完成 |
+| P0 | 已有 skill 文件 | ✅ 已完成 |
+| P0 | 单元测试 | ✅ 已完成 |
+| P1 | 反思机制 | ✅ 已完成 |
+| P1 | 沉淀执行器 | ✅ 已完成 |
+| P1 | trigger 自动更新 | ✅ 已完成 |
+| P2 | 反思频率控制优化 | 后续迭代 |
+| P2 | 质量保障（长度/trigger 下限） | 后续迭代 |
 
 ---
 
@@ -677,17 +536,14 @@ test_trigger_minimum_count()            # 新 skill 至少 3 个 trigger
 
 - [x] Skill 文件格式定义（YAML frontmatter + markdown body）
 - [x] skills_tools.py（skill_view / skills_list 工具函数）
-- [x] prompt_builder.py build_skills_index()（索引注入 system prompt）
+- [x] prompt_builder.py build_skills_index()（索引含触发词注入 system prompt）
+- [x] indexer.py SkillIndex（关键词检索、增量构建）
 - [x] tools.py 注册到工具注册表
-- [x] 已有 3 个 skill：code-writing、debug、reverse-tracking（待创建）
-- [ ] reverse-tracking SKILL.md 创建
-- [ ] prompts.py / prompt_builder.py 硬编码方法论删除
-- [ ] classify trigger 匹配机制
-- [ ] plan 自动注入 skill_view
-- [ ] Fast Path matched_skill 处理
-- [ ] 反思机制（_reflect_and_learn + reflect prompt）
-- [ ] 沉淀执行器（project 保存 / skill 创建 / skill 更新）
-- [ ] trigger 自动更新
-- [ ] test_skills.py 单元测试
-- [ ] test_reflection.py 反思机制测试
-- [ ] skill_manage 管理工具
+- [x] 已有 skill 文件（reverse-tracking, debug, code-writing）
+- [x] system prompt skills 索引含触发词 + 强指引
+- [x] 反思机制（_reflect_and_learn + reflect prompt）
+- [x] 沉淀执行器（project 保存 / skill 创建 / skill 更新）
+- [x] trigger 自动更新（反思阶段合并新 triggers）
+- [x] test_skills.py 单元测试
+- [x] test_skills_on_demand.py 按需加载专项测试
+- [x] test_reflection.py 反思机制测试

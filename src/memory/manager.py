@@ -1,15 +1,9 @@
-"""记忆管理器：两层记忆架构（core.md + sessions/）。
-
-core.md 启动时全量加载到 system prompt；
-sessions/ 每次退出时写入 LLM 生成的会话摘要。
-"""
+"""记忆管理器：核心记忆（core.md）读写。"""
 
 from __future__ import annotations
 
-import re
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 
 MEMORY_DIR = Path.home() / ".lampson" / "memory"
@@ -106,26 +100,4 @@ def forget_memory(keyword: str) -> str:
     return f"已删除 {deleted} 条包含 '{keyword}' 的记忆条目。"
 
 
-def save_session_summary(summary: str) -> str:
-    """将会话摘要写入 sessions/YYYY-MM-DD.md。"""
-    _ensure_dirs()
-    if not summary.strip():
-        return ""
 
-    today = date.today().isoformat()
-    session_file = SESSIONS_DIR / f"{today}.md"
-    timestamp = datetime.now().strftime("%H:%M")
-
-    existing = session_file.read_text(encoding="utf-8") if session_file.exists() else ""
-    separator = "\n\n---\n\n" if existing else ""
-    session_file.write_text(
-        existing + separator + f"## {timestamp}\n\n{summary}",
-        encoding="utf-8",
-    )
-    return session_file.name
-
-
-def list_sessions() -> list[str]:
-    """列出所有会话摘要文件名（按日期倒序）。"""
-    _ensure_dirs()
-    return sorted([f.stem for f in SESSIONS_DIR.glob("*.md")], reverse=True)

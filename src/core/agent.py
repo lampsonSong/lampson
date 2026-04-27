@@ -31,6 +31,7 @@ class Agent:
         adapter: BaseModelAdapter,
         compaction_config: CompactionConfig | None = None,
         max_tool_rounds: int | None = None,
+        fallback_models: list[tuple[LLMClient, BaseModelAdapter]] | None = None,
     ) -> None:
         self.llm = llm
         self.adapter = adapter
@@ -48,6 +49,7 @@ class Agent:
         self._compaction_config: CompactionConfig | None = compaction_config
         self.max_tool_rounds: int = max_tool_rounds or _DEFAULT_MAX_TOOL_ROUNDS
         self.current_plan: Plan | None = None
+        self.fallback_models: list[tuple[LLMClient, BaseModelAdapter]] = fallback_models or []
 
         # 中间过程回调：由 listener 注入，用于实时发送工具调用状态
         self.progress_callback: Callable[[str], None] | None = None
@@ -88,13 +90,43 @@ class Agent:
         """历史兼容占位；技能全文由 retrieve_for_plan 注入。"""
         return None
 
+    def _chat_with_fallback(self, tools=None):
+        """每次调用都从主模型开始，失败时按顺序尝试 fallback。
+
+        不会永久切换模型——fallback 成功后响应仍写回主模型的 messages，
+        下次调用再次从主模型开始尝试。
+        """
+        # 1. 先试主模型
+        try:
+            return self.adapter.chat(self.llm.messages, tools=tools)
+        except RuntimeError:
+            if not self.fallback_models:
+                raise
+            logger.warning(f"主模型 {self.llm.model} 调用失败，尝试 fallback")
+            self._on_model_switch(f"主模型 {self.llm.model} 失败，切换 fallback...")
+
+        # 2. 依次试 fallback，成功即返回
+        for fb_llm, fb_adapter in self.fallback_models:
+            logger.info(f"尝试 fallback: {fb_llm.model}")
+            self._on_model_switch(f"尝试 {fb_llm.model}...")
+            try:
+                fb_llm.messages = list(self.llm.messages)
+                result = fb_adapter.chat(fb_llm.messages, tools=tools)
+                self._on_model_switch(f"已切换到 {fb_llm.model}")
+                return result
+            except RuntimeError:
+                logger.warning(f"fallback {fb_llm.model} 也失败")
+                continue
+
+        raise RuntimeError("所有模型（含 fallback）均调用失败")
+
     def _run_tool_loop(self) -> str:
         self._fast_path_tool_count = 0
 
         while True:
             for round_num in range(self.max_tool_rounds):
                 try:
-                    response = self.adapter.chat(self.llm.messages, tools=self._tools)
+                    response = self._chat_with_fallback(tools=self._tools)
                 except RuntimeError as e:
                     return f"[LLM 错误] {e}"
 
@@ -134,7 +166,7 @@ class Agent:
             )
             self.llm.messages.append({"role": "user", "content": summary_prompt})
             try:
-                response = self.adapter.chat(self.llm.messages, tools=None)
+                response = self._chat_with_fallback(tools=None)
                 self.llm.messages.append(
                     response.choices[0].message.model_dump(exclude_none=True)
                 )
@@ -170,6 +202,18 @@ class Agent:
         except Exception:
             pass
 
+    def _on_model_switch(self, message: str) -> None:
+        """模型切换时通知 listener 实时展示状态。"""
+        if not self.progress_callback:
+            return
+        try:
+            self.progress_callback({
+                "type": "model_switch",
+                "message": message,
+            })
+        except Exception:
+            pass
+
     def run(self, user_input: str) -> str:
         """处理一轮用户输入，返回最终回复文本。"""
         self.llm.add_user_message(user_input)
@@ -184,18 +228,6 @@ class Agent:
         if reflection_hints:
             result += "\n\n" + "\n".join(reflection_hints)
         return result
-
-    def get_conversation_text(self) -> str:
-        """导出当前对话的可读文本，供会话摘要生成使用。"""
-        lines = []
-        for msg in self.llm.get_history():
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            if role == "system" or not content:
-                continue
-            prefix = "用户" if role == "user" else "Lampson"
-            lines.append(f"{prefix}: {content}")
-        return "\n".join(lines)
 
     def _estimate_context_tokens(self) -> int:
         """估算当前 messages 的 token 总数（粗略：UTF-8 字节数 / 4）。"""
@@ -225,14 +257,12 @@ class Agent:
         ):
             return None
 
-        msg_count = sum(1 for m in self.llm.messages if m.get("role") != "system")
         estimated_tokens = self._estimate_context_tokens()
 
         try:
             return apply_compaction(
                 agent_llm=self.llm,
                 config=self._compaction_config,
-                message_count=msg_count,
                 estimated_tokens=estimated_tokens,
                 stop_reason=self.last_stop_reason,
                 session_id=session_id,
@@ -241,29 +271,6 @@ class Agent:
         except Exception as e:
             logger.warning(f"压缩异常: {e}")
             return None
-
-    def generate_session_summary(self) -> str:
-        """让 LLM 生成本次会话摘要，用于写入 sessions/ 目录。"""
-        history = self.get_conversation_text()
-        if not history.strip():
-            return ""
-
-        summary_prompt = (
-            "请用 3-5 句话总结以下对话的主要内容和结论，供以后参考：\n\n"
-            f"{history}"
-        )
-        try:
-            temp_client = LLMClient(
-                api_key=self.llm.client.api_key,
-                base_url=str(self.llm.client.base_url),
-                model=self.llm.model,
-            )
-            temp_client.set_system_context()
-            temp_client.add_user_message(summary_prompt)
-            response = temp_client.chat()
-            return response.choices[0].message.content or ""
-        except Exception:
-            return history[:500]
 
     def _maybe_reflect(
         self,

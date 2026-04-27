@@ -10,7 +10,7 @@ Archive Phase 三步流水线（原子性保障）：
 2. Read（读已有 skill/project 内容）
 3. Integrate（写 segment_boundary + skill/project + compaction_log）
 
-触发条件：消息数 >= 150 条 或 Token 估算 >= 60k，且 stopReason 为 end_turn/aborted。
+触发条件：Token 估算 >= context_window * trigger_threshold，且 stopReason 为 end_turn/aborted。
 
 设计文档：docs/compaction-design.md
 """
@@ -38,30 +38,27 @@ COMPACTION_LOG = LAMPSON_DIR / ".compaction_log.jsonl"
 # ── 配置 ──────────────────────────────────────────────────────────────────────
 
 STOP_REASONS = {"end_turn", "aborted"}
-TRIGGER_MSG_COUNT = 150
-TRIGGER_TOKEN_ESTIMATE = 60_000  # ~150 条消息 × 400 tokens/条
 END_THRESHOLD_PERCENT = 80.0
+DEFAULT_CONTEXT_WINDOW = 131_072
+DEFAULT_TRIGGER_THRESHOLD = 0.8
 
 
 @dataclass
 class CompactionConfig:
     """压缩配置。"""
 
-    trigger_msg_count: int = TRIGGER_MSG_COUNT
-    trigger_token_estimate: int = TRIGGER_TOKEN_ESTIMATE
+    context_window: int = DEFAULT_CONTEXT_WINDOW
+    trigger_threshold: float = DEFAULT_TRIGGER_THRESHOLD
     end_threshold_percent: float = END_THRESHOLD_PERCENT
     max_archive_per_compaction: int = 20  # 防止一次归档太多条目
     compaction_log_max_bytes: int = 10 * 1024 * 1024  # 10MB 轮转
 
-    def should_trigger(self, msg_count: int, estimated_tokens: int, stop_reason: str | None) -> bool:
+    def should_trigger(self, estimated_tokens: int, stop_reason: str | None) -> bool:
         """判断是否应该触发归档。"""
         if stop_reason not in STOP_REASONS:
             return False
-        if msg_count < self.trigger_msg_count:
-            return False
-        if estimated_tokens < self.trigger_token_estimate:
-            return False
-        return True
+        threshold_tokens = self.context_window * self.trigger_threshold
+        return estimated_tokens >= threshold_tokens
 
 
 # ── 数据类 ─────────────────────────────────────────────────────────────────────
@@ -134,7 +131,7 @@ class Compactor:
 
         **调用方**：Agent 运行时由 `maybe_compact()` 调用，不在 Session 退出时调用。
 
-        触发条件：消息数 >= 150 条 或 Token 估算 >= 60k，且 stopReason 为 end_turn/aborted。
+        触发条件：Token 估算 >= context_window * trigger_threshold，且 stopReason 为 end_turn/aborted。
 
         步骤顺序（原子性保障）：
         1. LLM 分类（不涉及写入）
@@ -551,10 +548,18 @@ def _parse_json(text: str | None) -> dict[str, Any] | None:
 
 # ── Agent 集成 ───────────────────────────────────────────────────────────────
 
+def _estimate_messages_tokens(messages: list[dict[str, Any]]) -> int:
+    """估算消息列表的 token 总数（粗略：UTF-8 字节数 / 4）。"""
+    try:
+        serialized = json.dumps(messages, ensure_ascii=False)
+        return len(serialized.encode("utf-8")) // 4
+    except Exception:
+        return 0
+
+
 def apply_compaction(
     agent_llm: Any,
     config: CompactionConfig,
-    message_count: int,
     estimated_tokens: int,
     stop_reason: str | None = None,
     session_id: str = "",
@@ -568,7 +573,7 @@ def apply_compaction(
     Returns:
         CompactionResult（触发了压缩）或 None（不需要压缩）。
     """
-    if not config.should_trigger(message_count, estimated_tokens, stop_reason):
+    if not config.should_trigger(estimated_tokens, stop_reason):
         return None
 
     # 提取非 system 消息
@@ -582,6 +587,18 @@ def apply_compaction(
     if result.success and result.messages_kept:
         # 保留 system prompt，用 keep 消息替换对话历史
         system_msg = agent_llm.messages[0] if agent_llm.messages else {}
-        agent_llm.messages = [system_msg] + result.messages_kept
+        new_messages = [system_msg] + result.messages_kept
+
+        # 验证压缩后 token 仍然超过阈值 → 放弃本次压缩，保留原消息
+        new_estimated = _estimate_messages_tokens(new_messages)
+        threshold_tokens = int(config.context_window * config.trigger_threshold)
+        if new_estimated >= threshold_tokens:
+            logger.warning(
+                f"Compaction 后 token 仍超阈值 "
+                f"({new_estimated} >= {threshold_tokens})，放弃本次压缩"
+            )
+            return result  # 返回成功但保留原 messages（不替换）
+
+        agent_llm.messages = new_messages
 
     return result

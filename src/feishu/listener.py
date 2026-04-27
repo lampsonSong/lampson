@@ -271,7 +271,24 @@ class FeishuListener:
                             return
                         continue
 
-                    if not isinstance(event, dict) or event.get("type") != "tool_progress":
+                    if not isinstance(event, dict):
+                        continue
+
+                    if event.get("type") == "model_switch":
+                        progress_lines.append(
+                            f"**[模型切换]** {event.get('message', '')}"
+                        )
+                        now = time.monotonic()
+                        if now - last_update_ts >= update_interval:
+                            if progress_msg_id is None:
+                                progress_msg_id = self._send_progress_card(
+                                    chat_id, progress_lines
+                                ) or ""
+                            else:
+                                self._update_progress_card(progress_msg_id, progress_lines)
+                        continue
+
+                    if event.get("type") != "tool_progress":
                         continue
 
                     round_n = event["round"]

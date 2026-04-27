@@ -12,6 +12,7 @@ from src.tools import fileops as fileops_tool
 from src.tools import search as search_tool
 from src.tools import web as web_tool
 from src.tools import session_search as session_search_tool
+from src.tools import session_load as session_load_tool
 from src.feishu import client as feishu_client
 from src.core import skills_tools
 
@@ -40,6 +41,7 @@ _register(skills_tools.SKILL_VIEW_SCHEMA, skills_tools.skill_view)
 _register(skills_tools.SEARCH_SKILLS_SCHEMA, skills_tools.search_skills)
 _register(skills_tools.SEARCH_PROJECTS_SCHEMA, skills_tools.search_projects)
 _register(session_search_tool.SESSION_SEARCH_SCHEMA, session_search_tool.run)
+_register(session_load_tool.SESSION_LOAD_SCHEMA, session_load_tool.run)
 
 
 # ─── 飞书客户端懒加载初始化 ────────────────────────────────────────────────

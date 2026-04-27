@@ -18,11 +18,18 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+import jieba
+
 # ── 路径配置 ────────────────────────────────────────────────────────────
 
 LAMPSON_DIR = Path.home() / ".lampson"
 SESSIONS_DIR = LAMPSON_DIR / "memory" / "sessions"
 SEARCH_DB = LAMPSON_DIR / "memory" / "search.db"
+
+# ── session_id → source 内存缓存（进程级别）──────────────────────────────
+
+_sid_source_cache: dict[str, str] = {}
+_sid_path_cache: dict[str, Path] = {}
 
 # ── Schema ──────────────────────────────────────────────────────────────
 
@@ -35,7 +42,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     started_at INTEGER NOT NULL,   -- 毫秒时间戳
     ended_at INTEGER,              -- 毫秒时间戳，session_end 时写入
     source TEXT NOT NULL DEFAULT 'cli',
-    summary TEXT                   -- session 结束时自动生成的进度总结
+    summary TEXT                   -- (deprecated, no longer used)
 );
 
 CREATE TABLE IF NOT EXISTS segments (
@@ -53,7 +60,8 @@ CREATE TABLE IF NOT EXISTS messages_index (
     session_id TEXT NOT NULL,
     ts INTEGER NOT NULL,
     role TEXT,
-    content TEXT
+    content TEXT,                      -- jieba 预分词后的文本（空格分隔），供 FTS5 索引
+    raw_json TEXT NOT NULL DEFAULT ''  -- 完整 JSONL 原始行，用于双向重建
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
@@ -71,9 +79,28 @@ AFTER DELETE ON messages_index BEGIN
     INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, old.content);
 END;
 
+CREATE TABLE IF NOT EXISTS messages_embedding (
+    msg_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    ts INTEGER NOT NULL,
+    embedding BLOB NOT NULL,
+    provider TEXT NOT NULL DEFAULT 'zhipu',
+    indexed_at INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages_index(session_id);
+CREATE INDEX IF NOT EXISTS idx_embedding_session ON messages_embedding(session_id);
 CREATE INDEX IF NOT EXISTS idx_segments_session ON segments(session_id);
 """
+
+# ── jieba 预分词 ──────────────────────────────────────────────────────
+
+def _jieba_cut(text: str) -> str:
+    """jieba 分词后空格 join，供 FTS5 unicode61 按空格切分。"""
+    if not text or not text.strip():
+        return ""
+    return " ".join(jieba.lcut(text))
+
 
 # ── 初始化 ──────────────────────────────────────────────────────────────
 
@@ -100,7 +127,6 @@ class SessionInfo:
     started_at: int          # ms timestamp
     ended_at: int | None
     source: str = "cli"
-    summary: str | None = None  # session 结束时的进度总结
 
 
 def create_session(source: str = "cli") -> SessionInfo:
@@ -111,13 +137,17 @@ def create_session(source: str = "cli") -> SessionInfo:
 
     info = SessionInfo(session_id=sid, started_at=now_ms, ended_at=None, source=source)
 
-    # 写 JSONL
-    _jsonl_append(sid, {
+    # 缓存 source
+    _sid_source_cache[sid] = source
+
+    # 写 JSONL（指定 source 以写入正确子目录）
+    start_row = {
         "ts": now_ms,
         "type": "session_start",
         "session_id": sid,
         "source": source,
-    })
+    }
+    _jsonl_append(sid, start_row, source=source)
 
     # 写 SQLite
     conn = _get_db()
@@ -125,6 +155,11 @@ def create_session(source: str = "cli") -> SessionInfo:
         conn.execute(
             "INSERT INTO sessions(session_id, started_at, source) VALUES(?, ?, ?)",
             (sid, now_ms, source),
+        )
+        # 特殊行入库（role=NULL, content=''，不进 FTS5）
+        conn.execute(
+            "INSERT INTO messages_index(session_id, ts, role, content, raw_json) VALUES(?, ?, NULL, '', ?)",
+            (sid, now_ms, json.dumps(start_row, ensure_ascii=False)),
         )
         conn.commit()
     finally:
@@ -134,12 +169,17 @@ def create_session(source: str = "cli") -> SessionInfo:
 
 
 def _gen_session_id() -> str:
-    """生成简短可读的 session ID（前8位）。"""
-    return uuid.uuid4().hex[:8]
+    """生成简短可读的 session ID：HHMM-随机4位hex。
+
+    例：2145-a3f2，按文件名排序即时间顺序。
+    """
+    now = datetime.now()
+    time_prefix = now.strftime("%H%M")
+    return f"{time_prefix}-{uuid.uuid4().hex[:4]}"
 
 
-def end_session(session_id: str, summary: str | None = None) -> None:
-    """标记 session 结束，写入 session_end 行和 summary。"""
+def end_session(session_id: str) -> None:
+    """标记 session 结束，写入 session_end 行。"""
     now_ms = _now_ms()
 
     # 写 JSONL
@@ -148,29 +188,15 @@ def end_session(session_id: str, summary: str | None = None) -> None:
         "session_id": session_id,
         "type": "session_end",
     }
-    if summary:
-        end_row["summary"] = summary
     _jsonl_append(session_id, end_row)
 
     # 写 SQLite
     conn = _get_db()
     try:
-        # 迁移：确保 summary 列存在（已有 sessions 表不受影响）
-        try:
-            conn.execute("ALTER TABLE sessions ADD COLUMN summary TEXT")
-        except sqlite3.OperationalError:
-            pass  # 列已存在
-
-        if summary:
-            conn.execute(
-                "UPDATE sessions SET ended_at = ?, summary = ? WHERE session_id = ?",
-                (now_ms, summary, session_id),
-            )
-        else:
-            conn.execute(
-                "UPDATE sessions SET ended_at = ? WHERE session_id = ?",
-                (now_ms, session_id),
-            )
+        conn.execute(
+            "UPDATE sessions SET ended_at = ? WHERE session_id = ?",
+            (now_ms, session_id),
+        )
         # 同时更新最后一个 segment 的 ended_at
         row = conn.execute(
             "SELECT id FROM segments WHERE session_id = ? ORDER BY segment DESC LIMIT 1",
@@ -181,6 +207,11 @@ def end_session(session_id: str, summary: str | None = None) -> None:
                 "UPDATE segments SET ended_at = ? WHERE id = ?",
                 (now_ms, row["id"]),
             )
+        # 特殊行入库
+        conn.execute(
+            "INSERT INTO messages_index(session_id, ts, role, content, raw_json) VALUES(?, ?, NULL, '', ?)",
+            (session_id, now_ms, json.dumps(end_row, ensure_ascii=False)),
+        )
         conn.commit()
     finally:
         conn.close()
@@ -191,7 +222,7 @@ def get_session(session_id: str) -> SessionInfo | None:
     conn = _get_db()
     try:
         row = conn.execute(
-            "SELECT session_id, started_at, ended_at, source, summary FROM sessions WHERE session_id = ?",
+            "SELECT session_id, started_at, ended_at, source FROM sessions WHERE session_id = ?",
             (session_id,),
         ).fetchone()
         if not row:
@@ -201,30 +232,60 @@ def get_session(session_id: str) -> SessionInfo | None:
             started_at=row["started_at"],
             ended_at=row["ended_at"],
             source=row["source"],
-            summary=row["summary"] if "summary" in row.keys() else None,
         )
     finally:
         conn.close()
 
 
-def get_last_session_summary(channel: str, sender_id: str) -> str | None:
-    """查最近一条已结束 session 的 summary，按 ended_at 倒序。
+def list_recent_sessions(
+    limit: int = 5,
+    source: str | None = None,
+) -> list[dict]:
+    """列出最近已结束的 session。
 
-    channel: 来源渠道，如 "cli"、"feishu"、"telegram"
-    sender_id: 发送者 ID，cli 固定为 "default"
+    Args:
+        limit: 最多返回几个 session。
+        source: 按 source 过滤，为 None 则不过滤。
+
+    Returns:
+        列表，每项包含 session_id、started_at、ended_at、message_count。
     """
     conn = _get_db()
     try:
-        row = conn.execute(
-            """
-            SELECT summary FROM sessions
-            WHERE source = ? AND ended_at IS NOT NULL AND summary IS NOT NULL AND summary != ''
-            ORDER BY ended_at DESC
-            LIMIT 1
-            """,
-            (channel,),
-        ).fetchone()
-        return row["summary"] if row else None
+        if source:
+            rows = conn.execute(
+                """
+                SELECT s.session_id, s.started_at, s.ended_at,
+                       (SELECT COUNT(*) FROM messages_index m WHERE m.session_id = s.session_id AND m.role IS NOT NULL) AS msg_count
+                FROM sessions s
+                WHERE s.source = ? AND s.ended_at IS NOT NULL
+                ORDER BY s.ended_at DESC
+                LIMIT ?
+                """,
+                (source, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT s.session_id, s.started_at, s.ended_at,
+                       (SELECT COUNT(*) FROM messages_index m WHERE m.session_id = s.session_id AND m.role IS NOT NULL) AS msg_count
+                FROM sessions s
+                WHERE s.ended_at IS NOT NULL
+                ORDER BY s.ended_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+
+        result = []
+        for row in rows:
+            result.append({
+                "session_id": row["session_id"],
+                "started_at": row["started_at"],
+                "ended_at": row["ended_at"],
+                "message_count": row["msg_count"],
+            })
+        return result
     finally:
         conn.close()
 
@@ -259,6 +320,11 @@ def append_message(
 
     _jsonl_append(session_id, row)
 
+    # raw_json：存完整 JSONL 行（用于双向重建）
+    raw_json = json.dumps(row, ensure_ascii=False)
+    # content 用 jieba 预分词（空格分隔，供 FTS5）
+    segmented_content = _jieba_cut(content)
+
     # 更新 SQLite 索引
     conn = _get_db()
     try:
@@ -274,10 +340,10 @@ def append_message(
                 (session_id, 0, now_ms),
             )
 
-        # 写入消息索引
+        # 写入消息索引（jieba 分词后 content + raw_json）
         conn.execute(
-            "INSERT INTO messages_index(session_id, ts, role, content) VALUES(?, ?, ?, ?)",
-            (session_id, now_ms, role, content),
+            "INSERT INTO messages_index(session_id, ts, role, content, raw_json) VALUES(?, ?, ?, ?, ?)",
+            (session_id, now_ms, role, segmented_content, raw_json),
         )
         conn.commit()
     finally:
@@ -319,6 +385,11 @@ def write_segment_boundary(
         conn.execute(
             "INSERT OR IGNORE INTO segments(session_id, segment, started_at) VALUES(?, ?, ?)",
             (session_id, segment + 1, next_segment_started_at),
+        )
+        # 特殊行入库
+        conn.execute(
+            "INSERT INTO messages_index(session_id, ts, role, content, raw_json) VALUES(?, ?, NULL, '', ?)",
+            (session_id, now_ms, json.dumps(row, ensure_ascii=False)),
         )
         conn.commit()
     finally:
@@ -377,33 +448,73 @@ def get_latest_segment_boundary(session_id: str) -> dict | None:
 
 # ── 内部工具 ───────────────────────────────────────────────────────────
 
-def _jsonl_path(session_id: str) -> Path:
-    """根据 session_id 找 JSONL 路径（需要扫描日期目录）。"""
+def _get_source(session_id: str) -> str:
+    """获取 session 的 source（从缓存或 SQLite）。"""
+    source = _sid_source_cache.get(session_id)
+    if source:
+        return source
+    # 从 SQLite 查
+    try:
+        conn = _get_db()
+        try:
+            row = conn.execute(
+                "SELECT source FROM sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            if row:
+                source = row["source"]
+                _sid_source_cache[session_id] = source
+                return source
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return "cli"
+
+
+def _jsonl_path(session_id: str, source: str | None = None) -> Path:
+    """根据 session_id 找 JSONL 路径，新文件按 source 分子目录。
+
+    目录结构：sessions/YYYY-MM-DD/{source}/{session_id}.jsonl
+    """
+    # 路径缓存：避免每次 append 都 rglob
+    cached = _sid_path_cache.get(session_id)
+    if cached and cached.exists():
+        return cached
+
+    # 查找已有文件
+    existing = _find_jsonl(session_id)
+    if existing:
+        _sid_path_cache[session_id] = existing
+        return existing
+
+    # 新文件：按 source 分目录，文件名加日期前缀
+    if source is None:
+        source = _get_source(session_id)
     today = date.today()
-    for days_ago in range(30):  # 最多回溯30天
-        d = today - __import__("datetime").timedelta(days=days_ago)
-        root = SESSIONS_DIR / d.isoformat()
-        if root.exists():
-            matches = list(root.glob(f"*{session_id}*.jsonl"))
-            if matches:
-                return matches[0]
-    # session_id 不在已知目录，可能是今天的 session 还没创建
-    # 写新文件到今天目录
-    today_path = SESSIONS_DIR / today.isoformat()
-    today_path.mkdir(parents=True, exist_ok=True)
-    return today_path / f"{session_id}.jsonl"
+    source_dir = SESSIONS_DIR / today.isoformat() / source
+    source_dir.mkdir(parents=True, exist_ok=True)
+    path = source_dir / f"{today.isoformat()}_{session_id}.jsonl"
+    _sid_path_cache[session_id] = path
+    return path
 
 
 def _find_jsonl(session_id: str) -> Path | None:
-    """根据 session_id 找 JSONL 路径。"""
-    for path in SESSIONS_DIR.rglob(f"*{session_id}*.jsonl"):
+    """根据 session_id 找 JSONL 路径（rglob 搜所有子目录）。
+    兼容新旧命名：{session_id}.jsonl 和 {date}_{session_id}.jsonl。
+    """
+    # 新命名：{date}_{session_id}.jsonl
+    for path in SESSIONS_DIR.rglob(f"*_{session_id}.jsonl"):
+        return path
+    # 旧命名：{session_id}.jsonl
+    for path in SESSIONS_DIR.rglob(f"{session_id}.jsonl"):
         return path
     return None
 
 
-def _jsonl_append(session_id: str, row: dict) -> None:
+def _jsonl_append(session_id: str, row: dict, source: str | None = None) -> None:
     """追加一行到 JSONL 文件。"""
-    path = _jsonl_path(session_id)
+    path = _jsonl_path(session_id, source=source)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -533,13 +644,59 @@ def _rebuild_unsafe(sessions_dir: Path, db_path: Path) -> None:
     conn.close()
 
 
+def rebuild_jsonl(db_path: Path | None = None, sessions_dir: Path | None = None) -> None:
+    """从 SQLite 重建 JSONL 文件（反向重建）。
+
+    依赖 raw_json 字段（完整 JSONL 行），按 session_id 分组，
+    sessions.started_at 推算日期目录，按 ts 排序写入。
+    """
+    from datetime import timezone
+
+    db_path = db_path or SEARCH_DB
+    sessions_dir = sessions_dir or SESSIONS_DIR
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    # 按 session_id 分组，获取 raw_json
+    sessions = conn.execute(
+        "SELECT session_id, started_at, source FROM sessions ORDER BY started_at"
+    ).fetchall()
+
+    for sess in sessions:
+        sid = sess["session_id"]
+        started_at = sess["started_at"]
+        source = sess["source"] or "cli"
+
+        # 从 started_at 推算日期目录
+        dt = datetime.fromtimestamp(started_at / 1000, tz=timezone.utc)
+        date_str = dt.strftime("%Y-%m-%d")
+        source_dir = sessions_dir / date_str / source
+        source_dir.mkdir(parents=True, exist_ok=True)
+
+        jsonl_path = source_dir / f"{sid}.jsonl"
+        rows = conn.execute(
+            "SELECT raw_json FROM messages_index WHERE session_id = ? ORDER BY ts",
+            (sid,),
+        ).fetchall()
+
+        with open(jsonl_path, "w", encoding="utf-8") as f:
+            for row in rows:
+                if row["raw_json"]:
+                    f.write(row["raw_json"] + "\n")
+
+    conn.close()
+
+
 def _iter_jsonl_files(sessions_dir: Path):
-    """按时间顺序遍历所有 JSONL 文件。"""
+    """按时间顺序遍历所有 JSONL 文件（含 source 子目录）。"""
     if not sessions_dir.exists():
         return
     for date_dir in sorted(sessions_dir.iterdir()):
         if date_dir.is_dir():
-            for jsonl_file in sorted(date_dir.glob("*.jsonl")):
+            # 兼容扁平结构和 source 子目录
+            for jsonl_file in sorted(date_dir.rglob("*.jsonl")):
                 yield jsonl_file
 
 
@@ -551,6 +708,7 @@ def _flush_batch(conn: sqlite3.Connection, batch: list[dict]) -> None:
         t = msg.get("type")
         sid = msg.get("session_id", "")
         seg = msg.get("segment", 0)
+        raw = json.dumps(msg, ensure_ascii=False)
 
         if t == "session_start":
             conn.execute(
@@ -559,6 +717,11 @@ def _flush_batch(conn: sqlite3.Connection, batch: list[dict]) -> None:
             )
             # 建立 segment 0
             pending_segment = {"session_id": sid, "segment": 0, "started_at": msg["ts"]}
+            # 特殊行入库
+            conn.execute(
+                "INSERT INTO messages_index(session_id, ts, role, content, raw_json) VALUES(?, ?, NULL, '', ?)",
+                (sid, msg["ts"], raw),
+            )
 
         elif t == "session_end":
             conn.execute(
@@ -575,6 +738,11 @@ def _flush_batch(conn: sqlite3.Connection, batch: list[dict]) -> None:
                     "UPDATE segments SET ended_at = ? WHERE id = ?",
                     (msg["ts"], row["id"]),
                 )
+            # 特殊行入库
+            conn.execute(
+                "INSERT INTO messages_index(session_id, ts, role, content, raw_json) VALUES(?, ?, NULL, '', ?)",
+                (sid, msg["ts"], raw),
+            )
 
         elif t == "segment_boundary":
             # 上一 segment 结束
@@ -588,6 +756,11 @@ def _flush_batch(conn: sqlite3.Connection, batch: list[dict]) -> None:
             conn.execute(
                 "INSERT OR IGNORE INTO segments(session_id, segment, started_at) VALUES(?, ?, ?)",
                 (sid, next_seg, next_started),
+            )
+            # 特殊行入库
+            conn.execute(
+                "INSERT INTO messages_index(session_id, ts, role, content, raw_json) VALUES(?, ?, NULL, '', ?)",
+                (sid, msg["ts"], raw),
             )
 
         elif msg.get("role") in ("user", "assistant"):
@@ -610,9 +783,12 @@ def _flush_batch(conn: sqlite3.Connection, batch: list[dict]) -> None:
                     pass  # 已存在
                 pending_segment = None
 
+            # jieba 预分词 + raw_json
+            content = msg.get("content", "")
+            segmented = _jieba_cut(content)
             conn.execute(
-                "INSERT INTO messages_index(session_id, ts, role, content) VALUES(?, ?, ?, ?)",
-                (sid, msg["ts"], msg["role"], msg.get("content", "")),
+                "INSERT INTO messages_index(session_id, ts, role, content, raw_json) VALUES(?, ?, ?, ?, ?)",
+                (sid, msg["ts"], msg["role"], segmented, raw),
             )
 
     conn.commit()

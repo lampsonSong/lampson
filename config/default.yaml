@@ -20,9 +20,16 @@ skills_management:
   cleanup_age_days: 10         # 创建超过此天数的 skill 参与清理
   cleanup_min_invocations: 0   # 调用次数不超过此值的参与清理
 
-# 语义检索配置
+# Embedding 配置（语义检索 & session 搜索）
+# 不配 base_url 则不启用 embedding，降级为纯关键词搜索
+embedding:
+  provider: "zhipu"
+  model: "embedding-3"
+  # base_url: "https://open.bigmodel.cn/api/paas/v4/"  # 必须显式配置
+  # api_key: ""                                        # 必须显式配置
+
+# 检索配置
 retrieval:
-  embedding_model: "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
   skill_top_k: 3
   project_top_k: 2
   similarity_threshold: 0.3

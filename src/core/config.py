@@ -18,10 +18,14 @@ INDEX_DIR = LAMPSON_DIR / "index"
 PROJECTS_DIR = LAMPSON_DIR / "projects"
 
 _DEFAULT_RETRIEVAL: dict[str, Any] = {
-    "embedding_model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
     "skill_top_k": 3,
     "project_top_k": 2,
     "similarity_threshold": 0.3,
+}
+
+_DEFAULT_EMBEDDING: dict[str, Any] = {
+    "provider": "zhipu",
+    "model": "embedding-3",
 }
 
 _DEFAULT_SKILLS_MANAGEMENT: dict[str, Any] = {
@@ -92,9 +96,6 @@ def get_retrieval_config(config: dict[str, Any]) -> dict[str, Any]:
         r = {}
     base = _deep_merge(dict(_DEFAULT_RETRIEVAL), r)
     return {
-        "embedding_model": str(
-            base.get("embedding_model", _DEFAULT_RETRIEVAL["embedding_model"])
-        ),
         "skill_top_k": int(base.get("skill_top_k", _DEFAULT_RETRIEVAL["skill_top_k"])),
         "project_top_k": int(
             base.get("project_top_k", _DEFAULT_RETRIEVAL["project_top_k"])
@@ -102,6 +103,28 @@ def get_retrieval_config(config: dict[str, Any]) -> dict[str, Any]:
         "similarity_threshold": float(
             base.get("similarity_threshold", _DEFAULT_RETRIEVAL["similarity_threshold"])
         ),
+    }
+
+
+def get_embedding_config(config: dict[str, Any]) -> dict[str, str]:
+    """
+    合并 embedding 段。base_url 必须显式配置（不继承 llm 段），不配则 embedding 不可用。
+    返回的 api_key 也必须显式在 embedding 段指定，否则为空（降级为纯关键词搜索）。
+    """
+    e = config.get("embedding")
+    if not isinstance(e, dict):
+        e = {}
+    base = _deep_merge(dict(_DEFAULT_EMBEDDING), e)
+    provider = str(base.get("provider", _DEFAULT_EMBEDDING["provider"]))
+    model = str(base.get("model", _DEFAULT_EMBEDDING["model"]))
+    base_url = str(base.get("base_url", "") or "").strip()
+    # api_key: 只取 embedding 段显式配置的值，不继承 llm 段
+    api_key = str(base.get("api_key", "") or "").strip()
+    return {
+        "provider": provider,
+        "model": model,
+        "api_key": api_key,
+        "base_url": base_url,
     }
 
 

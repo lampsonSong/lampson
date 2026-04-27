@@ -67,12 +67,12 @@ REFLECT_PROMPT = """你是一个知识管理助手。请分析这次任务执行
   - "target": 项目名或技能名
   - "reason": 一句话说明为什么值得记录
   - "content": 要写入的正文内容（markdown 格式）
-  - "triggers": 字符串数组（仅 skill_create 时需要，至少 3 个触发词）
+  - "triggers": 字符串数组（skill_create 和 skill_update 都需要；skill_update 时只需提供**新增**的触发词，可以为空）
 
 判断标准：
 - project: 记录具体项目的事实信息（路径、技术栈、配置），如 "hermes 项目源码在 ~/.hermes/hermes-agent/"
 - skill_create: 发现了一种可复用的操作方法，当前 skills 里没有覆盖的
-- skill_update: 执行过程中发现某个已有 skill 的步骤不够或有错误
+- skill_update: 执行过程中发现某个已有 skill 的步骤不够、有错误，或者用户用了一种新表达方式触发了该 skill
 - should_learn=false: 简单查询、闲聊、或信息已经记录过
 
 注意：
@@ -278,8 +278,8 @@ def _create_skill(
 def _update_skill(
     target: str, content: str, reason: str, triggers: list[str]
 ) -> str | None:
-    """更新已有 skill。"""
-    if not target or not content:
+    """更新已有 skill。支持只追加 triggers（content 可为空）。"""
+    if not target:
         return None
 
     skill_dir = SKILLS_DIR / target
@@ -287,23 +287,34 @@ def _update_skill(
 
     if not skill_file.exists():
         # 不存在，降级为创建（但可能内容太短不过门槛）
-        if len(content.strip()) >= _MIN_SKILL_CONTENT_LEN and len(triggers) >= _MIN_TRIGGER_COUNT:
+        if content and len(content.strip()) >= _MIN_SKILL_CONTENT_LEN and len(triggers) >= _MIN_TRIGGER_COUNT:
             return _create_skill(target, content, reason, triggers)
         return None
 
     existing = skill_file.read_text(encoding="utf-8")
 
-    # 去重
-    if _content_already_exists(existing, content):
+    # 去重（仅当有新内容时检查）
+    if content and _content_already_exists(existing, content):
         logger.debug(f"Skill {target} 已有相同信息，跳过更新")
+        # 即使内容重复，仍可追加 triggers
+        if triggers:
+            updated = _merge_triggers(existing, triggers)
+            if updated != existing:
+                skill_file.write_text(updated, encoding="utf-8")
+                return f"已更新技能触发词: {target}"
         return None
 
-    # 追加新内容
-    updated = existing + f"\n\n## 更新 ({datetime.now():%Y-%m-%d})\n{content}"
+    # 追加新内容（如果有）
+    updated = existing
+    if content:
+        updated = existing + f"\n\n## 更新 ({datetime.now():%Y-%m-%d})\n{content}"
 
     # 合并 triggers（如果新 triggers 不为空）
     if triggers:
         updated = _merge_triggers(updated, triggers)
+
+    if updated == existing:
+        return None
 
     skill_file.write_text(updated, encoding="utf-8")
     logger.info(f"已更新技能: {target} ({reason})")

@@ -28,6 +28,17 @@ PROMPT_STYLE = Style.from_dict({
 })
 
 
+def _cli_progress_callback(event: dict) -> None:
+    """CLI 模式下的工具调用进度回调，实时打印到终端。"""
+    if event.get("type") != "tool_progress":
+        return
+    tool = event.get("tool", "?")
+    args_preview = event.get("args_preview", "")
+    result_preview = event.get("result_preview", "")
+    round_num = event.get("round", "?")
+    print(f"  [工具 {round_num}] {tool}({args_preview}) → {result_preview}", flush=True)
+
+
 def _parse_args() -> tuple[str | None, bool]:
     """解析命令行参数，返回 (input_text, is_slash_command)。
 
@@ -111,6 +122,8 @@ def _run_repl(config: dict) -> None:
     """交互式 REPL 循环。"""
     mgr = get_session_manager(config)
     session = mgr.get_or_create("cli", "default")
+    # CLI 模式下设置 progress_callback，工具调用时实时打印进度
+    session.agent.progress_callback = _cli_progress_callback
     skill_count = len(session.skills)
     feishu_status = "已连接" if session.feishu_ready else "未配置"
     print(f"Lampson 已启动（技能: {skill_count} 个，飞书: {feishu_status}）。输入 /help 查看命令，Ctrl+C 或 /exit 退出。\n")
@@ -219,11 +232,20 @@ def main() -> None:
     # 非交互模式
     if non_interactive_input is not None:
         session = mgr.get_or_create("cli", "default")
+        session.agent.progress_callback = _cli_progress_callback
         result = session.handle_input(non_interactive_input)
 
         if result.reply == "__SERVE__":
             try:
                 session.start_feishu_listener()
+                # 阻塞主线程，保持 daemon WebSocket 线程存活
+                import threading
+                stop_event = threading.Event()
+                print("[serve] 飞书监听已启动，主线程阻塞中（Ctrl+C 退出）")
+                try:
+                    stop_event.wait()
+                except KeyboardInterrupt:
+                    print("\n[serve] 收到退出信号")
             except Exception as e:
                 print(f"[serve] {e}")
         elif result.reply:
