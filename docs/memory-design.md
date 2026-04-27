@@ -63,7 +63,7 @@ JSONL 中共四种行类型：
 | `session_start` | session 创建时 | 写入 sessions 表（started_at, source） |
 | 普通消息行 | 每条消息 | user/assistant，含 content、tool_calls、tool_result_summary、referenced_tool_results |
 | `segment_boundary` | compaction 触发时 | 标记 segment 结束，含 next_segment_started_at |
-| `session_end` | session 退出时 | 标记 session 正常结束 |
+| `session_end` | session 退出时 | 标记 session 结束，**可选包含 summary（idle 超时重置时由 LLM 生成）** |
 
 ---
 
@@ -125,13 +125,17 @@ JSONL 中共四种行类型：
 
 > **archive 字段的作用**：compaction 结果在 JSONL 和 skill/project 两处持久化，但两者没有直接关联。程序崩溃后 resume 时，仅靠 segment_boundary 只能知道"压缩发生过"，但不知道归档到了哪里。archive 字段让 resume 逻辑可以准确注入相关 skill/project，无需再查 skill/project 文件内容。
 
-**session_end 示例**：
+**session_end 示例（无 summary）**：
 
 ```jsonl
 {"ts": 1745809999000, "session_id": "abc123", "segment": 1, "type": "session_end"}
 ```
 
-(duplicate table removed - entries already shown above)
+**session_end 示例（idle 超时重置，含 summary）**：
+
+```jsonl
+{"ts": 1745809999000, "session_id": "abc123", "segment": 1, "type": "session_end", "summary": "用户正在实现 SessionManager 的 idle 超时重置机制，已完成超时检测和重置流程，下一步需要集成前端页面。"}
+```
 
 ### 3.3 存储范围
 
@@ -184,7 +188,8 @@ CREATE TABLE sessions (
     session_id TEXT PRIMARY KEY,
     started_at INTEGER,           -- 毫秒时间戳，session_start 行的 ts
     ended_at INTEGER,            -- 毫秒时间戳，session_end 行的 ts
-    source TEXT NOT NULL         -- 启动来源，不做白名单强制校验
+    source TEXT NOT NULL,        -- 启动来源，不做白名单强制校验
+    summary TEXT                 -- session 结束时的进度总结（idle 超时重置时由 LLM 生成）
 );
 ```
 

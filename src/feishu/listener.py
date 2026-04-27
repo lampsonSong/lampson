@@ -1,7 +1,10 @@
 """飞书长连接监听器：通过 WebSocket 接收消息事件，替代轮询方案。
 
 职责仅限：消息收发 + 去重。
-所有业务逻辑通过 Session.handle_input() 处理。
+所有业务逻辑通过 SessionManager → Session.handle_input() 处理。
+
+设计文档：docs/PROJECT.md §4.10
+start() 为非阻塞（daemon thread），消息路由到 SessionManager。
 """
 
 from __future__ import annotations
@@ -11,7 +14,7 @@ import queue
 import re
 import threading
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import (
@@ -22,6 +25,7 @@ from lark_oapi.api.im.v1 import (
 
 if TYPE_CHECKING:
     from src.core.session import Session
+    from src.core.session_manager import SessionManager
 
 
 class MessageDeduplicator:
@@ -59,26 +63,17 @@ class MessageDeduplicator:
 
 
 class FeishuListener:
-    """基于 lark_oapi WebSocket 长连接的飞书消息监听器。"""
+    """基于 lark_oapi WebSocket 长连接的飞书消息监听器（daemon thread，非阻塞）。"""
 
     def __init__(
         self,
         app_id: str,
         app_secret: str,
-        agent=None,
-        session: Session | None = None,
+        session_manager: "SessionManager | None" = None,
     ) -> None:
         self.app_id = app_id
         self.app_secret = app_secret
-        # 兼容旧调用方式（直接传 agent）和新方式（传 session）
-        if session is not None:
-            self._session = session
-        elif agent is not None:
-            # 向后兼容：从 agent 构造一个最小 session 包装
-            self._session = None
-            self._agent = agent
-        else:
-            raise ValueError("必须传入 agent 或 session")
+        self._mgr = session_manager
         self._dedup = MessageDeduplicator()
         self._lark_client = (
             lark.Client.builder()
@@ -191,7 +186,7 @@ class FeishuListener:
     # ─── 消息处理 ─────────────────────────────────────────────────────────
 
     def _handle_message(self, data: P2ImMessageReceiveV1) -> None:
-        """处理收到的消息事件。"""
+        """处理收到的消息事件，路由到 SessionManager。"""
         try:
             sender = data.event.sender
             message = data.event.message
@@ -214,7 +209,7 @@ class FeishuListener:
             create_time_str = getattr(message, "create_time", None)
             if create_time_str:
                 try:
-                    create_ts = int(create_time_str) / 1000  # 飞书毫秒时间戳
+                    create_ts = int(create_time_str) / 1000
                     delay = time.time() - create_ts
                     if delay > 60:
                         print(
@@ -240,101 +235,92 @@ class FeishuListener:
                 print("[listener] 消息内容为空，跳过", flush=True)
                 return
 
-            # 走 Session（推荐）或直接走 agent（向后兼容）
-            if self._session is not None:
-                self._session.partial_sender = lambda text: self._send_reply(chat_id, text)
+            if self._mgr is None:
+                print("[listener] SessionManager 未初始化，无法处理消息", flush=True)
+                return
 
-                _progress_queue: queue.Queue = queue.Queue()
-                _progress_done = threading.Event()
+            # 通过 SessionManager 获取该 sender_id 对应的 Session
+            session = self._mgr.get_or_create("feishu", open_id)
+            session.partial_sender = lambda t: self._send_reply(chat_id, t)
 
-                def _progress_worker() -> None:
-                    """后台线程：收集工具调用进度，用卡片 + update 不刷屏。"""
-                    progress_lines: list[str] = []
-                    progress_msg_id: str | None = None
-                    last_update_ts = 0.0
-                    update_interval = 1.5
+            _progress_queue: queue.Queue[dict[str, Any]] = queue.Queue()
+            _progress_done = threading.Event()
+            progress_msg_id: str | None = None
 
-                    while True:
-                        try:
-                            event = _progress_queue.get(timeout=0.5)
-                        except queue.Empty:
-                            if _progress_done.is_set():
-                                # 最终更新：标记为已完成
-                                if progress_lines:
-                                    if progress_msg_id is None:
-                                        self._send_progress_card(
-                                            chat_id, progress_lines, finished=True
-                                        )
-                                    else:
-                                        self._update_progress_card(
-                                            progress_msg_id, progress_lines, finished=True
-                                        )
-                                return
-                            continue
+            def _progress_worker() -> None:
+                """后台线程：收集工具调用进度，用卡片 + update 不刷屏。"""
+                nonlocal progress_msg_id
+                progress_lines: list[str] = []
+                last_update_ts = 0.0
+                update_interval = 1.5
 
-                        if not isinstance(event, dict) or event.get("type") != "tool_progress":
-                            continue
+                while True:
+                    try:
+                        event = _progress_queue.get(timeout=0.5)
+                    except queue.Empty:
+                        if _progress_done.is_set():
+                            if progress_lines:
+                                if progress_msg_id is None:
+                                    self._send_progress_card(
+                                        chat_id, progress_lines, finished=True
+                                    )
+                                else:
+                                    self._update_progress_card(
+                                        progress_msg_id, progress_lines, finished=True
+                                    )
+                            return
+                        continue
 
-                        round_n = event["round"]
-                        tool = event["tool"]
-                        args_p = event["args_preview"]
-                        result_p = event["result_preview"]
-                        is_error = (
-                            result_p.startswith("[错误]")
-                            or result_p.startswith("[飞书错误]")
-                            or result_p.startswith("[网络错误]")
-                        )
-                        icon = "x" if is_error else ">"
-                        progress_lines.append(
-                            f"**{round_n}.** `{tool}`({args_p})\n  {icon} {result_p}"
-                        )
+                    if not isinstance(event, dict) or event.get("type") != "tool_progress":
+                        continue
 
-                        # 节流：每 1.5 秒最多更新一次卡片
-                        now = time.monotonic()
-                        if now - last_update_ts < update_interval:
-                            continue
+                    round_n = event["round"]
+                    tool = event["tool"]
+                    args_p = event["args_preview"]
+                    result_p = event["result_preview"]
+                    is_error = (
+                        result_p.startswith("[错误]")
+                        or result_p.startswith("[飞书错误]")
+                        or result_p.startswith("[网络错误]")
+                    )
+                    icon = "x" if is_error else ">"
+                    progress_lines.append(
+                        f"**{round_n}.** `{tool}`({args_p})\n  {icon} {result_p}"
+                    )
 
-                        if progress_msg_id is None:
-                            progress_msg_id = self._send_progress_card(
-                                chat_id, progress_lines
-                            )
-                        else:
-                            self._update_progress_card(progress_msg_id, progress_lines)
-                        last_update_ts = time.monotonic()
+                    now = time.monotonic()
+                    if now - last_update_ts < update_interval:
+                        continue
 
-                _worker = threading.Thread(
-                    target=_progress_worker,
-                    daemon=True,
-                    name="feishu-progress",
-                )
-                _worker.start()
+                    if progress_msg_id is None:
+                        progress_msg_id = self._send_progress_card(
+                            chat_id, progress_lines
+                        ) or ""
+                    else:
+                        self._update_progress_card(progress_msg_id, progress_lines)
+                    last_update_ts = time.monotonic()
 
-                def _progress_cb(event):
-                    _progress_queue.put(event)
+            _worker = threading.Thread(
+                target=_progress_worker,
+                daemon=True,
+                name="feishu-progress",
+            )
+            _worker.start()
 
-                self._session.agent.progress_callback = _progress_cb
-                try:
-                    result = self._session.handle_input(text)
-                finally:
-                    _progress_done.set()
-                    _worker.join(timeout=3.0)
-                    self._session.partial_sender = None
-                    self._session.agent.progress_callback = None
-                reply = result.reply
-                if result.compaction_msg:
-                    print(f"[listener] {result.compaction_msg}", flush=True)
-            else:
-                print(f"[listener] 调用 agent.run，输入: {text}", flush=True)
-                reply = self._agent.run(text)
-                # 上下文压缩
-                try:
-                    cr = self._agent.maybe_compact()
-                    if cr is not None and cr.success:
-                        print(f"[listener] 上下文压缩已完成，归档 {cr.archived_count} 条内容。", flush=True)
-                    elif cr is not None and not cr.success:
-                        print(f"[listener] 上下文压缩失败: {cr.error}", flush=True)
-                except Exception as e:
-                    print(f"[listener] 上下文压缩异常: {e}", flush=True)
+            def _progress_cb(event: dict) -> None:
+                _progress_queue.put(event)
+
+            session.agent.progress_callback = _progress_cb
+            try:
+                result = session.handle_input(text)
+            finally:
+                _progress_done.set()
+                _worker.join(timeout=3.0)
+                session.partial_sender = None
+                session.agent.progress_callback = None
+            reply = result.reply
+            if result.compaction_msg:
+                print(f"[listener] {result.compaction_msg}", flush=True)
 
             print(f"[listener] 回复: {reply}", flush=True)
 
@@ -346,9 +332,12 @@ class FeishuListener:
             print(f"[listener] 处理消息时发生错误：{e}", flush=True)
 
     def start(self) -> None:
-        """启动长连接，阻塞运行直到进程退出。"""
+        """启动长连接，在 daemon thread 中运行，立即返回（不阻塞 REPL）。
+
+        设计文档：docs/PROJECT.md §4.10
+        """
         print(
-            f"[listener] 启动飞书长连接监听，app_id={self.app_id}",
+            f"[listener] 启动飞书长连接监听（daemon），app_id={self.app_id}",
             flush=True,
         )
 
@@ -365,5 +354,10 @@ class FeishuListener:
             log_level=lark.LogLevel.DEBUG,
         )
 
-        print("[listener] WebSocket 客户端已创建，开始连接...", flush=True)
-        ws_client.start()
+        t = threading.Thread(
+            target=ws_client.start,
+            daemon=True,
+            name="feishu-ws",
+        )
+        t.start()
+        print("[listener] WebSocket 线程已启动（daemon），立即返回", flush=True)

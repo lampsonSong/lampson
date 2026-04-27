@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY,
     started_at INTEGER NOT NULL,   -- 毫秒时间戳
     ended_at INTEGER,              -- 毫秒时间戳，session_end 时写入
-    source TEXT NOT NULL DEFAULT 'cli'
+    source TEXT NOT NULL DEFAULT 'cli',
+    summary TEXT                   -- session 结束时自动生成的进度总结
 );
 
 CREATE TABLE IF NOT EXISTS segments (
@@ -99,6 +100,7 @@ class SessionInfo:
     started_at: int          # ms timestamp
     ended_at: int | None
     source: str = "cli"
+    summary: str | None = None  # session 结束时的进度总结
 
 
 def create_session(source: str = "cli") -> SessionInfo:
@@ -136,24 +138,39 @@ def _gen_session_id() -> str:
     return uuid.uuid4().hex[:8]
 
 
-def end_session(session_id: str) -> None:
-    """标记 session 结束，写入 session_end 行。"""
+def end_session(session_id: str, summary: str | None = None) -> None:
+    """标记 session 结束，写入 session_end 行和 summary。"""
     now_ms = _now_ms()
 
     # 写 JSONL
-    _jsonl_append(session_id, {
+    end_row: dict[str, Any] = {
         "ts": now_ms,
         "session_id": session_id,
         "type": "session_end",
-    })
+    }
+    if summary:
+        end_row["summary"] = summary
+    _jsonl_append(session_id, end_row)
 
     # 写 SQLite
     conn = _get_db()
     try:
-        conn.execute(
-            "UPDATE sessions SET ended_at = ? WHERE session_id = ?",
-            (now_ms, session_id),
-        )
+        # 迁移：确保 summary 列存在（已有 sessions 表不受影响）
+        try:
+            conn.execute("ALTER TABLE sessions ADD COLUMN summary TEXT")
+        except sqlite3.OperationalError:
+            pass  # 列已存在
+
+        if summary:
+            conn.execute(
+                "UPDATE sessions SET ended_at = ?, summary = ? WHERE session_id = ?",
+                (now_ms, summary, session_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE sessions SET ended_at = ? WHERE session_id = ?",
+                (now_ms, session_id),
+            )
         # 同时更新最后一个 segment 的 ended_at
         row = conn.execute(
             "SELECT id FROM segments WHERE session_id = ? ORDER BY segment DESC LIMIT 1",
@@ -174,7 +191,7 @@ def get_session(session_id: str) -> SessionInfo | None:
     conn = _get_db()
     try:
         row = conn.execute(
-            "SELECT session_id, started_at, ended_at, source FROM sessions WHERE session_id = ?",
+            "SELECT session_id, started_at, ended_at, source, summary FROM sessions WHERE session_id = ?",
             (session_id,),
         ).fetchone()
         if not row:
@@ -184,7 +201,30 @@ def get_session(session_id: str) -> SessionInfo | None:
             started_at=row["started_at"],
             ended_at=row["ended_at"],
             source=row["source"],
+            summary=row["summary"] if "summary" in row.keys() else None,
         )
+    finally:
+        conn.close()
+
+
+def get_last_session_summary(channel: str, sender_id: str) -> str | None:
+    """查最近一条已结束 session 的 summary，按 ended_at 倒序。
+
+    channel: 来源渠道，如 "cli"、"feishu"、"telegram"
+    sender_id: 发送者 ID，cli 固定为 "default"
+    """
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            """
+            SELECT summary FROM sessions
+            WHERE source = ? AND ended_at IS NOT NULL AND summary IS NOT NULL AND summary != ''
+            ORDER BY ended_at DESC
+            LIMIT 1
+            """,
+            (channel,),
+        ).fetchone()
+        return row["summary"] if row else None
     finally:
         conn.close()
 

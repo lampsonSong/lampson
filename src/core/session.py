@@ -170,6 +170,8 @@ class Session:
         self._current_segment: int = 0
         # SessionManager 引用（用于 start_feishu_listener 传给 FeishuListener）
         self._session_manager: Any = None
+        # 上一次活动时间（秒时间戳），用于 idle 超时检测
+        self.last_activity_at: float = 0.0
 
     # ── 工厂方法 ──
 
@@ -270,6 +272,9 @@ class Session:
 
         自动判断是命令还是自然语言，内部处理压缩。
         """
+        import time as _time_module
+
+        self.last_activity_at = _time_module.time()
         if user_input.startswith("/"):
             return self._handle_command(user_input)
 
@@ -355,6 +360,29 @@ class Session:
                 memory_mgr.save_session_summary(summary)
         except Exception:
             pass
+
+    def _inject_resume_summary(self, summary: str) -> None:
+        """把上一条 session 的进度 summary 注入到当前 system prompt 末尾。
+
+        在 SessionManager 检测到 idle 超时、创建新 session 时调用。
+        """
+        from src.core.session_resume import build_resume_injection
+
+        if not summary:
+            return
+        injection = build_resume_injection(summary)
+        if not injection:
+            return
+
+        # 追加到 system prompt 末尾
+        primary_name = self._current_model_name
+        llm_bundle = self.llm_clients.get(primary_name)
+        if not llm_bundle:
+            return
+        llm = llm_bundle["llm"]
+        if llm.messages and llm.messages[0].get("role") == "system":
+            original = llm.messages[0]["content"]
+            llm.messages[0]["content"] = original + injection
 
     def _write_assistant_to_jsonl(self) -> None:
         """将 agent.llm.messages 中的最后一条 assistant 消息写入 JSONL。"""

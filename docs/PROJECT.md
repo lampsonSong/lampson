@@ -1,6 +1,6 @@
 # Lampson 项目文档
 
-> 文档版本：2026-04-27（SessionManager 多渠道架构）
+> 文档版本：2026-04-27（SessionManager 多渠道架构 + Idle 超时重置）
 > 项目版本：v0.2.0-dev
 
 ---
@@ -54,7 +54,12 @@ feishu/listener.py (blocking start()) ↗
 │              SessionManager (src/core/session_manager.py) │
 │                                                           │
 │   session_manager.get_or_create(channel, sender_id)       │
-│   └─→ 返回一个独立的 Session 实例                           │
+│   ├─ 检查 last_activity_at 是否 > 180 分钟                │
+│   │   └─ 超时：_reset_session()                           │
+│   │       1. 调用 LLM 生成 progress summary               │
+│   │       2. session_store.end_session(summary=...)        │
+│   │       3. _create_session() 自动注入旧 summary         │
+│   └─→ 返回 Session 实例                                   │
 │                                                           │
 │   channel 路由规则：                                      │
 │     "cli"        → 全局唯一一个 Session（开发者专用）      │
@@ -118,7 +123,7 @@ feishu/listener.py (blocking start()) ↗
 
 | 模块 | 文件 | 职责 |
 |------|------|------|
-| SessionManager | `src/core/session_manager.py` | **新增**：管理多个 Session 实例，按 channel+sender_id 路由 |
+| SessionManager | `src/core/session_manager.py` | 管理多个 Session 实例，按 channel+sender_id 路由；**支持 3 小时 idle 超时自动重置 + 跨 session 进度延续** |
 | CLI 入口 | `src/cli.py` | 参数解析 + REPL 循环 + 结果展示（纯 Gateway） |
 | Session | `src/core/session.py` | Agent 生命周期 + 命令路由 + 压缩触发 + 飞书初始化 |
 | Agent | `src/core/agent.py` | LLM 主循环，工具调用分发，规划执行，max_tool_rounds 循环 |
@@ -137,6 +142,7 @@ feishu/listener.py (blocking start()) ↗
 | FileOps Tool | `src/tools/fileops.py` | 文件读写，带大小限制保护 |
 | Web Tool | `src/tools/web.py` | DuckDuckGo 网页搜索 |
 | Compaction | `src/core/compaction.py` | 上下文压缩：归档+摘要，可迭代 |
+| Session Resume | `src/core/session_resume.py` | **新增**：idle 超时生成 progress summary + 新 session 自动加载旧 summary |
 
 
 ## 三、功能清单
@@ -187,6 +193,7 @@ feishu/listener.py (blocking start()) ↗
 - WebSocket 长连接监听（非阻塞 daemon thread，路由到 SessionManager）
 - 消息去重器（基于 message_id 的滑动窗口 TTL）
 - `/serve` 启动后 CLI 与飞书监听并发运行，独立 Session 互不干扰
+- **Session idle 超时重置**：3 小时无活动自动结束当前 session，生成 progress summary，新 session 创建时自动加载旧 summary 延续上下文
 
 #### 自更新
 - `/update <需求描述>`：LLM 分析需求 → 生成代码修改方案 → 用户确认 → git 分支执行
@@ -261,18 +268,69 @@ class Session:
     @classmethod
     def from_config(cls, config) -> Session   # 工厂：技能→LLM→Agent→飞书
 
-    def handle_input(self, text) -> HandleResult  # 统一入口
+    def handle_input(self, text) -> HandleResult  # 统一入口，更新 last_activity_at
         ├─ /command → _handle_command()  命令路由
         └─ 自然语言 → agent.run() → maybe_compact()
 
     def init_feishu(self) -> bool              # 飞书客户端初始化
     def start_feishu_listener(self) -> None    # 启动 WebSocket 监听（daemon thread，非阻塞）
     def save_summary(self) -> None             # 退出时保存会话摘要
+    def _inject_resume_summary(self, summary) -> None  # 注入上一条 session 的 progress summary 到 system prompt
+```
+
+**新增属性**：
+- `last_activity_at: float` — 秒级时间戳，`handle_input()` 被调用时更新
+- `_session_manager: SessionManager` — SessionManager 引用（用于 FeishuListener 路由）
+
+### 4.3 SessionManager Idle 重置 (`src/core/session_manager.py`)
+
+**核心机制**：Session 3 小时（180 分钟）无任何对话活动自动结束，生成 progress summary，新 session 创建时自动加载旧 summary。
+
+```python
+IDLE_TIMEOUT_MINUTES = 180  # 3 小时
+
+class SessionManager:
+    def get_or_create(self, channel, sender_id) -> Session:
+        # 进入时检查旧 session 是否 idle 超时
+        # 超时：_reset_session() → 生成 summary → 结束旧 session → 创建新 session → 注入旧 summary
+        # 未超时：直接返回现有 session
+
+    def _is_idle_expired(self, session) -> bool:
+        # 检查 session.last_activity_at > 180 分钟
+
+    def _reset_session(self, channel, sender_id, is_cli) -> None:
+        # 1. 读取旧 session 所有消息
+        # 2. 调用 LLM 生成 "任务/已完成/下一步" progress summary
+        # 3. session_store.end_session(old_id, summary=summary)
+        # 4. _create_session() 自动加载上一条已结束 session 的 summary
+        # 5. 新 session._inject_resume_summary() 追加到 system prompt
+
+    def _create_session(self, channel, sender_id) -> Session:
+        # 1. session_store.create_session() 写入新 session
+        # 2. session_store.get_last_session_summary() 加载上一条已结束 session 的 summary
+        # 3. Session.from_config() 创建 Session
+        # 4. 若有 summary，调用 _inject_resume_summary() 注入到 system prompt
+```
+
+**Summary 生成**（`src/core/session_resume.py`）：
+- Prompt 要求：简洁、200字以内、三要素（任务/已完成/下一步）
+- 生成失败时 summary 为空，不阻塞重置流程
+- 只在 idle reset 时生成，手动 `/stop` 不生成
+
+**注入格式**：
+```
+## 上一轮会话进展
+
+上一轮会话因超过 3 小时无活动而结束，以下是当时的进展：
+
+{summary}
+
+请继续推进上述任务。如果任务已完成或有新需求，请告知用户。
 ```
 
 **命令路由**：`/help` `/config` `/memory` `/skills` `/feishu` `/update` `/serve` `/exit` 全部在 Session 内部处理。
 
-### 4.3 Agent 主循环 (`src/core/agent.py`)
+### 4.4 Agent 主循环 (`src/core/agent.py`)
 
 ```python
 class Agent:
@@ -295,7 +353,7 @@ class Agent:
 - Skills 通过 `skill_view(name)` 工具按需加载，不每轮自动注入
 - `_inject_tools_prompt()` 只在 prompt-based 模式注入一次
 
-### 4.4 LLM 客户端 (`src/core/llm.py`)
+### 4.5 LLM 客户端 (`src/core/llm.py`)
 
 ```python
 class LLMClient:
@@ -310,7 +368,7 @@ class LLMClient:
 
 **异常处理**：超时、连接错误、频率限制
 
-### 4.5 分层 System Prompt (`src/core/prompt_builder.py`)
+### 4.6 分层 System Prompt (`src/core/prompt_builder.py`)
 
 9层结构：
 

@@ -261,22 +261,48 @@ class Agent:
 
     def _run_tool_loop(self) -> str:
         """统一工具调用主循环。不再分 _run_native / _run_prompt_based。"""
-        for _ in range(self.max_tool_rounds):
-            response = self.adapter.chat(self.llm.messages, tools=self._tools)
-            parsed = self.adapter.parse_response(response)
-            
-            # 记录原始 assistant message 到历史
+        round_increment = 0
+
+        while True:
+            for _ in range(self.max_tool_rounds):
+                response = self.adapter.chat(self.llm.messages, tools=self._tools)
+                parsed = self.adapter.parse_response(response)
+
+                self.llm.messages.append(response.choices[0].message.model_dump(exclude_none=True))
+
+                if not parsed.tool_calls:
+                    return parsed.content or ""
+
+                for tc in parsed.tool_calls:
+                    result = tool_registry.dispatch(tc.name, tc.arguments)
+                    tool_msg = self.adapter.format_tool_result(tc.id, result)
+                    self.llm.messages.append(tool_msg)
+                    self._fast_path_tool_count += 1
+                    round_increment += 1
+
+            # ── 达到本轮上限：总结现状，清空计数器，继续解决 ──
+            # 不让用户选择，循环直到 LLM 主动声明完成
+            summary_prompt = (
+                f"你已达到本轮工具调用上限（{self.max_tool_rounds} 轮）。"
+                "请简洁总结当前进展：1) 已完成什么；2) 还在尝试什么；3) 下一步计划。"
+                "直接回复内容，不要调用任何工具。"
+            )
+            self.llm.messages.append({"role": "user", "content": summary_prompt})
+            response = self.adapter.chat(self.llm.messages, tools=None)
             self.llm.messages.append(response.choices[0].message.model_dump(exclude_none=True))
-            
-            if not parsed.tool_calls:
-                return parsed.content or ""
-            
-            for tc in parsed.tool_calls:
-                result = tool_registry.dispatch(tc.name, tc.arguments)
-                tool_msg = self.adapter.format_tool_result(tc.id, result)
-                self.llm.messages.append(tool_msg)
-        
-        return "[错误] 工具调用轮次超过限制"
+
+            # 检查 LLM 是否认为任务已完成
+            content = (response.choices[0].message.content or "").strip().lower()
+            done_indicators = ["已完成", "任务完成", "搞定了", "完成了所有", "all done", "done!", "completed"]
+            if any(ind in content for ind in done_indicators):
+                return response.choices[0].message.content or ""
+
+            # 未完成：追加继续提示，重置循环
+            round_increment = 0
+            self.llm.messages.append({
+                "role": "user",
+                "content": "请继续解决上述问题。如果已解决请直接回复结论，不需要再调用工具。",
+            })
 ```
 
 ## Session 改动
