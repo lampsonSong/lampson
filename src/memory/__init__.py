@@ -13,6 +13,8 @@ from . import manager as manager
 from .session_store import (
     create_session,
     end_session,
+    close_orphan_sessions,
+    purge_empty_sessions,
     get_session,
     append_message,
     append,
@@ -37,6 +39,8 @@ __all__ = [
     # 新接口
     "create_session",
     "end_session",
+    "close_orphan_sessions",
+    "purge_empty_sessions",
     "get_session",
     "append_message",
     "append",

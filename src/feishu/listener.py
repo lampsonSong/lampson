@@ -4,7 +4,7 @@
 所有业务逻辑通过 SessionManager → Session.handle_input() 处理。
 
 设计文档：docs/PROJECT.md §4.10
-start() 为非阻塞（daemon thread），消息路由到 SessionManager。
+start() 为非阻塞（WebSocket 在独立线程中运行，进程退出前应调用 shutdown）。
 """
 
 from __future__ import annotations
@@ -21,6 +21,12 @@ from lark_oapi.api.im.v1 import (
     P2ImMessageReceiveV1,
     CreateMessageRequest,
     CreateMessageRequestBody,
+)
+from lark_oapi.api.im.v1.model import (
+    CreateMessageReactionRequestBuilder,
+    CreateMessageReactionRequestBodyBuilder,
+    EmojiBuilder,
+    DeleteMessageReactionRequestBuilder,
 )
 
 if TYPE_CHECKING:
@@ -63,7 +69,7 @@ class MessageDeduplicator:
 
 
 class FeishuListener:
-    """基于 lark_oapi WebSocket 长连接的飞书消息监听器（daemon thread，非阻塞）。"""
+    """基于 lark_oapi WebSocket 长连接的飞书消息监听器（后台线程运行，见 shutdown）。"""
 
     def __init__(
         self,
@@ -75,6 +81,8 @@ class FeishuListener:
         self.app_secret = app_secret
         self._mgr = session_manager
         self._dedup = MessageDeduplicator()
+        self._ws_client: Any | None = None
+        self._ws_thread: threading.Thread | None = None
         self._lark_client = (
             lark.Client.builder()
             .app_id(app_id)
@@ -183,6 +191,49 @@ class FeishuListener:
         except Exception as e:
             print(f"[listener] 更新进度卡片失败: {e}", flush=True)
 
+    # ─── Reaction（ack 表情）─────────────────────────────────────────────
+
+    def _add_reaction(self, message_id: str, emoji_type: str = "THINKING") -> str | None:
+        """给消息添加表情，返回 reaction_id；失败返回 None。"""
+        try:
+            req = (
+                CreateMessageReactionRequestBuilder()
+                .message_id(message_id)
+                .request_body(
+                    CreateMessageReactionRequestBodyBuilder()
+                    .reaction_type(EmojiBuilder().emoji_type(emoji_type).build())
+                    .build()
+                )
+                .build()
+            )
+            resp = self._lark_client.im.v1.message_reaction.create(req)
+            if resp.success():
+                return resp.data.reaction_id
+            print(f"[listener] add_reaction 失败: {resp.code} {resp.msg}", flush=True)
+            return None
+        except Exception as e:
+            print(f"[listener] add_reaction 异常: {e}", flush=True)
+            return None
+
+    def _remove_reaction(self, message_id: str, reaction_id: str) -> bool:
+        """撤销表情，返回是否成功。"""
+        if not reaction_id:
+            return False
+        try:
+            req = (
+                DeleteMessageReactionRequestBuilder()
+                .message_id(message_id)
+                .reaction_id(reaction_id)
+                .build()
+            )
+            resp = self._lark_client.im.v1.message_reaction.delete(req)
+            if not resp.success():
+                print(f"[listener] remove_reaction 失败: {resp.code} {resp.msg}", flush=True)
+            return resp.success()
+        except Exception as e:
+            print(f"[listener] remove_reaction 异常: {e}", flush=True)
+            return False
+
     # ─── 消息处理 ─────────────────────────────────────────────────────────
 
     def _handle_message(self, data: P2ImMessageReceiveV1) -> None:
@@ -283,7 +334,7 @@ class FeishuListener:
                             if progress_msg_id is None:
                                 progress_msg_id = self._send_progress_card(
                                     chat_id, progress_lines
-                                ) or ""
+                                )  # None 表示发送失败，下次重试发送
                             else:
                                 self._update_progress_card(progress_msg_id, progress_lines)
                         continue
@@ -312,7 +363,7 @@ class FeishuListener:
                     if progress_msg_id is None:
                         progress_msg_id = self._send_progress_card(
                             chat_id, progress_lines
-                        ) or ""
+                        )  # None 表示发送失败，下次重试发送
                     else:
                         self._update_progress_card(progress_msg_id, progress_lines)
                     last_update_ts = time.monotonic()
@@ -327,7 +378,12 @@ class FeishuListener:
             def _progress_cb(event: dict) -> None:
                 _progress_queue.put(event)
 
+            # Ack reaction: 收到消息立即加表情
+            reaction_id = self._add_reaction(message_id)
+
+            session.set_message_context(message_id=message_id, chat_id=chat_id)
             session.agent.progress_callback = _progress_cb
+            session.agent.interim_sender = lambda t: self._send_reply(chat_id, t)
             try:
                 result = session.handle_input(text)
             finally:
@@ -335,12 +391,22 @@ class FeishuListener:
                 _worker.join(timeout=3.0)
                 session.partial_sender = None
                 session.agent.progress_callback = None
+                session.agent.interim_sender = None
+            # 处理 /new 命令：重置 session
+            if result.is_new and self._mgr is not None:
+                session = self._mgr.reset_session("feishu", open_id)
+                session.partial_sender = lambda t: self._send_reply(chat_id, t)
+                self._dedup.mark_processed(message_id)
+                self._send_reply(chat_id, "[新 session 已开始]")
+                return
+
             reply = result.reply
             if result.compaction_msg:
                 print(f"[listener] {result.compaction_msg}", flush=True)
 
             print(f"[listener] 回复: {reply}", flush=True)
 
+            self._remove_reaction(message_id, reaction_id or "")
             self._dedup.mark_processed(message_id)
             if reply:
                 self._send_reply(chat_id, reply)
@@ -349,7 +415,7 @@ class FeishuListener:
             print(f"[listener] 处理消息时发生错误：{e}", flush=True)
 
     def start(self) -> None:
-        """启动长连接，在 daemon thread 中运行，立即返回（不阻塞 REPL）。
+        """启动长连接，在独立线程中运行，立即返回（不阻塞调用方）。
 
         设计文档：docs/PROJECT.md §4.10
         """
@@ -370,11 +436,38 @@ class FeishuListener:
             event_handler=handler,
             log_level=lark.LogLevel.DEBUG,
         )
+        self._ws_client = ws_client
 
+        # daemon=True：若 shutdown 无法在超时内停止 SDK，进程仍可退出（避免 interpreters 在退出阶段无限等待）。
         t = threading.Thread(
             target=ws_client.start,
             daemon=True,
             name="feishu-ws",
         )
+        self._ws_thread = t
         t.start()
-        print("[listener] WebSocket 线程已启动（daemon），立即返回", flush=True)
+        print("[listener] WebSocket 线程已启动，立即返回", flush=True)
+
+    def shutdown(self, timeout: float = 30.0) -> None:
+        """停止 WebSocket 并 join 监听线程（供 daemon 优雅退出）。
+
+        SDK 若有 stop/close 等接口则调用，否则会依赖线程在进程退出时被回收。
+        """
+        ws = self._ws_client
+        th = self._ws_thread
+        if ws is not None:
+            for name in ("stop", "close", "interrupt"):
+                fn = getattr(ws, name, None)
+                if callable(fn):
+                    try:
+                        fn()
+                    except Exception as e:
+                        print(f"[listener] shutdown {name}(): {e}", flush=True)
+                    break
+        if th is not None and th.is_alive():
+            th.join(timeout=timeout)
+            if th.is_alive():
+                print(
+                    f"[listener] WebSocket 线程未在 {timeout}s 内退出（可能仍可被 launchd 强杀）",
+                    flush=True,
+                )

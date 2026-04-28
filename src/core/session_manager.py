@@ -8,10 +8,10 @@
 
 核心接口：
   session_manager.get_or_create(channel, sender_id) → Session
+  session_manager.reset_session(channel, sender_id) → Session
 
 Idle 超时重置：
   Session 3 小时无活动自动结束 → 创建新空白 session。
-  LLM 根据 SESSION_CONTINUITY_GUIDANCE 判断是否需要 session_load 恢复旧对话。
 """
 
 from __future__ import annotations
@@ -38,6 +38,11 @@ class SessionManager:
         self._sessions: dict[str, Session] = {}
         self._lock = threading.Lock()
         self._cli_session: Session | None = None  # cli 全局单例
+
+        # 进程启动时清理上次遗留的孤儿/空 session（只执行一次）
+        from src.memory import session_store as ss
+        ss.close_orphan_sessions()
+        ss.purge_empty_sessions()
 
     # ── 核心路由 ────────────────────────────────────────────────────────
 
@@ -109,7 +114,7 @@ class SessionManager:
         except Exception:
             session_id = None
 
-        session = Session.from_config(self._config)
+        session = Session.from_config(self._config, channel=channel)
         if session_id:
             session.session_id = session_id
         session._session_manager = self
@@ -117,7 +122,7 @@ class SessionManager:
 
         return session
 
-    # ── Idle 重置 ──────────────────────────────────────────────────────
+    # ── Session 重置 ──────────────────────────────────────────────────
 
     def _reset_session(self, channel: str, sender_id: str, is_cli: bool) -> None:
         """结束旧 session，创建新空白 session。
@@ -133,7 +138,7 @@ class SessionManager:
 
         old_id = old_session.session_id
 
-        print(f"[session_manager] Session {old_id} idle 超时，触发重置", flush=True)
+        print(f"[session_manager] Session {old_id} 重置", flush=True)
 
         # 结束旧 session（不生成 summary）
         if old_id:
@@ -155,6 +160,32 @@ class SessionManager:
             f"[session_manager] 新 session {new_session.session_id} 已创建",
             flush=True,
         )
+
+    def reset_session(self, channel: str, sender_id: str) -> "Session":
+        """公开接口：结束当前 session，创建并返回新 session。
+
+        供 /new 命令等场景使用，线程安全。
+        """
+        from src.memory import session_store as ss
+
+        is_cli = channel == "cli"
+        key = sender_id if is_cli else f"{channel}:{sender_id}"
+        with self._lock:
+            old_session = self._cli_session if is_cli else self._sessions.get(key)
+            old_id = old_session.session_id if old_session else None
+            if old_id:
+                try:
+                    ss.end_session(old_id)
+                except Exception as e:
+                    print(f"[session_manager] end_session 失败: {e}", flush=True)
+            print(f"[session_manager] Session {old_id} 重置", flush=True)
+            new_session = self._create_session(channel=channel, sender_id=sender_id)
+            if is_cli:
+                self._cli_session = new_session
+            else:
+                self._sessions[key] = new_session
+            print(f"[session_manager] 新 session {new_session.session_id} 已创建", flush=True)
+            return new_session
 
     # ── 生命周期 ───────────────────────────────────────────────────────
 

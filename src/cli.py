@@ -83,10 +83,6 @@ def _parse_args() -> tuple[str | None, bool]:
         "--help-cmd", action="store_true", default=False, dest="help_cmd",
         help="显示可用命令帮助",
     )
-    parser.add_argument(
-        "--serve", action="store_true", default=False,
-        help="启动飞书消息监听服务",
-    )
 
     args = parser.parse_args()
 
@@ -102,8 +98,6 @@ def _parse_args() -> tuple[str | None, bool]:
         return "/feishu " + " ".join(args.feishu), True
     if args.update:
         return "/update " + " ".join(args.update), True
-    if args.serve:
-        return "/serve", True
 
     query = args.query_c or args.query
     if query:
@@ -152,12 +146,11 @@ def _run_repl(config: dict) -> None:
             if result.is_exit:
                 break
 
-            # /serve 特殊处理：在 gateway 层阻塞启动监听
-            if result.reply == "__SERVE__":
-                try:
-                    session.start_feishu_listener()
-                except Exception as e:
-                    print(f"\n[serve] {e}\n")
+            if result.is_new:
+                # 通过 SessionManager 统一重置
+                session = mgr.reset_session("cli", "default")
+                session.agent.progress_callback = _cli_progress_callback
+                print("\n[新 session 已开始]\n")
                 continue
 
             if result.reply:
@@ -235,20 +228,7 @@ def main() -> None:
         session.agent.progress_callback = _cli_progress_callback
         result = session.handle_input(non_interactive_input)
 
-        if result.reply == "__SERVE__":
-            try:
-                session.start_feishu_listener()
-                # 阻塞主线程，保持 daemon WebSocket 线程存活
-                import threading
-                stop_event = threading.Event()
-                print("[serve] 飞书监听已启动，主线程阻塞中（Ctrl+C 退出）")
-                try:
-                    stop_event.wait()
-                except KeyboardInterrupt:
-                    print("\n[serve] 收到退出信号")
-            except Exception as e:
-                print(f"[serve] {e}")
-        elif result.reply:
+        if result.reply:
             print(result.reply)
         return
 

@@ -289,20 +289,18 @@ def _get_embedding_config() -> dict[str, str] | None:
         pass
     return None
 
-
-# ── 召回 API ─────────────────────────────────────────────────────────
-
 def get_session_messages(
     session_id: str,
     from_segment: int | None = None,
     before_ts: int | None = None,
+    limit: int | None = None,
 ) -> list[dict]:
     """
     从 JSONL 读取 session 的消息。
     与 session_store.get_session_messages 相同，暴露给工具层。
     """
     from .session_store import get_session_messages as _gsm
-    return _gsm(session_id, from_segment=from_segment, before_ts=before_ts)
+    return _gsm(session_id, from_segment=from_segment, before_ts=before_ts, limit=limit)
 
 
 # ── 内部工具 ─────────────────────────────────────────────────────────

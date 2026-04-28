@@ -564,16 +564,22 @@ def apply_compaction(
     stop_reason: str | None = None,
     session_id: str = "",
     session_store: Any = None,
+    *,
+    force: bool = False,
 ) -> CompactionResult | None:
     """检查并执行压缩。
 
     在 Agent.run() 返回后调用。
     如果超过阈值且 stopReason 允许，执行归档并返回结果。
 
+    Args:
+        force: 强制触发压缩，忽略 token 阈值和 stop_reason 检查。
+            由 force_compact() 使用，避免用伪造 token 数绕过检查。
+
     Returns:
         CompactionResult（触发了压缩）或 None（不需要压缩）。
     """
-    if not config.should_trigger(estimated_tokens, stop_reason):
+    if not force and not config.should_trigger(estimated_tokens, stop_reason):
         return None
 
     # 提取非 system 消息

@@ -353,6 +353,8 @@ def tool_feishu_send(params: dict[str, Any]) -> str:
     text = params.get("text", "").strip()
     receive_id_type = _detect_id_type(receive_id, params.get("receive_id_type"))
 
+    print(f"[tool] feishu_send 被调用: receive_id={receive_id}, text={text[:50]}", flush=True)
+
     if not receive_id:
         return "[错误] 缺少 receive_id 参数。"
     if not text:

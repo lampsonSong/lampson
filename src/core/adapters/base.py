@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import httpx
 from openai import APIConnectionError, APITimeoutError, RateLimitError
 from openai.types.chat import ChatCompletion
 
@@ -100,6 +101,10 @@ class BaseModelAdapter(ABC):
             raise RuntimeError(f"无法连接到 LLM API：{e}")
         except RateLimitError:
             raise RuntimeError("API 调用频率超限，请稍后再试。")
+        except httpx.HTTPError as e:
+            # 其他 httpx 异常（401/403/500/网络不可达等）也转成 RuntimeError
+            # 让 fallback 机制能继续尝试下一个模型
+            raise RuntimeError(f"LLM API 调用失败：{e}")
 
     def build_system_prompt_guidance(self) -> str:
         """可由子类追加到 system 的模型专属说明；默认无。"""

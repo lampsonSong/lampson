@@ -329,8 +329,9 @@ def build_timestamp() -> str:
 class PromptBuilder:
     """分层构建 system prompt。"""
 
-    def __init__(self, model: str = "") -> None:
+    def __init__(self, model: str = "", channel: str = "cli") -> None:
         self.model = model
+        self.channel = channel
 
     def build(
         self,
@@ -374,6 +375,10 @@ class PromptBuilder:
 
         # L7: Platform hints
         layers.append(PLATFORM_HINTS)
+
+        # L7.5: Channel Context（非 cli 渠道注入渠道标识）
+        if self.channel != "cli":
+            layers.append("# Channel Context\n\n当前消息来源: " + self.channel)
 
         # L8: Timestamp
         layers.append(build_timestamp())

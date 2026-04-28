@@ -1,7 +1,7 @@
 # Lampson 项目文档
 
-> 文档版本：2026-04-27（SessionManager 多渠道架构 + Idle 超时重置）
-> 项目版本：v0.2.0-dev
+> 文档版本：2026-04-28（daemon 架构 + USER.md 注入 + boot_tasks 机制）
+> 项目版本：v0.3.0-dev
 
 ---
 
@@ -37,16 +37,28 @@ feishu/listener.py (blocking start()) ↗
 
 问题：所有渠道共享同一个 LLM context；Feishu start() 阻塞，CLI 无法并发。
 
-#### 新架构（v0.2+）：SessionManager + 多 Session
+#### 新架构（v0.2+）：daemon + CLI 分离
 
 ```
+launchd ──→ com.lampson.gateway.plist
+              └── python -m src.daemon
+                  ├── 飞书 WebSocket 监听（后台线程）
+                  ├── SessionManager + Agent
+                  └── signal.pause() 主循环
+
+lampson 命令（独立进程）
+└── python -m src.cli（纯交互入口，不连 daemon，不启动 listener）
+```
+
+**核心原则**：daemon 承载常驻能力（飞书监听），CLI 是独立交互入口，两者不共享进程。Session 按 channel + sender_id 隔离。
+
 ┌──────────────────────────────────────────────────────────┐
 │                      Gateway 层                           │
 │                                                           │
-│   cli.py                     feishu/listener.py           │
-│   REPL 循环                   WebSocket 非阻塞（daemon）  │
-│   结果展示                    消息解析 + 去重              │
-│                               ↓ route_to_session()         │
+│   daemon.py (后台)        cli.py (前台)                   │
+│   启动飞书监听            纯 REPL 交互                     │
+│   WebSocket 非阻塞         不连 daemon，不启动 listener    │
+│   ↓ route_to_session()   结果展示                        │
 └───────────────────────────────┬──────────────────────────┘
                                 │
                                 ▼
@@ -123,8 +135,9 @@ feishu/listener.py (blocking start()) ↗
 
 | 模块 | 文件 | 职责 |
 |------|------|------|
+| Daemon 入口 | `src/daemon.py` | daemon 主进程。加载配置、启动飞书监听、boot_tasks 机制、主循环阻塞 |
+| CLI 入口 | `src/cli.py` | 纯交互入口（Gateway 层）。单条查询 / REPL 循环，不启动飞书监听，不连 daemon |
 | SessionManager | `src/core/session_manager.py` | 管理多个 Session 实例，按 channel+sender_id 路由；**支持 3 小时 idle 超时自动重置 + 跨 session 进度延续** |
-| CLI 入口 | `src/cli.py` | 参数解析 + REPL 循环 + 结果展示（纯 Gateway） |
 | Session | `src/core/session.py` | Agent 生命周期 + 命令路由 + 压缩触发 + 飞书初始化 |
 | Agent | `src/core/agent.py` | LLM 主循环，工具调用分发，规划执行，max_tool_rounds 循环 |
 | Planning | `src/planning/` | 任务规划器 + 步骤执行器 + Plan 状态机 |
@@ -192,7 +205,7 @@ feishu/listener.py (blocking start()) ↗
 - 读取最近消息（按时间倒序）
 - WebSocket 长连接监听（非阻塞 daemon thread，路由到 SessionManager）
 - 消息去重器（基于 message_id 的滑动窗口 TTL）
-- `/serve` 启动后 CLI 与飞书监听并发运行，独立 Session 互不干扰
+- daemon 模式常驻监听飞书，CLI 不启动 listener
 - **Session idle 超时重置**：3 小时无活动自动结束当前 session，生成 progress summary，新 session 创建时自动加载旧 summary 延续上下文
 
 #### 自更新
@@ -205,8 +218,8 @@ feishu/listener.py (blocking start()) ↗
 #### 命令行接口
 - `/help`、`/config`、`/exit`
 - `/memory`、`/skills`、`/feishu`、`/update`
-- 全套 `--memory`、`--skills`、`--feishu`、`--update`、`--serve` 等命令行参数
-- `--serve` 启动后飞书监听以 daemon 线程运行，CLI 继续交互
+- 全套 `--memory`、`--skills`、`--feishu`、`--update` 等命令行参数
+- daemon 由 launchd 管理，`lampson` 命令是纯 CLI 入口
 
 #### 上下文压缩（Context Compaction）
 - 自动检测：agent.run() 返回后检查 token 用量，超过阈值（默认 80%）触发
@@ -328,7 +341,7 @@ class SessionManager:
 请继续推进上述任务。如果任务已完成或有新需求，请告知用户。
 ```
 
-**命令路由**：`/help` `/config` `/memory` `/skills` `/feishu` `/update` `/serve` `/exit` 全部在 Session 内部处理。
+**命令路由**：`/help` `/config` `/memory` `/skills` `/feishu` `/update` `/exit` 全部在 Session 内部处理。
 
 ### 4.4 Agent 主循环 (`src/core/agent.py`)
 
@@ -374,17 +387,20 @@ class LLMClient:
 
 | 层 | 内容 | 说明 |
 |----|------|------|
-| L1 | Identity | `~/.lampson/SOUL.md`，不存在用默认 |
+| L1 | Identity | `~/.lampson/SOUL.md` 全文，Lampson 身份声明 |
 | L2 | Tool Guidance | Memory/Skills/Session-Search 使用指引 |
 | L3 | Memory Block | `core.md` 全文 |
 | L4 | Project Index | 项目索引 + `project_context` 工具 |
-| L5 | Skills Index | 技能索引（全文按需加载） |
-| L6 | Context Files | `.lampson.md` / `AGENTS.md` |
-| L7 | Model Guidance | 模型适配语（GLM 等） |
-| L8 | Platform Hints | CLI 环境提示 |
-| L9 | Timestamp | 会话开始时间 |
+| L5 | Context Files | `.lampson.md` / `AGENTS.md` |
+| L6 | Model Guidance | 模型适配语（GLM 等） |
+| L7 | Platform Hints + **USER.md** + DAEMON_HINTS | CLI 环境提示；**USER.md 全文（用户画像）**；daemon 身份声明 |
+| L8 | Timestamp | 会话开始时间 |
 
-### 4.6 工具注册与分发 (`src/core/tools.py`)
+**SOUL.md vs USER.md 边界**：SOUL.md 是 Lampson 的自我认知，USER.md 是服务对象的画像。两者分离，不混在一起。
+- SOUL.md：Lampson 是什么、怎么运行、会什么工具
+- USER.md：用户昵称、chat_id、沟通偏好、渠道偏好
+
+### 4.7 工具注册与分发 (`src/core/tools.py`)
 
 ```python
 _REGISTRY: dict[str, tuple[schema, runner]]
@@ -396,7 +412,7 @@ def dispatch(tool_name, arguments_raw):
 
 每个工具提供：schema（OpenAI function calling 格式）+ runner（实际执行函数）。
 
-### 4.7 记忆管理 (`src/memory/manager.py`)
+### 4.8 记忆管理 (`src/memory/manager.py`)
 
 两层架构：
 - **core.md**：键值对风格，启动全量加载
@@ -407,7 +423,7 @@ def dispatch(tool_name, arguments_raw):
 - `search_memory()`：关键词搜索 core + sessions
 - `forget_memory()`：删除含关键词的条目
 
-### 4.8 技能管理 (`src/skills/manager.py`)
+### 4.9 技能管理 (`src/skills/manager.py`)
 
 SKILL.md 格式：
 ```yaml
@@ -425,7 +441,7 @@ triggers:
 - **关键词匹配**：`match_skill()` 简单字符串包含
 - **LLM 语义匹配**：`match_skill_with_llm()`（需要 LLM 调用）
 
-### 4.9 飞书客户端 (`src/feishu/client.py`)
+### 4.10 飞书客户端 (`src/feishu/client.py`)
 
 - `FeishuClient`：封装所有 REST API 调用
 - **自动刷新 token**：每 2 小时刷新，留 200s 余量
@@ -433,7 +449,7 @@ triggers:
 - `get_messages()`：拉取历史消息（REST API，非 WebSocket 轮询）
 - 全局单例模式：`init_client()` → `get_client()`
 
-### 4.10 飞书监听 (`src/feishu/listener.py`)
+### 4.11 飞书监听 (`src/feishu/listener.py`)
 
 纯 Gateway 层，基于 `lark_oapi` WebSocket 长连接，非阻塞（daemon thread）：
 
@@ -447,7 +463,7 @@ start()
 - `_handle_message()`：解析消息 → `session_manager.get_or_create(...)` 取得 `Session` → `session.handle_input()` → 回复
 - 路由：消息根据 channel + sender_id 分发到对应 Session
 
-### 4.11 自更新 (`src/selfupdate/updater.py`)
+### 4.12 自更新 (`src/selfupdate/updater.py`)
 
 ```python
 run_update(description, llm):
@@ -470,7 +486,7 @@ LLM 返回格式：
 }
 ```
 
-### 4.12 上下文压缩 (`src/core/compaction.py`)
+### 4.13 上下文压缩 (`src/core/compaction.py`)
 
 设计文档：`docs/compaction-design.md`
 
@@ -517,7 +533,7 @@ total_tokens > context_window × 80% ?
      → 否 → 继续下一轮压缩
 ```
 
-### 4.13 任务规划 (`src/planning/`)
+### 4.14 任务规划 (`src/planning/`)
 
 设计文档：`docs/planning-design.md`
 
@@ -649,6 +665,22 @@ FeishuListener._handle_message(data)
   用户收到回复
 ```
 
+### 6.3 Daemon 启动流程（boot_tasks）
+
+```
+launchd 拉起 daemon
+  → load_config()
+  → SessionManager 初始化
+  → session.start_feishu_listener()  ← 后台线程，WebSocket 连接
+  → _write_boot_task({"task": "通知哥哥上线"})
+  → time.sleep(2)  ← 等 WebSocket 就绪
+  → _load_and_clear_boot_tasks()
+  → LLM 执行 boot_task → feishu_send → 发飞书消息
+  → daemon 进入 signal.pause() 主循环
+```
+
+**重启机制**：禁止执行 `launchctl unload`（KeepAlive 会失效）。LLM 重启自己前必须先写 `boot_tasks.json`，daemon 拉起后读取并执行待办。
+
 ---
 
 ## 七、部署方式
@@ -670,8 +702,14 @@ lampson
 lampson "帮我查看当前目录"
 echo "query" | lampson
 
-# 飞书监听服务
-lampson --serve
+# daemon（由 launchd 管理，不需要手动启动）
+# python -m src.daemon  # 调试用，直接运行
+```
+
+**daemon 管理：**
+```bash
+launchctl load ~/Library/LaunchAgents/com.lampson.gateway.plist   # 启动
+launchctl unload ~/Library/LaunchAgents/com.lampson.gateway.plist # 停止（不要轻易执行，会破坏 KeepAlive）
 ```
 
 ### 7.3 配置
@@ -689,7 +727,9 @@ vim ~/.lampson/config.yaml
 ```
 ~/.lampson/
 ├── config.yaml          # 主配置文件
-├── SOUL.md              # 身份定义（可选）
+├── SOUL.md              # Lampson 身份声明
+├── USER.md              # 用户画像（注入 system prompt）
+├── boot_tasks.json      # 重启前待办（daemon 读后清空）
 ├── memory/
 │   ├── core.md          # 核心记忆
 │   └── sessions/        # 会话摘要
@@ -699,7 +739,10 @@ vim ~/.lampson/config.yaml
 │   │   └── SKILL.md
 │   └── debug/
 │       └── SKILL.md
-└── projects/            # 项目上下文（按需创建）
+├── projects_index.md    # 项目索引
+└── logs/
+    ├── launchd.log     # daemon stdout
+    └── launchd.err.log  # daemon stderr
 ```
 
 ### 7.5 内置技能安装
@@ -853,6 +896,7 @@ vim ~/.lampson/config.yaml
 | `config/default.yaml` | 默认配置模板（含 compaction 配置） |
 | `config/default_skills/` | 内置技能 |
 | `.cursorrules` | Cursor 开发规范 |
+| `src/daemon.py` | daemon 主进程（启动飞书监听 + boot_tasks） |
 | `src/cli.py` | CLI 入口（纯 Gateway：参数解析 + REPL） |
 | `src/core/session.py` | Session 中间层（生命周期 + 命令路由 + 压缩） |
 | `src/core/agent.py` | Agent 主循环（LLM + 工具 + 规划执行） |

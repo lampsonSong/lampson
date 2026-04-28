@@ -55,10 +55,11 @@ HELP_TEXT = """\
   /skills consolidate            分析并合并重复/耦合的技能
   /feishu send <id> <msg>        发送飞书消息（需配置 app_id/secret）
   /feishu read <chat_id>         读取飞书消息
-  /serve                         启动飞书消息监听服务（长连接 WebSocket）
   /update <需求描述>              触发自更新
   /update rollback               回滚自更新
   /update list                   列出自更新分支
+  /compaction                    手动触发上下文压缩
+  /new                           开始新 session（清空当前对话上下文）
   /exit                          退出
 
 直接输入自然语言即可与 Lampson 对话。"""
@@ -135,6 +136,7 @@ class HandleResult:
     reply: str = ""              # 要展示/发送的回复文本
     is_exit: bool = False        # 用户要求退出
     is_command: bool = False     # 这是一条 / 命令（不需要再格式化）
+    is_new: bool = False        # 用户要求开始新 session
     compaction_msg: str = ""     # 压缩通知（空字符串表示没压缩）
 
 
@@ -173,27 +175,39 @@ class Session:
         self._current_segment: int = 0
         # SessionManager 引用（用于 start_feishu_listener 传给 FeishuListener）
         self._session_manager: Any = None
+        self._feishu_listener: Any = None  # FeishuListener（若已启动长连接监听）
         # 上一次活动时间（秒时间戳），用于 idle 超时检测
         self.last_activity_at: float = 0.0
+        # 渠道标识（cli/feishu 等）
+        self.channel: str = "cli"
+        # 每条消息的上下文元数据（由 gateway 层注入）
+        self._current_message_id: str = ""
+        self._current_chat_id: str = ""
+
+    # ── 消息上下文 ──
+
+    def set_message_context(self, message_id: str = "", chat_id: str = "") -> None:
+        """由 gateway 层（listener）在 handle_input 前调用，注入当条消息的元数据。"""
+        self._current_message_id = message_id
+        self._current_chat_id = chat_id
 
     # ── 工厂方法 ──
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> Session:
+    def from_config(cls, config: dict[str, Any], channel: str = "cli") -> Session:
         """从配置字典创建完整初始化的 Session。
 
         包含：安装默认技能 → 加载记忆/技能 → 创建 LLM → 创建 Agent → 初始化飞书。
         """
         _install_default_skills()
 
-        core_memory = memory_mgr.load_core()
         skills = skills_mgr.load_all_skills()
 
         # 构建多模型客户端字典
         llm_clients: dict[str, Any] = {}
 
         # 先加入 config.llm（当前激活模型）
-        primary_llm, primary_adapter = _create_llm(config)
+        primary_llm, primary_adapter = _create_llm(config, channel=channel)
         primary_name = config["llm"]["model"]
         primary_cw = config["llm"].get("context_window")
         llm_clients[primary_name] = {
@@ -212,6 +226,7 @@ class Session:
                     model_cfg,
                     fallback_api_key=primary_api_key,
                     fallback_base_url=primary_base_url,
+                    channel=channel,
                 )
                 llm_clients[name] = {
                     "llm": llm_i,
@@ -234,7 +249,7 @@ class Session:
             max_tool_rounds=max_tool_rounds,
             fallback_models=fallback_models,
         )
-        agent.set_context(core_memory=core_memory)
+        agent.set_context()
         agent.skills = skills
 
         retrieval = get_retrieval_config(config)
@@ -275,6 +290,7 @@ class Session:
         # 注入 Session 引用给 session_load 工具
         from src.tools import session_load as session_load_tool
         session_load_tool.set_current_session(session)
+        session.channel = channel
         session.init_feishu()
         return session
 
@@ -300,9 +316,16 @@ class Session:
                 segment=self._current_segment,
             )
 
+        # 飞书渠道：注入消息元数据（message_id, chat_id）
+        if self.channel == "feishu" and self._current_message_id:
+            meta = "[feishu_context message_id=" + self._current_message_id + " chat_id=" + (self._current_chat_id or "") + "]"
+            user_input_for_llm = meta + "\n" + user_input
+        else:
+            user_input_for_llm = user_input
+
         # 自然语言
         try:
-            reply = self.agent.run(user_input)
+            reply = self.agent.run(user_input_for_llm)
         except Exception as e:
             return HandleResult(reply=f"[错误] {e}")
 
@@ -473,7 +496,8 @@ class Session:
             app_secret=app_secret,
             session_manager=mgr,
         )
-        listener.start()  # daemon thread，立即返回
+        self._feishu_listener = listener
+        listener.start()  # WebSocket 在后台线程运行，详见 FeishuListener.shutdown
 
     # ── 命令路由 ──
 
@@ -487,6 +511,12 @@ class Session:
 
         if command == "/exit":
             return HandleResult(is_exit=True, is_command=True)
+
+        if command == "/new":
+            return HandleResult(is_new=True, is_command=True)
+
+        if command == "/compaction":
+            return self._handle_compaction()
 
         if command == "/help":
             return HandleResult(reply=HELP_TEXT, is_command=True)
@@ -506,10 +536,6 @@ class Session:
         if command == "/update":
             return HandleResult(reply=self._handle_update(parts), is_command=True)
 
-        if command == "/serve":
-            # /serve 是特殊命令，由 gateway 层处理（因为会阻塞）
-            return HandleResult(reply="__SERVE__", is_command=True)
-
         if command == "/model":
             return HandleResult(reply=self._handle_model(parts), is_command=True)
 
@@ -523,6 +549,30 @@ class Session:
             reply=f"未知命令：{command}，输入 /help 查看帮助。",
             is_command=True,
         )
+
+    def _handle_compaction(self) -> HandleResult:
+        """手动触发上下文压缩。"""
+        try:
+            cr = self.agent.force_compact(
+                session_store=session_store,
+                session_id=self.session_id or "",
+            )
+            if cr is None:
+                return HandleResult(reply="压缩不可用（未配置 compaction 或有计划正在执行）", is_command=True)
+            if cr.success:
+                self._current_segment += 1
+                return HandleResult(
+                    reply=f"[上下文压缩] 已完成，归档 {cr.archived_count} 条内容。",
+                    is_command=True,
+                    compaction_msg="",
+                )
+            else:
+                return HandleResult(
+                    reply="[上下文压缩] 失败: " + (cr.error or "未知错误"),
+                    is_command=True,
+                )
+        except Exception as e:
+            return HandleResult(reply=f"[上下文压缩] 异常: {e}", is_command=True)
 
     def _format_config(self) -> str:
         """脱敏后格式化配置。"""
@@ -919,13 +969,14 @@ def _install_default_skills() -> None:
         pass
 
 
-def _create_llm(config: dict[str, Any]) -> tuple[LLMClient, BaseModelAdapter]:
+def _create_llm(config: dict[str, Any], channel: str = "cli") -> tuple[LLMClient, BaseModelAdapter]:
     """从配置创建 LLMClient 与对应 Adapter（使用 config.llm 部分）。"""
     llm_cfg = config["llm"]
     llm = LLMClient(
         api_key=llm_cfg["api_key"],
         base_url=llm_cfg["base_url"],
         model=llm_cfg["model"],
+        channel=channel,
     )
     return llm, create_adapter(llm)
 
@@ -934,6 +985,7 @@ def _create_llm_from_model_config(
     model_cfg: dict[str, Any],
     fallback_api_key: str = "",
     fallback_base_url: str = "",
+    channel: str = "cli",
 ) -> tuple[LLMClient, BaseModelAdapter]:
     """从单个模型的配置字典创建 LLMClient 与 Adapter。"""
     api_key = model_cfg.get("api_key", "") or fallback_api_key
@@ -946,6 +998,7 @@ def _create_llm_from_model_config(
         api_key=api_key,
         base_url=base_url,
         model=model_cfg["name"],
+        channel=channel,
     )
     return llm, create_adapter(llm)
 

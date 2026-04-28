@@ -1,7 +1,7 @@
 """任务完成后的反思与知识沉淀模块。
 
 每次任务完成后，自动判断是否有值得持久化的知识：
-- 项目事实 → projects/<名>.md
+- 项目事实 → projects/<名>.md（新建或更新）
 - 新方法论 → skills/<名>/SKILL.md（新建）
 - 方法论改进 → skills/<名>/SKILL.md（更新）
 - 无价值 → 跳过
@@ -61,29 +61,31 @@ REFLECT_PROMPT = """你是一个知识管理助手。请分析这次任务执行
 {existing_projects}
 
 请只输出一个 JSON 对象，不要其他文字。字段说明：
-- "should_learn": 布尔。是否有值得记录的内容
-- "learnings": 数组。每项含：
-  - "type": "project" | "skill_create" | "skill_update"
+- "learnings": 数组（以此为准）。每项含：
+  - "type": "project_create" | "project_update" | "skill_create" | "skill_update"
   - "target": 项目名或技能名
   - "reason": 一句话说明为什么值得记录
   - "content": 要写入的正文内容（markdown 格式）
   - "triggers": 字符串数组（skill_create 和 skill_update 都需要；skill_update 时只需提供**新增**的触发词，可以为空）
 
 判断标准：
-- project: 记录具体项目的事实信息（路径、技术栈、配置），如 "hermes 项目源码在 ~/.hermes/hermes-agent/"
+- project_create: 首次发现某个项目，记录基本信息（路径、技术栈、入口、配置）。仅当已有 Projects 列表中无该项目时使用
+- project_update: 在已有项目中发现了新信息（新模块、新配置）或需要修正过时内容。仅当已有 Projects 列表中已有该项目时使用
 - skill_create: 发现了一种可复用的操作方法，当前 skills 里没有覆盖的
 - skill_update: 执行过程中发现某个已有 skill 的步骤不够、有错误，或者用户用了一种新表达方式触发了该 skill
-- should_learn=false: 简单查询、闲聊、或信息已经记录过
+- 空数组: 简单查询、闲聊、或信息已经记录过
 
 注意：
 - 不要重复记录已有信息
 - skill 的 content 应该是方法论（通用步骤），不是具体答案（具体路径）
+- project_update 的 content 是增量信息（新增内容），不是整个文件重写
 - triggers 应该覆盖用户未来可能的表达方式（中英文都要考虑）
 - 新建 skill 的 triggers 至少 3 个
 
 示例：
-{{"should_learn": false, "learnings": []}}
-{{"should_learn": true, "learnings": [{{"type": "project", "target": "hermes", "reason": "首次探索了 hermes 项目", "content": "源码路径: ~/.hermes/hermes-agent/\\n入口: hermes_cli.main:main", "triggers": []}}]}}"""
+{{"learnings": []}}
+{{"learnings": [{{"type": "project_create", "target": "hermes", "reason": "首次探索了 hermes 项目", "content": "源码路径: ~/.hermes/hermes-agent/\\n入口: hermes_cli.main:main", "triggers": []}}]}}
+{{"learnings": [{{"type": "project_update", "target": "hermes", "reason": "发现了新模块", "content": "新增了 tools/cronjob_tools.py 定时任务模块", "triggers": []}}]}}"""
 
 
 # ── 公开接口 ─────────────────────────────────────────────────────────────────
@@ -167,10 +169,6 @@ def reflect_and_learn(
             logger.debug("反思结果无法解析 JSON，跳过")
             return []
 
-        if not data.get("should_learn"):
-            _last_reflect_time = time.time()
-            return []
-
         learnings = data.get("learnings", [])
         _last_reflect_time = time.time()
         return learnings
@@ -182,8 +180,6 @@ def reflect_and_learn(
 
 def execute_learnings(learnings: list[dict[str, Any]]) -> list[str]:
     """执行沉淀操作，返回人类可读的提示列表。"""
-    from src.core import tools as tool_registry
-
     hints: list[str] = []
 
     for learning in learnings:
@@ -193,8 +189,13 @@ def execute_learnings(learnings: list[dict[str, Any]]) -> list[str]:
         reason = learning.get("reason", "")
         triggers = learning.get("triggers", [])
 
-        if ltype == "project":
-            hint = _save_to_project(target, content, reason)
+        if ltype == "project_create":
+            hint = _create_project(target, content, reason)
+            if hint:
+                hints.append(hint)
+
+        elif ltype == "project_update":
+            hint = _update_project(target, content, reason)
             if hint:
                 hints.append(hint)
 
@@ -208,13 +209,16 @@ def execute_learnings(learnings: list[dict[str, Any]]) -> list[str]:
             if hint:
                 hints.append(hint)
 
+        else:
+            logger.warning(f"未知的学习类型: {ltype}，跳过")
+
     return hints
 
 
 # ── 沉淀执行 ─────────────────────────────────────────────────────────────────
 
-def _save_to_project(target: str, content: str, reason: str) -> str | None:
-    """将项目信息追加到 projects/<项目名>.md。"""
+def _create_project(target: str, content: str, reason: str) -> str | None:
+    """创建新的项目文件。如果已存在则降级为 update。"""
     if not target or not content:
         return None
 
@@ -222,18 +226,40 @@ def _save_to_project(target: str, content: str, reason: str) -> str | None:
     project_file = PROJECTS_DIR / f"{target}.md"
 
     if project_file.exists():
-        existing = project_file.read_text(encoding="utf-8")
-        # 去重：如果核心内容已存在则跳过
-        if _content_already_exists(existing, content):
-            logger.debug(f"项目 {target} 已有相同信息，跳过")
-            return None
-        updated = existing + f"\n\n## {datetime.now():%Y-%m-%d}\n{content}"
-    else:
-        updated = f"# {target}\n\n{content}"
+        # 已存在，降级为 update
+        logger.debug(f"项目 {target} 已存在，降级为 update")
+        return _update_project(target, content, reason)
 
+    updated = f"# {target}\n\n{content}"
     project_file.write_text(updated, encoding="utf-8")
-    logger.info(f"已记录项目信息: {target} ({reason})")
+    logger.info(f"已创建项目信息: {target} ({reason})")
     return f"已记录项目信息: {target}"
+
+
+def _update_project(target: str, content: str, reason: str) -> str | None:
+    """更新已有项目文件：追加日期分节的增量内容。如果不存在则降级为 create。"""
+    if not target or not content:
+        return None
+
+    PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+    project_file = PROJECTS_DIR / f"{target}.md"
+
+    if not project_file.exists():
+        # 不存在，降级为 create
+        logger.debug(f"项目 {target} 不存在，降级为 create")
+        return _create_project(target, content, reason)
+
+    existing = project_file.read_text(encoding="utf-8")
+
+    # 去重：如果核心内容已存在则跳过
+    if _content_already_exists(existing, content):
+        logger.debug(f"项目 {target} 已有相同信息，跳过")
+        return None
+
+    updated = existing + f"\n\n## {datetime.now():%Y-%m-%d}\n{content}"
+    project_file.write_text(updated, encoding="utf-8")
+    logger.info(f"已更新项目信息: {target} ({reason})")
+    return f"已更新项目信息: {target}（{reason}）"
 
 
 def _create_skill(
@@ -360,12 +386,12 @@ def _merge_triggers(skill_content: str, new_triggers: list[str]) -> str:
 def _get_existing_skills_summary() -> str:
     """获取已有 skills 的摘要列表。"""
     from src.skills.manager import load_all_skills
-    
+
     try:
         skills = load_all_skills()
     except Exception:
         return "（无）"
-    
+
     if not skills:
         return "（无）"
     lines = []

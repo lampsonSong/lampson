@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from typing import TYPE_CHECKING, Any, Callable
 
 from src.core.adapters import BaseModelAdapter
@@ -37,8 +38,6 @@ class Agent:
         self.adapter = adapter
         self._tools = tool_registry.get_all_schemas()
         self.skills: dict[str, "Skill"] = {}
-        self._core_memory: str = ""
-        self._skills_context: str = ""
         self.skill_index: Any = None
         self.project_index: Any = None
         self.retrieval_config: dict[str, Any] = {}
@@ -50,9 +49,13 @@ class Agent:
         self.max_tool_rounds: int = max_tool_rounds or _DEFAULT_MAX_TOOL_ROUNDS
         self.current_plan: Plan | None = None
         self.fallback_models: list[tuple[LLMClient, BaseModelAdapter]] = fallback_models or []
+        # 压缩操作锁：防止飞书等多线程场景下并发执行压缩
+        self._compaction_lock = threading.Lock()
 
         # 中间过程回调：由 listener 注入，用于实时发送工具调用状态
         self.progress_callback: Callable[[str], None] | None = None
+        # 中间文本回调：由 listener 注入，用于向用户发送阶段性总结等中间内容
+        self.interim_sender: Callable[[str], None] | None = None
         # 工具调用计数器（跨多次 tool_loop 累计，用于判断是否应继续循环）
         self._total_tool_calls: int = 0
 
@@ -60,10 +63,9 @@ class Agent:
         """重新加载工具列表（外部注册新工具后调用）。"""
         self._tools = tool_registry.get_all_schemas()
 
-    def set_context(self, core_memory: str = "") -> None:
+    def set_context(self) -> None:
         """设置 system prompt 上下文（启动时调用一次）。"""
-        self._core_memory = core_memory
-        self.llm.set_system_context(core_memory=core_memory)
+        self.llm.set_system_context()
 
     def switch_llm(
         self,
@@ -79,7 +81,7 @@ class Agent:
             compaction_config: 新模型的压缩配置（不同模型 context_window 不同）。
         """
         old_llm = self.llm
-        new_llm.set_system_context(core_memory=self._core_memory)
+        new_llm.set_system_context()
         new_llm.migrate_from(old_llm)
         self.llm = new_llm
         self.adapter = new_adapter
@@ -161,7 +163,10 @@ class Agent:
                 "你已达到本轮工具调用上限（"
                 + str(self.max_tool_rounds)
                 + " 轮）。请简洁总结当前进展："
-                "1) 已经完成了什么；2) 还在尝试什么；3) 下一步计划。"
+                "1) 已经完成了什么；2) 还在尝试什么；3) 下一步计划。\n\n"
+                "总结的最后一行必须是以下两行之一（只写这一行，不要加其他内容）：\n"
+                "[继续] — 如果任务还没完成，需要继续调用工具\n"
+                "[完成] — 如果任务已经全部完成，不再需要调用工具\n\n"
                 "直接回复内容，不要调用任何工具。"
             )
             self.llm.messages.append({"role": "user", "content": summary_prompt})
@@ -170,12 +175,26 @@ class Agent:
                 self.llm.messages.append(
                     response.choices[0].message.model_dump(exclude_none=True)
                 )
-                # 检查 LLM 是否认为任务已完成（回复中包含"完成了"、"结束"等意图）
-                content = (response.choices[0].message.content or "").strip().lower()
-                done_indicators = ["已完成", "任务完成", "搞定了", "完成了所有", "all done", "done!", "completed"]
-                if any(ind in content for ind in done_indicators):
-                    logger.info("tool_loop: LLM indicated task done after summary")
-                    return response.choices[0].message.content or ""
+                content = (response.choices[0].message.content or "").strip()
+                # 检查最后一行是否标记为完成
+                last_line = content.strip().split("\n")[-1].strip()
+                # 把总结发给用户（去掉标记行）
+                display_lines = content.strip().split("\n")
+                if display_lines[-1].strip() in ("[继续]", "[完成]"):
+                    display_content = "\n".join(display_lines[:-1]).strip()
+                else:
+                    display_content = content
+                if display_content and self.interim_sender:
+                    try:
+                        self.interim_sender(display_content)
+                    except Exception:
+                        pass
+                if last_line == "[完成]":
+                    logger.info("tool_loop: LLM indicated [完成] after summary")
+                    # 去掉标记行，返回总结内容
+                    summary_content = "\n".join(content.strip().split("\n")[:-1]).strip()
+                    return summary_content or content
+                logger.info("tool_loop: LLM indicated [继续], resuming tool loop")
             except Exception as e:
                 logger.warning(f"summary call failed after max iterations: {e}")
 
@@ -271,6 +290,46 @@ class Agent:
         except Exception as e:
             logger.warning(f"压缩异常: {e}")
             return None
+
+    def force_compact(
+        self,
+        session_store: Any = None,
+        session_id: str = "",
+    ) -> CompactionResult | None:
+        """手动触发上下文压缩（/compaction 命令调用，无视 token 阈值）。
+
+        使用 threading.Lock 保证多线程安全（飞书 WebSocket 回调可能并发触发）。
+        如果另一条压缩正在执行，返回 None。
+        """
+        if not self._compaction_lock.acquire(blocking=False):
+            logger.info("force_compact: 另一次压缩正在执行，跳过")
+            return None
+
+        try:
+            if self._compaction_config is None:
+                return None
+
+            if (
+                self.current_plan is not None
+                and self.current_plan.status == PlanStatus.executing
+            ):
+                return None
+
+            try:
+                return apply_compaction(
+                    agent_llm=self.llm,
+                    config=self._compaction_config,
+                    estimated_tokens=0,
+                    stop_reason="end_turn",
+                    session_id=session_id,
+                    session_store=session_store,
+                    force=True,
+                )
+            except Exception as e:
+                logger.warning(f"手动压缩异常: {e}")
+                return None
+        finally:
+            self._compaction_lock.release()
 
     def _maybe_reflect(
         self,

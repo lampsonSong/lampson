@@ -109,6 +109,107 @@ def _ensure_dirs() -> None:
     LAMPSON_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def close_orphan_sessions() -> int:
+    """关闭所有未正常结束的孤儿 session（ended_at IS NULL）。
+
+    在进程启动时调用，清理上次异常退出留下的 session。
+    Returns: 关闭的 session 数量。
+    """
+    now_ms = _now_ms()
+    conn = _get_db()
+    try:
+        cursor = conn.execute(
+            "UPDATE sessions SET ended_at = ? WHERE ended_at IS NULL",
+            (now_ms,),
+        )
+        count = cursor.rowcount
+        conn.commit()
+        if count > 0:
+            import logging
+            logging.getLogger(__name__).info(f"已关闭 {count} 个孤儿 session")
+        return count
+    finally:
+        conn.close()
+
+
+def purge_empty_sessions() -> int:
+    """删除所有 0 消息的空 session（SQLite + JSONL 全清理）。
+
+    判断标准：messages_index 中该 session 无 role='user' 或 role='assistant' 的行。
+    同时删除 sessions 表记录、messages_index 中的特殊行、JSONL 文件。
+    Returns: 删除的 session 数量。
+    """
+    conn = _get_db()
+    try:
+        # 找出没有实际消息的 session
+        empty_ids = [
+            row["session_id"]
+            for row in conn.execute(
+                """
+                SELECT s.session_id
+                FROM sessions s
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM messages_index m
+                    WHERE m.session_id = s.session_id AND m.role IN ('user', 'assistant')
+                )
+                """
+            ).fetchall()
+        ]
+        if not empty_ids:
+            return 0
+
+        # 删 JSONL 文件 + 清路径缓存
+        for sid in empty_ids:
+            jsonl = _find_jsonl(sid)
+            if jsonl and jsonl.exists():
+                jsonl.unlink()
+            _sid_path_cache.pop(sid, None)
+            _sid_source_cache.pop(sid, None)
+
+        placeholders = ",".join("?" for _ in empty_ids)
+
+        # FTS5 delete trigger 在批量删时会报 SQL logic error，
+        # 需要 drop trigger → 删数据 → 重建 trigger
+        conn.execute("DROP TRIGGER IF EXISTS messages_fts_delete")
+
+        # 删 FTS5 行
+        conn.execute(
+            f"DELETE FROM messages_fts WHERE rowid IN ("
+            f"SELECT id FROM messages_index WHERE session_id IN ({placeholders}))",
+            empty_ids,
+        )
+        # 删 messages_index（含特殊行）
+        conn.execute(
+            f"DELETE FROM messages_index WHERE session_id IN ({placeholders})",
+            empty_ids,
+        )
+        # 重建 trigger
+        conn.execute(
+            "CREATE TRIGGER messages_fts_delete "
+            "AFTER DELETE ON messages_index BEGIN "
+            "INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, old.content); "
+            "END"
+        )
+
+        # 删 segments
+        conn.execute(
+            f"DELETE FROM segments WHERE session_id IN ({placeholders})",
+            empty_ids,
+        )
+        # 删 sessions
+        conn.execute(
+            f"DELETE FROM sessions WHERE session_id IN ({placeholders})",
+            empty_ids,
+        )
+        conn.commit()
+
+        import logging
+        logging.getLogger(__name__).info(f"已清理 {len(empty_ids)} 个空 session")
+        return len(empty_ids)
+    finally:
+        conn.close()
+
+
 def _get_db() -> sqlite3.Connection:
     """获取 SQLite 连接（自动建表）。"""
     _ensure_dirs()
@@ -241,7 +342,7 @@ def list_recent_sessions(
     limit: int = 5,
     source: str | None = None,
 ) -> list[dict]:
-    """列出最近已结束的 session。
+    """列出最近的 session（包含未正常关闭的）。
 
     Args:
         limit: 最多返回几个 session。
@@ -258,8 +359,8 @@ def list_recent_sessions(
                 SELECT s.session_id, s.started_at, s.ended_at,
                        (SELECT COUNT(*) FROM messages_index m WHERE m.session_id = s.session_id AND m.role IS NOT NULL) AS msg_count
                 FROM sessions s
-                WHERE s.source = ? AND s.ended_at IS NOT NULL
-                ORDER BY s.ended_at DESC
+                WHERE s.source = ?
+                ORDER BY s.started_at DESC
                 LIMIT ?
                 """,
                 (source, limit),
@@ -270,8 +371,7 @@ def list_recent_sessions(
                 SELECT s.session_id, s.started_at, s.ended_at,
                        (SELECT COUNT(*) FROM messages_index m WHERE m.session_id = s.session_id AND m.role IS NOT NULL) AS msg_count
                 FROM sessions s
-                WHERE s.ended_at IS NOT NULL
-                ORDER BY s.ended_at DESC
+                ORDER BY s.started_at DESC
                 LIMIT ?
                 """,
                 (limit,),
@@ -396,16 +496,17 @@ def write_segment_boundary(
         conn.close()
 
 
-# ── JSONL 读取 ─────────────────────────────────────────────────────────
 
 def get_session_messages(
     session_id: str,
     from_segment: int | None = None,
     before_ts: int | None = None,
+    limit: int | None = None,
 ) -> list[dict]:
     """
     从 JSONL 读取 session 的消息。
     可指定 from_segment（返回指定 segment 及之后的消息）和 before_ts。
+    limit: 最多返回 N 条消息（返回最后的 N 条）。
     """
     path = _find_jsonl(session_id)
     if not path:
@@ -425,6 +526,10 @@ def get_session_messages(
             if before_ts is not None and msg.get("ts", 0) >= before_ts:
                 continue
             messages.append(msg)
+
+    if limit is not None:
+        messages = messages[-limit:]
+
     return messages
 
 

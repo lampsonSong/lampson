@@ -19,15 +19,31 @@ DANGEROUS_PATTERNS = [
     r"chown\s+-R.*\s+/",
 ]
 
+# 禁止 launchctl 操作 Lampson 自己的 plist（unload 会把自己从 launchd 移除，KeepAlive 失效）
+_LAMPSON_PLIST_PATTERNS = [
+    r"launchctl\s+(unload|load)\s+.*com\.lampson",
+    r"launchctl\s+(unload|load)\s+.*lampson\.gateway",
+    r"launchctl\s+(unload|load)\s+.*LaunchAgents.*lampson",
+]
+
 _DANGER_RE = [re.compile(p) for p in DANGEROUS_PATTERNS]
 
 # 命令行长度上限（与文件读取 100KB 量级一致，且远低于系统 ARG_MAX）
 MAX_COMMAND_LENGTH = 100_000
 
+_LAMPSON_PLIST_RE = [re.compile(p) for p in _LAMPSON_PLIST_PATTERNS]
+
 # cat/rm 等后接通配（避免 cat *.py、cat src/* 等滥用）
 _GLOB_ABUSE_RE = re.compile(
     r"\b(cat|rm|mv|cp|less|head|tail)\b[^\n#;]*?[\*]"
 )
+
+
+def _hits_lampson_plist(command: str) -> bool:
+    for pattern in _LAMPSON_PLIST_RE:
+        if pattern.search(command):
+            return True
+    return False
 
 def is_dangerous(command: str) -> bool:
     for pattern in _DANGER_RE:
@@ -82,7 +98,12 @@ SCHEMA: dict[str, Any] = {
     "type": "function",
     "function": {
         "name": "shell",
-        "description": "在终端执行 shell 命令，返回输出结果。适用于查看文件列表、运行脚本、安装包等操作。",
+        "description": (
+            "在终端执行 shell 命令，返回输出结果。"
+            "适用于运行脚本、安装包、启动进程等。"
+            "禁止用此工具执行 find/grep/rg 搜索文件或内容，请改用 search_files 或 search_content。"
+            "禁止用 cat/head/tail 读取文件，请改用 file_read。"
+        ),
         "parameters": {
             "type": "object",
             "properties": {

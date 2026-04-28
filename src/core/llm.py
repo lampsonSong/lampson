@@ -22,21 +22,23 @@ class LLMClient:
         api_key: str,
         base_url: str,
         model: str,
+        channel: str = "cli",
     ) -> None:
         self.model = model
         self.api_key = api_key
         self.base_url = base_url
+        self.channel = channel
         self.client = OpenAI(
             api_key=api_key if api_key else "not-needed",
             base_url=base_url,
             timeout=60.0,
         )
         self.messages: list[dict[str, Any]] = []
-        self._prompt_builder = PromptBuilder(model=model)
+        self._prompt_builder = PromptBuilder(model=model, channel=channel)
 
-    def set_system_context(self, core_memory: str = "") -> None:
+    def set_system_context(self) -> None:
         """设置 system prompt（通过 PromptBuilder 分层构建）。"""
-        content = self._prompt_builder.build(core_memory=core_memory)
+        content = self._prompt_builder.build()
         self.messages = [{"role": "system", "content": content}]
 
     def add_user_message(self, content: str) -> None:
@@ -86,7 +88,7 @@ class LLMClient:
     def set_model(self, model: str) -> None:
         """切换当前模型（不影响 messages 历史）。"""
         self.model = model
-        self._prompt_builder = PromptBuilder(model=model)
+        self._prompt_builder = PromptBuilder(model=model, channel=self.channel)
 
     def clone_for_inference(self) -> "LLMClient":
         """新建实例，仅带 system prompt（用于 /model all 等）。"""
@@ -94,6 +96,7 @@ class LLMClient:
             api_key=self.api_key,
             base_url=self.base_url,
             model=self.model,
+            channel=self.channel,
         )
         if self.messages:
             new_client.messages = [self.messages[0]]

@@ -100,6 +100,47 @@ def _project_preview_text(name: str, content: str) -> str:
     return f"{name} {snippet}".strip()
 
 
+def _extract_description(content: str) -> str:
+    """从项目 md 中提取一句话描述。
+    1. 找第一个 **key**: value 行（如 "名称: xxx"）
+    2. 取第一个 # 标题文本
+    3. fallback 取第一个非空非表格非分隔线行
+    """
+    body = _parse_project_body(content)
+    # 第一轮：找 **key**: value 行
+    for line in body.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        m = re.match(r"^-\s+\*\*(.+?)\*\*:\s*(.+?)$", line)
+        if m:
+            val = m.group(2).strip()
+            if len(val) > 120:
+                val = val[:120] + '...'
+            return val
+    # 第二轮：取第一个 # 标题文本（去掉 # 前缀）
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith('#'):
+            title = stripped.lstrip('#').strip()
+            if title:
+                return title
+    # 第三轮：任意非空非表格非分隔线行
+    for line in body.splitlines():
+        line = line.strip()
+        if not line or line.startswith('|') or line == '---':
+            continue
+        # 去掉列表前缀
+        line = re.sub(r"^[-*]\s+", "", line)
+        # 去掉粗体标记
+        line = re.sub(r"\*\*(.+?)\*\*", r"", line)
+        if len(line) > 120:
+            line = line[:120] + '...'
+        return line
+    return ""
+
+
+
 def _cosine_sim(a: list[float], b: list[float]) -> float:
     if not a or not b or len(a) != len(b):
         return 0.0
@@ -457,6 +498,9 @@ class ProjectIndex:
                     raw0 = _read_text_file(pf)
                     st0 = _project_preview_text(pf.stem, raw0)
                     prev = {**prev, "search_text": st0}
+                if not prev.get("description"):
+                    raw_desc = _read_text_file(pf)
+                    prev = {**prev, "description": _extract_description(raw_desc)}
                 new_rows.append(prev)
                 continue
             raw = _read_text_file(pf)
@@ -472,6 +516,7 @@ class ProjectIndex:
                     "mtime": mtime,
                     "embedding": emb,
                     "search_text": stext,
+                    "description": _extract_description(raw),
                 }
             )
 
