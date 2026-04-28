@@ -326,6 +326,22 @@ class FeishuListener:
                     if not isinstance(event, dict):
                         continue
 
+                    if event.get("type") == "progress_reset":
+                        # 阶段总结已发出，结束旧进度卡片，清空状态以便新开卡片
+                        if progress_lines:
+                            if progress_msg_id is None:
+                                self._send_progress_card(
+                                    chat_id, progress_lines, finished=True
+                                )
+                            else:
+                                self._update_progress_card(
+                                    progress_msg_id, progress_lines, finished=True
+                                )
+                        progress_lines = []
+                        progress_msg_id = None
+                        last_update_ts = 0.0
+                        continue
+
                     if event.get("type") == "model_switch":
                         progress_lines.append(
                             f"**[模型切换]** {event.get('message', '')}"

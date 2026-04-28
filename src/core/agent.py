@@ -311,6 +311,12 @@ class Agent:
                     summary_content = "\n".join(content.strip().split("\n")[:-1]).strip()
                     return summary_content or content
                 logger.info("tool_loop: LLM indicated [继续], resuming tool loop")
+                # 通知进度系统重置：结束旧卡片，后续工具调用会新开卡片
+                if self.progress_callback:
+                    try:
+                        self.progress_callback({"type": "progress_reset"})
+                    except Exception:
+                        pass
             except AgentInterrupted:
                 raise
             except Exception as e:
