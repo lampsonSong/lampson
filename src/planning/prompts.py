@@ -17,11 +17,11 @@ PERSISTENT_ENV_BLOCK = """## 环境信息
 - shell 命令默认超时 30 秒，复杂命令可设置 timeout 参数（最长 120 秒）
 
 ## 文件搜索规范
-- **禁止使用 find 命令**，改用 `search_files` 工具（按文件名搜索）
-- **禁止使用 grep/rg 命令**，改用 `search_content` 工具（按内容搜索）
+- **禁止使用 find 命令**，改用 `search(mode="files")` 工具（按文件名搜索）
+- **禁止使用 grep/rg 命令**，改用 `search(mode="content")` 工具（按内容搜索）
 - 查看目录内容用 `shell` 工具执行 `ls` 命令，例如 `shell(command="ls /path/to/dir")`
 - 读取文件内容用 `file_read` 工具，不要用 cat 命令
-- **注意**：工具名必须是 `shell`、`file_read`、`file_write`、`search_files`、`search_content`、`skill_view`、`search_skills`、`search_projects`、`project_context` 之一
+- **注意**：工具名必须是 `shell`、`file_read`、`file_write`、`search`、`skill`、`search_projects`、`project_context`、`session` 之一
 """
 
 MEMORY_STRUCTURE_BLOCK = """## lampson 记忆结构
@@ -41,8 +41,8 @@ lampson 的所有持久化数据存储在 ~/.lampson/ 目录下：
 ```
 
 相关工具：
-- **skill_view(name)**: 按名称加载指定技能的完整内容（名称已知时使用）
-- **search_skills(query)**: 在技能名称与描述中做关键词子串匹配（辅助查找）
+- **skill(action="view", name)**: 按名称加载指定技能的完整内容（名称已知时使用）
+- **skill(action="search", query)**: 在技能名称与描述中做关键词子串匹配（辅助查找）
 - **search_projects(query)**: 根据自然语言描述搜索匹配的项目上下文
 - **project_context(name)**: 按名称加载指定项目的完整记录（名称已知时使用）
 - **file_read**: 读取任意文件

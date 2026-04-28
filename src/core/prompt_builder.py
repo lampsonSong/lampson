@@ -38,7 +38,7 @@ MEMORY_GUIDANCE = (
     "你拥有跨会话的持久记忆。使用 memory 工具保存关键事实：用户偏好、环境细节、工具特性、项目约定。\n"
     "记忆在每轮都会注入，请保持简洁，只记值得关注很久的事情。\n"
     "优先保存能减少未来重复沟通的内容——用户偏好和常见纠正比任务进展更重要。\n"
-    "不要记录任务进度、已完成工作日志或临时状态；用 session_search 工具从历史记录里找。\n"
+    "不要记录任务进度、已完成工作日志或临时状态；用 session 工具从历史记录里找。\n"
     "用 declarative 事实风格写记忆，不要写给自己的指令。\n"
     "✓ '用户喜欢简洁回复'  ✗ '永远简洁回复'\n"
     "✓ '项目用 pytest xdist'  ✗ '用 pytest -n 4 运行测试'\n"
@@ -59,10 +59,10 @@ TOOL_USE_ENFORCEMENT = (
 )
 
 SESSION_CONTINUITY_GUIDANCE = (
-    "当用户提到\"上次\"、\"继续\"、\"之前那个\"等暗示延续旧对话时，使用 session_load 恢复上一次对话历史。\n"
-    "session_load 会把旧 session 的消息加载到当前对话中，你就能自然延续上下文。\n"
-    "如果用户只是泛泛提问（如\"上次让我干啥\"），先调 session_load 加载最近 session，再回答。\n"
-    "用 session_search 搜索跨多个 session 的历史内容。"
+    "当用户提到\"上次\"、\"继续\"、\"之前那个\"等暗示延续旧对话时，使用 session(action='load') 恢复上一次对话历史。\n"
+    "session(action='load') 会把旧 session 的消息加载到当前对话中，你就能自然延续上下文。\n"
+    "如果用户只是泛泛提问（如\"上次让我干啥\"），先调 session(action='load') 加载最近 session，再回答。\n"
+    "用 session(action='search') 搜索跨多个 session 的历史内容。"
 )
 
 # ── Frontmatter 解析 ─────────────────────────────────────────────────────────
@@ -154,7 +154,7 @@ def build_skills_index() -> str:
     lines: list[str] = [
         "## Skills（按需加载）",
         "以下是你已掌握的技能目录，每项包含触发词。",
-        "**规则**：当用户输入匹配某个 skill 的触发词时，你必须在回复之前先调用 skill_view(name=\"技能名\") 加载全文，然后按 skill 指导执行任务。",
+        "**规则**：当用户输入匹配某个 skill 的触发词时，你必须在回复之前先调用 skill(action='view', name='技能名') 加载全文，然后按 skill 指导执行任务。",
         "如果没有 skill 的触发词与当前任务相关，直接回答即可。",
         "",
     ]

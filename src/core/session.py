@@ -304,8 +304,8 @@ class Session:
         from src.core import reflection
         reflection.set_llm_client(primary_llm)
         # 注入 Session 引用给 session_load 工具
-        from src.tools import session_load as session_load_tool
-        session_load_tool.set_current_session(session)
+        from src.tools import session as session_tool
+        session_tool.set_current_session(session)
         session.channel = channel
         session.init_feishu()
         return session

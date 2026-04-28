@@ -329,6 +329,7 @@ def get_client() -> FeishuClient:
     return _client
 
 
+
 # ─── 工具函数（供 tools.py 注册） ────────────────────────────────────────────
 
 def _detect_id_type(receive_id: str, explicit_type: str | None = None) -> str:
@@ -348,22 +349,46 @@ def _detect_id_type(receive_id: str, explicit_type: str | None = None) -> str:
 
 
 def tool_feishu_send(params: dict[str, Any]) -> str:
-    """工具实现：发送飞书消息。"""
+    """统一飞书发送工具：msg_type='text' 发文本，msg_type='card' 发卡片。"""
     receive_id = params.get("receive_id", "").strip()
-    text = params.get("text", "").strip()
+    msg_type = params.get("msg_type", "text")
     receive_id_type = _detect_id_type(receive_id, params.get("receive_id_type"))
-
-    print(f"[tool] feishu_send 被调用: receive_id={receive_id}, text={text[:50]}", flush=True)
 
     if not receive_id:
         return "[错误] 缺少 receive_id 参数。"
-    if not text:
-        return "[错误] 消息内容不能为空。"
 
     try:
         client = get_client()
-        client.send_message(receive_id=receive_id, text=text, receive_id_type=receive_id_type)
-        return f"消息已发送给 {receive_id}：{text}"
+
+        if msg_type == "text":
+            text = params.get("text", "").strip()
+            if not text:
+                return "[错误] 消息内容不能为空。"
+            print(f"[tool] feishu_send(text): receive_id={receive_id}", flush=True)
+            client.send_message(receive_id=receive_id, text=text, receive_id_type=receive_id_type)
+            return f"消息已发送给 {receive_id}：{text}"
+
+        elif msg_type == "card":
+            card_type = params.get("card_type", "form")
+            title = params.get("title", "信息")
+            header_template = params.get("header_template", "blue")
+            fields = params.get("fields", [])
+            content = params.get("content", "")
+            print(f"[tool] feishu_send(card): receive_id={receive_id}, card_type={card_type}", flush=True)
+
+            if card_type == "form":
+                card = client.build_form_card(title=title, fields=fields, header_template=header_template)
+            elif card_type == "md":
+                card = client.build_md_card(title=title, content=content, header_template=header_template)
+            else:
+                return f"[错误] 不支持的 card_type: {card_type}，支持: form, md"
+
+            client.send_card(receive_id=receive_id, card=card, receive_id_type=receive_id_type)
+            return f"卡片已发送给 {receive_id}：{title}"
+
+        else:
+            return f"[错误] 不支持的 msg_type: {msg_type}，支持: text, card"
+
     except RuntimeError as e:
         return f"[飞书错误] {e}"
     except httpx.HTTPError as e:
@@ -402,43 +427,7 @@ def tool_feishu_read(params: dict[str, Any]) -> str:
                 text = content
             lines.append(f"  [{create_time}] {sender}: {text}")
 
-        return "\n".join(lines)
-    except RuntimeError as e:
-        return f"[飞书错误] {e}"
-    except httpx.HTTPError as e:
-        return f"[网络错误] {e}"
-
-
-def tool_feishu_card(params: dict[str, Any]) -> str:
-    """工具实现：发送飞书卡片消息。
-
-    支持三种卡片格式：
-    - form: 表单格式，适合展示键值对
-    - md: Markdown 格式，适合多行文本
-    - table: 表格格式（通过 elements 手动构建）
-    """
-    receive_id = params.get("receive_id", "").strip()
-    card_type = params.get("card_type", "form")
-    title = params.get("title", "信息")
-    header_template = params.get("header_template", "blue")
-    fields = params.get("fields", [])  # form 类型用 [{"label": "", "value": ""}]
-    content = params.get("content", "")  # md 类型用
-    receive_id_type = _detect_id_type(receive_id, params.get("receive_id_type"))  # 自动检测 ID 类型
-
-    if not receive_id:
-        return "[错误] 缺少 receive_id 参数。"
-
-    try:
-        client = get_client()
-        if card_type == "form":
-            card = client.build_form_card(title=title, fields=fields, header_template=header_template)
-        elif card_type == "md":
-            card = client.build_md_card(title=title, content=content, header_template=header_template)
-        else:
-            return f"[错误] 不支持的 card_type: {card_type}，支持: form, md"
-
-        client.send_card(receive_id=receive_id, card=card, receive_id_type=receive_id_type)
-        return f"卡片已发送给 {receive_id}：{title}"
+        return chr(10).join(lines)
     except RuntimeError as e:
         return f"[飞书错误] {e}"
     except httpx.HTTPError as e:
@@ -451,7 +440,8 @@ FEISHU_SEND_SCHEMA: dict[str, Any] = {
     "type": "function",
     "function": {
         "name": "feishu_send",
-        "description": "发送飞书消息给指定用户或群",
+        "description": (
+            "发送飞书消息给指定用户或群。msg_type='text' 发文本消息，msg_type='card' 发卡片消息。"),
         "parameters": {
             "type": "object",
             "properties": {
@@ -459,17 +449,50 @@ FEISHU_SEND_SCHEMA: dict[str, Any] = {
                     "type": "string",
                     "description": "接收者的 user_id、open_id 或 chat_id",
                 },
+                "msg_type": {
+                    "type": "string",
+                    "enum": ["text", "card"],
+                    "description": "消息类型：text 文本消息，card 卡片消息",
+                },
                 "text": {
                     "type": "string",
-                    "description": "要发送的消息文本内容",
+                    "description": "文本消息内容（msg_type='text' 时使用）",
                 },
                 "receive_id_type": {
                     "type": "string",
                     "description": "ID 类型：user_id / open_id / chat_id，默认 user_id",
                     "enum": ["user_id", "open_id", "union_id", "email", "chat_id"],
                 },
+                "card_type": {
+                    "type": "string",
+                    "description": "卡片类型（msg_type='card' 时使用）：form(表单) / md(Markdown)",
+                    "enum": ["form", "md"],
+                },
+                "title": {
+                    "type": "string",
+                    "description": "卡片标题（msg_type='card' 时使用）",
+                },
+                "header_template": {
+                    "type": "string",
+                    "description": "卡片表头颜色（msg_type='card' 时使用）：blue / red / yellow / green / purple / orange / grey",
+                },
+                "fields": {
+                    "type": "array",
+                    "description": "表单字段列表（card_type='form' 时使用），每个字段包含 label 和 value",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string"},
+                            "value": {"type": "string"},
+                        },
+                    },
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Markdown 内容（card_type='md' 时使用）",
+                },
             },
-            "required": ["receive_id", "text"],
+            "required": ["receive_id", "msg_type"],
         },
     },
 }
@@ -497,57 +520,6 @@ FEISHU_READ_SCHEMA: dict[str, Any] = {
                 },
             },
             "required": ["container_id"],
-        },
-    },
-}
-
-FEISHU_CARD_SCHEMA: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "feishu_card",
-        "description": "发送飞书卡片消息，支持表单/Markdown格式，适合结构化信息展示",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "receive_id": {
-                    "type": "string",
-                    "description": "接收者的 user_id、open_id 或 chat_id",
-                },
-                "receive_id_type": {
-                    "type": "string",
-                    "description": "ID 类型：user_id / open_id / chat_id，默认 user_id",
-                    "enum": ["user_id", "open_id", "union_id", "email", "chat_id"],
-                },
-                "card_type": {
-                    "type": "string",
-                    "description": "卡片类型：form(表单) / md(Markdown)",
-                    "enum": ["form", "md"],
-                },
-                "title": {
-                    "type": "string",
-                    "description": "卡片标题",
-                },
-                "header_template": {
-                    "type": "string",
-                    "description": "表头颜色：blue / red / yellow / green / purple / orange / grey",
-                },
-                "fields": {
-                    "type": "array",
-                    "description": "表单字段列表（form类型用），每个字段包含 label 和 value",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "label": {"type": "string"},
-                            "value": {"type": "string"},
-                        },
-                    },
-                },
-                "content": {
-                    "type": "string",
-                    "description": "Markdown 内容（md类型用）",
-                },
-            },
-            "required": ["receive_id", "card_type"],
         },
     },
 }

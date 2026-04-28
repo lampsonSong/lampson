@@ -1,4 +1,4 @@
-"""按文件名与内容搜索：底层使用 ripgrep (rg)，单次搜索。"""
+"""统一搜索工具：合并 search_files + search_content，通过 mode 参数区分。底层使用 ripgrep (rg)。"""
 from __future__ import annotations
 
 import os
@@ -23,58 +23,30 @@ _RE_META = re.compile(r"[.^$*+?()[\]{}|\\]")
 # 搜索超时
 _SEARCH_TIMEOUT = 30
 
-SEARCH_FILES_SCHEMA: dict[str, Any] = {
+# ── 统一 Schema ──────────────────────────────────────────────────────────────
+
+SEARCH_SCHEMA: dict[str, Any] = {
     "type": "function",
     "function": {
-        "name": "search_files",
+        "name": "search",
         "description": (
-            "按文件名或 glob 模式搜索文件。底层用 ripgrep，自动尊重 .gitignore，"
-            "自动排除 .git 目录。用于替代 find 命令。"
+            "按文件名或内容搜索。mode='files' 按文件名/glob 搜索（替代 find），"
+            "mode='content' 按文本/正则搜索（替代 grep）。底层用 ripgrep，自动尊重 .gitignore。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": ["files", "content"],
+                    "description": "搜索模式：files 按文件名搜索，content 按内容搜索",
+                },
                 "pattern": {
                     "type": "string",
                     "description": (
-                        "文件名 glob 模式，如 '*.py'、'test_*'、'README*'。支持 rg glob 语法。"
+                        "搜索模式。files 模式下为文件名 glob（如 '*.py'、'test_*'）；"
+                        "content 模式下为文本或正则表达式（rg 语法）"
                     ),
-                },
-                "path": {
-                    "type": "string",
-                    "description": "搜索根目录，默认当前目录 '.'",
-                    "default": ".",
-                },
-                "max_depth": {
-                    "type": "integer",
-                    "description": "最大搜索深度，默认 10，最大 20",
-                    "default": 10,
-                },
-                "max_results": {
-                    "type": "integer",
-                    "description": "最多返回多少条结果，默认 50，最大 200",
-                    "default": 50,
-                },
-            },
-            "required": ["pattern"],
-        },
-    },
-}
-
-SEARCH_CONTENT_SCHEMA: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "search_content",
-        "description": (
-            "在文件内容中搜索匹配的文本或正则表达式。底层用 ripgrep，自动尊重 .gitignore。"
-            "用于替代 grep 命令。"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "pattern": {
-                    "type": "string",
-                    "description": "搜索模式，支持正则表达式（rg 语法）",
                 },
                 "path": {
                     "type": "string",
@@ -83,20 +55,25 @@ SEARCH_CONTENT_SCHEMA: dict[str, Any] = {
                 },
                 "file_glob": {
                     "type": "string",
-                    "description": "只在匹配此 glob 的文件中搜索，如 '*.py'、'*.{js,ts}'",
+                    "description": "content 模式下，只在匹配此 glob 的文件中搜索，如 '*.py'、'*.{js,ts}'",
                 },
                 "max_results": {
                     "type": "integer",
-                    "description": "最多返回多少条匹配，默认 50，最大 200",
+                    "description": "最多返回多少条结果，默认 50，最大 200",
                     "default": 50,
+                },
+                "max_depth": {
+                    "type": "integer",
+                    "description": "files 模式下最大搜索深度，默认 10，最大 20",
+                    "default": 10,
                 },
                 "context_lines": {
                     "type": "integer",
-                    "description": "每个匹配前后显示多少行上下文，默认 2，最大 5",
+                    "description": "content 模式下每个匹配前后显示多少行上下文，默认 2，最大 5",
                     "default": 2,
                 },
             },
-            "required": ["pattern"],
+            "required": ["mode", "pattern"],
         },
     },
 }
@@ -178,8 +155,6 @@ def _run_rg(args: list[str], abs_path: str) -> tuple[list[str] | None, str | Non
     if result.returncode == 1:
         return [], None
     if result.returncode != 0:
-        # rc=2 通常是权限错误，--no-messages 已抑制 stderr
-        # 如果有 stdout 结果就返回，否则当作无匹配
         if result.stdout.strip():
             return result.stdout.splitlines(), None
         return [], None
@@ -294,50 +269,38 @@ def _format_content_output(
 
 
 # ---------------------------------------------------------------------------
-# 入口函数
+# 统一入口
 # ---------------------------------------------------------------------------
 
-def run_search_files(params: dict[str, Any]) -> str:
-    """按文件名 / glob 列出文件。"""
-    pattern = (params.get("pattern") or "").strip()
-    if not pattern:
-        return "[错误] pattern 参数不能为空"
+def run(params: dict[str, Any]) -> str:
+    """统一搜索入口，通过 mode 分发。"""
+    mode = (params.get("mode") or "").strip()
+    if mode not in ("files", "content"):
+        return "[错误] mode 参数必须为 'files' 或 'content'"
 
-    path = (params.get("path") or ".") or "."
-    abs_path, path_err = _resolve_path(path)
-    if path_err is not None:
-        return path_err
-    max_depth = _as_int(params.get("max_depth"), 10, 1, 20)
-    max_results = _as_int(params.get("max_results"), 50, 1, 200)
-
-    return _search_files(pattern, abs_path, max_depth, max_results)
-
-
-def run_search_content(params: dict[str, Any]) -> str:
-    """在文件内容中搜索。"""
     pattern = params.get("pattern")
-    if pattern is None or (isinstance(pattern, str) and not pattern.strip()):
+    if not pattern or (isinstance(pattern, str) and not pattern.strip()):
         return "[错误] pattern 参数不能为空"
-    if not isinstance(pattern, str):
-        return "[错误] pattern 须为字符串"
-
-    bad = _validate_content_pattern(pattern)
-    if bad:
-        return f"[错误] {bad}"
 
     path = (params.get("path") or ".") or "."
     abs_path, path_err = _resolve_path(path)
     if path_err is not None:
         return path_err
-    max_results = _as_int(params.get("max_results"), 50, 1, 200)
-    context_lines = _as_int(params.get("context_lines"), 2, 0, 5)
-    raw_glob = params.get("file_glob")
-    file_glob: str | None
-    if isinstance(raw_glob, str) and (raw_glob := raw_glob.strip()):
-        file_glob = raw_glob
-    else:
-        file_glob = None
 
-    return _search_content(
-        pattern, abs_path, max_results, context_lines, file_glob
-    )
+    max_results = _as_int(params.get("max_results"), 50, 1, 200)
+
+    if mode == "files":
+        max_depth = _as_int(params.get("max_depth"), 10, 1, 20)
+        return _search_files(pattern.strip(), abs_path, max_depth, max_results)
+    else:
+        bad = _validate_content_pattern(pattern)
+        if bad:
+            return f"[错误] {bad}"
+        context_lines = _as_int(params.get("context_lines"), 2, 0, 5)
+        raw_glob = params.get("file_glob")
+        file_glob: str | None
+        if isinstance(raw_glob, str) and (raw_glob := raw_glob.strip()):
+            file_glob = raw_glob
+        else:
+            file_glob = None
+        return _search_content(pattern, abs_path, max_results, context_lines, file_glob)

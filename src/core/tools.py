@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any, Callable
 
@@ -11,8 +10,7 @@ from src.tools import shell as shell_tool
 from src.tools import fileops as fileops_tool
 from src.tools import search as search_tool
 from src.tools import web as web_tool
-from src.tools import session_search as session_search_tool
-from src.tools import session_load as session_load_tool
+from src.tools import session as session_tool
 from src.feishu import client as feishu_client
 from src.core import skills_tools
 
@@ -28,20 +26,16 @@ def _register(schema: dict[str, Any], runner: ToolRunner) -> None:
 
 
 _register(shell_tool.SCHEMA, shell_tool.run)
-_register(search_tool.SEARCH_FILES_SCHEMA, search_tool.run_search_files)
-_register(search_tool.SEARCH_CONTENT_SCHEMA, search_tool.run_search_content)
+_register(search_tool.SEARCH_SCHEMA, search_tool.run)
 _register(fileops_tool.FILE_READ_SCHEMA, fileops_tool.run_file_read)
 _register(fileops_tool.FILE_WRITE_SCHEMA, fileops_tool.run_file_write)
 _register(web_tool.SCHEMA, web_tool.run)
 _register(feishu_client.FEISHU_SEND_SCHEMA, feishu_client.tool_feishu_send)
 _register(feishu_client.FEISHU_READ_SCHEMA, feishu_client.tool_feishu_read)
-_register(feishu_client.FEISHU_CARD_SCHEMA, feishu_client.tool_feishu_card)
 _register(skills_tools.PROJECT_CONTEXT_SCHEMA, skills_tools.project_context)
-_register(skills_tools.SKILL_VIEW_SCHEMA, skills_tools.skill_view)
-_register(skills_tools.SEARCH_SKILLS_SCHEMA, skills_tools.search_skills)
+_register(skills_tools.SKILL_SCHEMA, skills_tools.skill)
 _register(skills_tools.SEARCH_PROJECTS_SCHEMA, skills_tools.search_projects)
-_register(session_search_tool.SESSION_SEARCH_SCHEMA, session_search_tool.run)
-_register(session_load_tool.SESSION_LOAD_SCHEMA, session_load_tool.run)
+_register(session_tool.SESSION_SCHEMA, session_tool.run)
 
 
 # ─── 飞书客户端懒加载初始化 ────────────────────────────────────────────────

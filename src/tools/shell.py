@@ -68,7 +68,7 @@ def execute_shell(command: str, timeout: int = 30) -> str:
     if _has_glob_abuse(command):
         return (
             "[拒绝执行] 检测到对 cat/rm 等使用通配符（如 *.py、src/*），"
-            "请改为明确路径、使用 `search_files` / `search_content` 或分文件读取，"
+            "请改为明确路径、使用 `search` 工具或分文件读取，"
             "避免一次展开大量文件。"
         )
 
@@ -101,7 +101,7 @@ SCHEMA: dict[str, Any] = {
         "description": (
             "在终端执行 shell 命令，返回输出结果。"
             "适用于运行脚本、安装包、启动进程等。"
-            "禁止用此工具执行 find/grep/rg 搜索文件或内容，请改用 search_files 或 search_content。"
+            "禁止用此工具执行 find/grep/rg 搜索文件或内容，请改用 search 工具。"
             "禁止用 cat/head/tail 读取文件，请改用 file_read。"
         ),
         "parameters": {
