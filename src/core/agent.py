@@ -11,6 +11,9 @@ import threading
 from typing import TYPE_CHECKING, Any, Callable
 
 from src.core.adapters import BaseModelAdapter
+from src.core.adapters.base import (
+    LLMError, LLMRetryableError, LLMRateLimitError, LLMFatalError, LLMContextTooLongError,
+)
 from src.core.interrupt import AgentInterrupted
 from src.core.llm import LLMClient
 from src.core import tools as tool_registry
@@ -194,10 +197,13 @@ class Agent:
         # 1. 先试主模型
         try:
             return self.adapter.chat(self.llm.messages, tools=tools)
-        except RuntimeError:
+        except LLMContextTooLongError:
+            # prompt 超长 → 不 fallback，直接上抛让上层处理
+            raise
+        except (LLMFatalError, LLMRateLimitError, LLMRetryableError) as e:
             if not self.fallback_models:
                 raise
-            logger.warning(f"主模型 {self.llm.model} 调用失败，尝试 fallback")
+            logger.warning(f"主模型 {self.llm.model} 调用失败（{type(e).__name__}），尝试 fallback: {e}")
             self._on_model_switch(f"主模型 {self.llm.model} 失败，切换 fallback...")
 
         # 2. 依次试 fallback，成功即返回
@@ -209,11 +215,14 @@ class Agent:
                 result = fb_adapter.chat(fb_llm.messages, tools=tools)
                 self._on_model_switch(f"已切换到 {fb_llm.model}")
                 return result
-            except Exception as e:
-                logger.warning(f"fallback {fb_llm.model} 也失败: {e}")
+            except LLMContextTooLongError:
+                # prompt 超长换模型也没用，直接上抛
+                raise
+            except (LLMFatalError, LLMRateLimitError, LLMRetryableError) as e:
+                logger.warning(f"fallback {fb_llm.model} 也失败（{type(e).__name__}）: {e}")
                 continue
 
-        raise RuntimeError("所有模型（含 fallback）均调用失败")
+        raise LLMFatalError("所有模型（含 fallback）均调用失败")
 
     def _run_tool_loop(self) -> str:
         self._fast_path_tool_count = 0
@@ -224,7 +233,10 @@ class Agent:
                     response = self._chat_with_fallback(tools=self._tools)
                 except AgentInterrupted:
                     raise  # 直接上抛，不吞掉
-                except RuntimeError as e:
+                except LLMContextTooLongError as e:
+                    logger.warning(f"Prompt 超长: {e}")
+                    return "[上下文过长，请使用 /compaction 手动压缩后重试]"
+                except LLMError as e:
                     return f"[LLM 错误] {e}"
 
                 # 检查中断（收到 LLM 响应后、解析 tool_calls 前）

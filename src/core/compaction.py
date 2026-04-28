@@ -237,7 +237,7 @@ def _classify_messages(
     # 调用 LLM（通过 llm.messages 接口）
     temp_client = _make_temp_client(llm)
     temp_client.messages = []
-    temp_client.set_system_context(core_memory=_CLASSIFY_SYSTEM)
+    temp_client.messages = [{"role": "system", "content": _CLASSIFY_SYSTEM}]
     temp_client.add_user_message(prompt)
     try:
         response = temp_client.chat()

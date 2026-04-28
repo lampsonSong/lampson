@@ -1,8 +1,16 @@
-"""模型适配器基类与统一响应结构。"""
+"""模型适配器基类与统一响应结构。
+
+异常分类：
+- LLMRetryableError：可重试（超时、网络断开、服务端 5xx）→ 尝试 fallback
+- LLMRateLimitError：频率限制 / 余额不足 → 尝试 fallback（同供应商其他模型可能可用）
+- LLMFatalError：不可重试（认证失败、参数错误）→ 直接报错
+- LLMContextTooLongError：prompt 超长 → 触发压缩，不 fallback
+"""
 
 from __future__ import annotations
 
 import json
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -13,6 +21,44 @@ from openai.types.chat import ChatCompletion
 
 if TYPE_CHECKING:
     from src.core.llm import LLMClient
+
+logger = logging.getLogger(__name__)
+
+
+# ── 自定义异常 ───────────────────────────────────────────────────────────
+
+
+class LLMError(Exception):
+    """LLM 调用失败的基类。保留原始异常和状态码。"""
+
+    def __init__(
+        self,
+        message: str,
+        original_error: Exception | None = None,
+        status_code: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.original_error = original_error
+        self.status_code = status_code
+
+
+class LLMRetryableError(LLMError):
+    """可重试的错误（超时、网络断开、服务端 5xx）。"""
+
+
+class LLMRateLimitError(LLMError):
+    """频率限制 / 余额不足——可以 fallback 到其他模型重试。"""
+
+
+class LLMFatalError(LLMError):
+    """不可重试的错误（认证失败、参数错误）。"""
+
+
+class LLMContextTooLongError(LLMError):
+    """prompt 超长——需要触发压缩，而不是 fallback。"""
+
+
+# ── 数据类 ───────────────────────────────────────────────────────────────
 
 
 @dataclass
@@ -85,7 +131,10 @@ class BaseModelAdapter(ABC):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
     ) -> ChatCompletion:
-        """调用 chat.completions.create；不修改 messages。"""
+        """调用 chat.completions.create；不修改 messages。
+
+        抛出自定义异常，保留原始错误信息供上层决策。
+        """
         kwargs: dict[str, Any] = {
             "model": self.llm.model,
             "messages": messages,
@@ -95,16 +144,93 @@ class BaseModelAdapter(ABC):
             kwargs["tool_choice"] = "auto"
         try:
             return self.llm.client.chat.completions.create(**kwargs)
-        except APITimeoutError:
-            raise RuntimeError("LLM 请求超时，请检查网络连接后重试。")
+        except APITimeoutError as e:
+            raise LLMRetryableError(
+                f"LLM 请求超时（{self.llm.model}）",
+                original_error=e,
+            )
         except APIConnectionError as e:
-            raise RuntimeError(f"无法连接到 LLM API：{e}")
-        except RateLimitError:
-            raise RuntimeError("API 调用频率超限，请稍后再试。")
+            raise LLMRetryableError(
+                f"无法连接到 LLM API（{self.llm.model}）：{e}",
+                original_error=e,
+            )
+        except RateLimitError as e:
+            # 频率限制 / 余额不足 → 可 fallback 到同供应商其他模型
+            body = ""
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                body = e.response.text[:200]
+            logger.warning(f"RateLimitError ({self.llm.model}): {body}")
+            raise LLMRateLimitError(
+                f"API 频率限制或余额不足（{self.llm.model}）：{body}",
+                original_error=e,
+                status_code=429,
+            )
+        except httpx.HTTPStatusError as e:
+            # 有明确状态码的 HTTP 错误
+            status_code = e.response.status_code
+            body = ""
+            if hasattr(e.response, "text"):
+                body = e.response.text[:300]
+            return self._handle_http_status_error(status_code, body, e)
         except httpx.HTTPError as e:
-            # 其他 httpx 异常（401/403/500/网络不可达等）也转成 RuntimeError
-            # 让 fallback 机制能继续尝试下一个模型
-            raise RuntimeError(f"LLM API 调用失败：{e}")
+            # 其他网络错误（DNS、连接重置等）
+            raise LLMRetryableError(
+                f"网络错误（{self.llm.model}）：{e}",
+                original_error=e,
+            )
+
+    def _handle_http_status_error(
+        self,
+        status_code: int,
+        body: str,
+        original_error: httpx.HTTPStatusError,
+    ) -> ChatCompletion:
+        """根据 HTTP 状态码分类抛出不同异常。"""
+        model = self.llm.model
+        if status_code == 401:
+            raise LLMFatalError(
+                f"认证失败（{model}）：{body}",
+                original_error=original_error,
+                status_code=status_code,
+            )
+        elif status_code == 400:
+            # 检查是否是 prompt 超长
+            body_lower = body.lower()
+            if any(kw in body_lower for kw in ("context", "token", "length", "max_tokens", "too many")):
+                raise LLMContextTooLongError(
+                    f"Prompt 超长（{model}）：{body[:200]}",
+                    original_error=original_error,
+                    status_code=status_code,
+                )
+            raise LLMFatalError(
+                f"请求参数错误（{model}）：{body[:200]}",
+                original_error=original_error,
+                status_code=status_code,
+            )
+        elif status_code == 403:
+            raise LLMFatalError(
+                f"权限不足（{model}）：{body[:200]}",
+                original_error=original_error,
+                status_code=status_code,
+            )
+        elif status_code == 404:
+            raise LLMFatalError(
+                f"模型不存在（{model}）：{body[:200]}",
+                original_error=original_error,
+                status_code=status_code,
+            )
+        elif 500 <= status_code < 600:
+            raise LLMRetryableError(
+                f"服务端错误 {status_code}（{model}）：{body[:200]}",
+                original_error=original_error,
+                status_code=status_code,
+            )
+        else:
+            raise LLMFatalError(
+                f"HTTP {status_code}（{model}）：{body[:200]}",
+                original_error=original_error,
+                status_code=status_code,
+            )
 
     def build_system_prompt_guidance(self) -> str:
         """可由子类追加到 system 的模型专属说明；默认无。"""
