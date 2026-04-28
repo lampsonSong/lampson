@@ -191,16 +191,18 @@ class SessionManager:
 
     def close_all(self) -> None:
         """关闭所有 Session（进程退出时调用）。"""
+        from src.memory import session_store as ss
+
         with self._lock:
             for session in self._sessions.values():
                 try:
-                    session.save_summary()
+                    ss.end_session(session.session_id)
                 except Exception:
                     pass
             self._sessions.clear()
             if self._cli_session is not None:
                 try:
-                    self._cli_session.save_summary()
+                    ss.end_session(self._cli_session.session_id)
                 except Exception:
                     pass
                 self._cli_session = None

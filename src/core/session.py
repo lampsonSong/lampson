@@ -1182,4 +1182,6 @@ def _build_compaction_config(
         end_threshold_percent=c.get("end_threshold_percent", 80.0),
         max_archive_per_compaction=c.get("max_archive_per_compaction", 20),
         compaction_log_max_bytes=c.get("compaction_log_max_bytes", 10 * 1024 * 1024),
+        keep_recent_n=c.get("keep_recent_n", 3),
+        summary_trigger_ratio=c.get("summary_trigger_ratio", 0.5),
     )

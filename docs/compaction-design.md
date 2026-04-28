@@ -176,30 +176,95 @@ def safe_write(path: Path, content: str) -> None:
 
 ---
 
-## 压缩后的消息列表
+## 压缩后的消息列表（两阶段压缩）
 
-归档完成后，剩余消息 = `keep` 列表 + 系统消息 + 最新 2-3 条消息（保障上下文连贯）：
+### 阶段一：分类归档
+
+归档完成后，剩余消息 = `keep` 列表 + 系统消息 + 最新 N 条消息（保障上下文连贯，N 默认 3，可配置）：
 
 ```python
-def build_remaining_messages(messages: list, decisions: dict) -> list:
+def build_remaining_messages(messages: list, decisions: dict, keep_recent_n: int = 3) -> list:
     keep_ids = {d["msg_id"] for d in decisions["decisions"] if d["action"] == "keep"}
     tool_keep_ids = {k for k, v in decisions["tool_refs"].items() if v["action"] == "keep"}
-
     keep_ids |= tool_keep_ids
 
     # 保留原始消息，不做摘要
     remaining = [msg for msg in messages if msg["id"] in keep_ids]
 
-    # 追加最近 2-3 条（保障上下文连贯）
-    recent = messages[-3:]
+    # 追加最近 N 条（保障上下文连贯）
+    recent = messages[-keep_recent_n:]
     for msg in recent:
         if msg["id"] not in keep_ids:
             remaining.append(msg)
 
-    # 加入 system 消息
-    system_msgs = [msg for msg in messages if msg["role"] == "system"]
-    return system_msgs + remaining
+    return remaining
 ```
+
+### 阶段二：摘要压缩（条件触发）
+
+如果阶段一压缩后的 token 仍然 > 原始的 50%，触发第二层压缩：
+
+```
+阶段一完成后
+    │
+    ▼
+计算压缩后 token / 原始 token
+    │
+    ├── 比例 <= 50% → 结束，直接用 keep + 最近 N 条
+    │
+    └── 比例 > 50% → 第二层压缩
+            │
+            ├─ 分离：最近 N 轮原文（不动） vs 其余 keep 消息
+            │
+            ├─ 对其余 keep 消息 → LLM 分组总结
+            │   输出一个 summary message：
+            │   {
+            │     "role": "assistant",
+            │     "content": "## 对话摘要\n\n1. [topic_A]: ...\n2. [topic_B]: ...",
+            │     "is_compaction_summary": true
+            │   }
+            │
+            └─ 最终 messages = [system] + [summary message] + [最近 N 轮原文]
+```
+
+**配置项**：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `keep_recent_n` | 3 | 保留最近 N 轮对话不做摘要 |
+| `summary_trigger_ratio` | 0.5 | 阶段一后仍超过此比例则触发阶段二 |
+
+**LLM 摘要 Prompt**：
+
+```
+你是一个对话摘要助手。以下是一段对话历史，请按主题分组总结。
+
+要求：
+1. 按讨论的主题分组，每个主题一段
+2. 每段包含：讨论了什么、做出了什么决定/结论、是否有待办事项
+3. 保留所有关键信息（文件路径、命令、决策、偏好），不要遗漏
+4. 总长度不超过原始对话的 30%
+
+## 对话历史
+
+{keep_messages_text}
+```
+
+**summary message 的特殊标记**：
+
+```python
+{
+    "role": "assistant",
+    "content": "## 对话摘要
+
+...(LLM 生成的摘要内容)...",
+    "is_compaction_summary": True  # 标记这是 compaction 生成的摘要，不是真实对话
+}
+```
+
+`is_compaction_summary` 字段用于：
+- JSONL 写入时识别这是压缩产物
+- 后续 compaction 时跳过已压缩的摘要（避免"摘要的摘要"导致信息损耗）
 
 ---
 
@@ -555,32 +620,8 @@ compaction、core.md 更新、session_end 写入发生在不同阶段：
 
 三者互不干扰：compaction 是运行时多次触发，core.md 更新和 session_end 是退出时一次性执行。
 
-| **新 session 启动** | 新 session 创建时 | 检查上一条 session 有无 summary；无则读 JSONL 补生成后写入 sessions 表，再 inject 到当前 session |
 
 ---
-
-**新 session 启动时的 summary 补生成流程**：
-
-```
-新 session 创建
-    │
-    ▼
-查上一条 session 的 summary（sessions 表）
-    │
-    ├── 有 summary → 直接 inject 到 system prompt 末尾
-    │
-    └── 没有 summary
-            ▼
-        读上一条 session 的 JSONL 消息（session_store.get_session_messages）
-            ▼
-        调用 LLM 生成 progress summary（session_resume.generate_session_summary）
-            ▼
-        写入 sessions 表（补上 summary 字段）
-            ▼
-        inject 到当前 session 的 system prompt 末尾
-```
-
-> **为什么不用"退出时生成"**：退出时机不可靠（用户强制退出、crash 等）；改为"启动时检查并补生成"更稳定，同时覆盖正常退出和异常退出场景。
 
 ---
 
@@ -624,6 +665,10 @@ Session 退出
 - [ ] tool_calls 结果依据 `referenced_tool_results` 字段判断是否 keep
 - [ ] 召回路径由 memory-design.md 覆盖
 - [ ] session 退出时触发 core.md 更新检查
+- [ ] **两阶段压缩**：阶段一后若仍 > 50% 原始长度，触发阶段二 LLM 摘要
+- [ ] **summary message** 带 `is_compaction_summary` 标记，后续 compaction 时跳过
+- [ ] **session summary 机制已移除**：新 session 不注入上一条 session 的 summary
+- [ ] **keep_recent_n 可配置**（默认 3）
 
 ---
 
