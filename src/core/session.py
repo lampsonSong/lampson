@@ -13,6 +13,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+import queue
+import threading
 
 from src.core.config import (
     LAMPSON_DIR,
@@ -184,6 +186,20 @@ class Session:
         self._current_message_id: str = ""
         self._current_chat_id: str = ""
 
+        # ── 中断抢占机制（飞书等并发渠道） ──
+        # 消息队列：新消息到来时如果正在处理，入队而非并发执行
+        self._input_queue: queue.Queue[str] = queue.Queue()
+        # 是否有任务正在处理
+        self._processing: bool = False
+        # 处理锁：保证同一时刻只有一个线程在处理消息
+        self._processing_lock: threading.Lock = threading.Lock()
+        # 被中断任务的进度摘要
+        self._pending_task_summary: str = ""
+        # 被中断时的 llm.messages 快照
+        self._pending_task_messages_snapshot: list[dict] = []
+        # 持久回复回调（飞书渠道由 listener 设置，用于处理循环中发送回复）
+        self._reply_callback: Callable[[str], None] | None = None
+
     # ── 消息上下文 ──
 
     def set_message_context(self, message_id: str = "", chat_id: str = "") -> None:
@@ -299,7 +315,8 @@ class Session:
     def handle_input(self, user_input: str) -> HandleResult:
         """处理一条用户输入，返回 HandleResult。
 
-        自动判断是命令还是自然语言，内部处理压缩。
+        飞书等并发渠道：如果当前正在处理，将新消息入队并请求中断当前任务。
+        CLI 等单线程渠道：直接处理，和原来一样。
         """
         import time as _time_module
 
@@ -307,6 +324,35 @@ class Session:
         if user_input.startswith("/"):
             return self._handle_command(user_input)
 
+        # CLI 单线程：直接处理，不需要队列
+        if self.channel != "feishu":
+            return self._run_single(user_input)
+
+        # 飞书并发渠道：队列 + 中断机制
+        if self._processing:
+            # 当前正在处理 → 入队 + 请求中断
+            self._input_queue.put(user_input)
+            self.agent.request_interrupt()
+            logger.info("[session] 消息已入队，已请求中断当前任务")
+            return HandleResult(reply="", compaction_msg="")
+
+        # 没有在处理 → 获取锁，进入处理循环
+        acquired = self._processing_lock.acquire(blocking=False)
+        if not acquired:
+            # 极端竞态：锁被其他线程拿了，入队
+            self._input_queue.put(user_input)
+            self.agent.request_interrupt()
+            return HandleResult(reply="", compaction_msg="")
+
+        self._processing = True
+        try:
+            return self._process_with_interrupt(user_input)
+        finally:
+            self._processing = False
+            self._processing_lock.release()
+
+    def _run_single(self, user_input: str) -> HandleResult:
+        """CLI 单线程模式：直接处理一条消息（原始逻辑）。"""
         # 写入 user 消息到 JSONL
         if self.session_id:
             session_store.append_message(
@@ -316,24 +362,16 @@ class Session:
                 segment=self._current_segment,
             )
 
-        # 飞书渠道：注入消息元数据（message_id, chat_id）
-        if self.channel == "feishu" and self._current_message_id:
-            meta = "[feishu_context message_id=" + self._current_message_id + " chat_id=" + (self._current_chat_id or "") + "]"
-            user_input_for_llm = meta + "\n" + user_input
-        else:
-            user_input_for_llm = user_input
+        user_input_for_llm = user_input
 
-        # 自然语言
         try:
             reply = self.agent.run(user_input_for_llm)
         except Exception as e:
             return HandleResult(reply=f"[错误] {e}")
 
-        # 写入 assistant 消息到 JSONL
         if self.session_id:
             self._write_assistant_to_jsonl()
 
-        # 压缩
         compaction_msg = ""
         try:
             cr = self.agent.maybe_compact(
@@ -350,6 +388,130 @@ class Session:
             pass
 
         return HandleResult(reply=reply, compaction_msg=compaction_msg)
+
+    def _process_with_interrupt(self, user_input: str) -> HandleResult:
+        """飞书并发渠道：处理消息 + 中断抢占循环。
+
+        在一个线程中串行处理消息，支持被新消息中断后恢复。
+        循环逻辑：
+        1. 正常处理当前消息 → 成功 → 检查队列/恢复 → 继续
+        2. 被中断 → 保存摘要 → 取新消息 → 合并上下文处理 → 成功后恢复
+        """
+        from src.core.interrupt import AgentInterrupted
+
+        current_input = user_input
+
+        while True:
+            # 清除中断状态
+            self.agent.clear_interrupt_state()
+
+            # 构造 LLM 输入（飞书渠道注入元数据）
+            user_input_for_llm = current_input
+            if self.channel == "feishu" and self._current_message_id:
+                meta = ("[feishu_context message_id=" + self._current_message_id
+                        + " chat_id=" + (self._current_chat_id or "") + "]")
+                user_input_for_llm = meta + "\n" + current_input
+
+            # 写入 user 消息到 JSONL
+            if self.session_id:
+                session_store.append_message(
+                    session_id=self.session_id,
+                    role="user",
+                    content=current_input,
+                    segment=self._current_segment,
+                )
+
+            # 调用 agent
+            try:
+                reply = self.agent.run(user_input_for_llm)
+            except AgentInterrupted as e:
+                # 被新消息中断
+                interrupt_summary = e.progress_summary
+                self._pending_task_messages_snapshot = list(self.agent.llm.messages)
+                logger.info("[session] 任务被中断: %s", e.progress_summary[:100])
+
+                # 从队列取新消息
+                try:
+                    current_input = self._input_queue.get_nowait()
+                except Exception:
+                    # 队列空（竞态），直接返回
+                    return HandleResult(reply="[任务被中断]", compaction_msg="")
+
+                # 保存被中断任务的摘要（用于后续恢复）
+                self._pending_task_summary = interrupt_summary
+
+                # 合并中断摘要 + 新消息
+                current_input = (
+                    interrupt_summary
+                    + "\n\n--- 任务被新消息中断 ---\n\n"
+                    + "**新消息**：" + current_input
+                )
+
+                continue  # 循环处理新消息
+
+            except Exception as e:
+                return HandleResult(reply=f"[错误] {e}")
+
+            # 处理成功
+            if self.session_id:
+                self._write_assistant_to_jsonl()
+
+            # 压缩
+            compaction_msg = ""
+            try:
+                cr = self.agent.maybe_compact(
+                    session_store=session_store,
+                    session_id=self.session_id or "",
+                )
+                if cr is not None:
+                    if cr.success:
+                        compaction_msg = f"[上下文压缩] 已完成，归档 {cr.archived_count} 条内容。"
+                        self._current_segment += 1
+                    else:
+                        compaction_msg = f"[上下文压缩] 失败: {cr.error}"
+            except Exception:
+                pass
+
+            # 检查是否有被中断的任务需要恢复
+            has_pending_resume = bool(self._pending_task_summary)
+
+            # 检查队列中是否有新消息
+            has_queued = not self._input_queue.empty()
+
+            if has_pending_resume or has_queued:
+                # 不是最后一条消息 → 通过 callback 发送回复
+                if reply and self._reply_callback:
+                    try:
+                        self._reply_callback(reply)
+                    except Exception:
+                        pass
+
+                if has_pending_resume:
+                    current_input = self._build_resume_prompt()
+                    continue
+
+                if has_queued:
+                    try:
+                        current_input = self._input_queue.get_nowait()
+                        continue
+                    except Exception:
+                        pass
+
+            # 队列空，无恢复任务 → 返回最后一条消息的结果
+            return HandleResult(reply=reply, compaction_msg=compaction_msg)
+
+    def _build_resume_prompt(self) -> str:
+        """构建恢复被中断任务的提示。"""
+        summary = self._pending_task_summary
+        self._pending_task_summary = ""
+        self._pending_task_messages_snapshot = []
+
+        return (
+            summary
+            + "\n\n--- 新消息已处理完毕，继续之前的任务 ---\n\n"
+            + "请根据上述进度，继续完成原来的任务。"
+            + "如果任务已经完成或不需要继续，请告知用户。"
+        )
 
     # ── 生命周期 ──
 

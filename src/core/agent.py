@@ -11,6 +11,7 @@ import threading
 from typing import TYPE_CHECKING, Any, Callable
 
 from src.core.adapters import BaseModelAdapter
+from src.core.interrupt import AgentInterrupted
 from src.core.llm import LLMClient
 from src.core import tools as tool_registry
 from src.core.compaction import CompactionConfig, CompactionResult, apply_compaction
@@ -52,6 +53,14 @@ class Agent:
         # 压缩操作锁：防止飞书等多线程场景下并发执行压缩
         self._compaction_lock = threading.Lock()
 
+        # ── 中断机制 ───────────────────────────────────────────────────
+        # volatile 标志：true = 被新消息抢占，需停止
+        self._interrupted: bool = False
+        # 中断锁：防止 check_interrupt 并发写 progress_summary
+        self._interrupt_lock = threading.Lock()
+        # 中断时的进度摘要（供 Session 保存）
+        self._interrupted_summary: str = ""
+
         # 中间过程回调：由 listener 注入，用于实时发送工具调用状态
         self.progress_callback: Callable[[str], None] | None = None
         # 中间文本回调：由 listener 注入，用于向用户发送阶段性总结等中间内容
@@ -92,12 +101,96 @@ class Agent:
         """历史兼容占位；技能全文由 retrieve_for_plan 注入。"""
         return None
 
+    # ── 中断检查 ───────────────────────────────────────────────────────
+
+    def request_interrupt(self) -> None:
+        """由 Session 调用，请求中断当前任务（设置标志位）。"""
+        with self._interrupt_lock:
+            self._interrupted = True
+
+    def check_interrupt(self) -> None:
+        """在 tool_loop 的检查点调用；若被抢占则抛出 AgentInterrupted。"""
+        if not self._interrupted:
+            return
+        with self._interrupt_lock:
+            if not self._interrupted:
+                return
+            # 标记已处理，防止重复抛出
+            self._interrupted = False
+
+        # 构建中断摘要
+        summary = self._build_interrupted_summary()
+        with self._interrupt_lock:
+            self._interrupted_summary = summary
+        raise AgentInterrupted(progress_summary=summary)
+
+    def _build_interrupted_summary(self) -> str:
+        """从当前 messages 构建中断进度摘要。"""
+        try:
+            lines = ["[任务被中断，以下是已完成的进度]\n"]
+            tool_calls_found: list[str] = []
+            last_user_query = ""
+
+            # 找最后一条 user 消息作为原始任务
+            for msg in self.llm.messages:
+                role = msg.get("role", "")
+                if role == "user":
+                    content = msg.get("content", "")
+                    # 跳过飞书 context meta
+                    if "[feishu_context" in content:
+                        content = content.split("]", 1)[-1].strip()
+                    if content and not content.startswith("[任务被中断"):
+                        last_user_query = content[:300]
+
+            if last_user_query:
+                lines.append(f"**原任务**：{last_user_query}\n")
+
+            # 收集 tool 调用
+            for msg in self.llm.messages:
+                if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                    for tc in msg["tool_calls"]:
+                        fname = tc.get("function", {}).get("name", "")
+                        args_str = tc.get("function", {}).get("arguments", "")
+                        try:
+                            args = json.loads(args_str)
+                            # 过滤敏感/大字段
+                            safe_args = {k: v for k, v in args.items()
+                                         if k not in ("password", "token", "secret", "key")}
+                            args_display = json.dumps(safe_args, ensure_ascii=False)[:150]
+                        except Exception:
+                            args_display = args_str[:150]
+                        tool_calls_found.append(f"  - `{fname}`({args_display})")
+
+            if tool_calls_found:
+                lines.append(f"**已调用 {len(tool_calls_found)} 个工具**：")
+                lines.extend(tool_calls_found[:10])
+
+            plan = self.current_plan
+            if plan is not None:
+                lines.append(f"\n**当前计划**：{plan.description[:200]}")
+
+            return "\n".join(lines)
+        except Exception as e:
+            logger.warning(f"构建中断摘要失败: {e}")
+            return "[任务被中断，进度摘要生成失败]"
+
+    def clear_interrupt_state(self) -> None:
+        """由 Session 在处理完一条消息后调用，重置中断标志。"""
+        with self._interrupt_lock:
+            self._interrupted = False
+            self._interrupted_summary = ""
+
+    # ── LLM 调用 ───────────────────────────────────────────────────────
+
     def _chat_with_fallback(self, tools=None):
         """每次调用都从主模型开始，失败时按顺序尝试 fallback。
 
         不会永久切换模型——fallback 成功后响应仍写回主模型的 messages，
         下次调用再次从主模型开始尝试。
         """
+        # 检查中断（LLM 调用前）
+        self.check_interrupt()
+
         # 1. 先试主模型
         try:
             return self.adapter.chat(self.llm.messages, tools=tools)
@@ -109,15 +202,15 @@ class Agent:
 
         # 2. 依次试 fallback，成功即返回
         for fb_llm, fb_adapter in self.fallback_models:
-            logger.info(f"尝试 fallback: {fb_llm.model}")
+            logger.warning(f"尝试 fallback: {fb_llm.model}")
             self._on_model_switch(f"尝试 {fb_llm.model}...")
             try:
                 fb_llm.messages = list(self.llm.messages)
                 result = fb_adapter.chat(fb_llm.messages, tools=tools)
                 self._on_model_switch(f"已切换到 {fb_llm.model}")
                 return result
-            except RuntimeError:
-                logger.warning(f"fallback {fb_llm.model} 也失败")
+            except Exception as e:
+                logger.warning(f"fallback {fb_llm.model} 也失败: {e}")
                 continue
 
         raise RuntimeError("所有模型（含 fallback）均调用失败")
@@ -129,8 +222,13 @@ class Agent:
             for round_num in range(self.max_tool_rounds):
                 try:
                     response = self._chat_with_fallback(tools=self._tools)
+                except AgentInterrupted:
+                    raise  # 直接上抛，不吞掉
                 except RuntimeError as e:
                     return f"[LLM 错误] {e}"
+
+                # 检查中断（收到 LLM 响应后、解析 tool_calls 前）
+                self.check_interrupt()
 
                 if response.usage:
                     self.last_total_tokens = response.usage.total_tokens
@@ -157,7 +255,13 @@ class Agent:
                     tool_msg = self.adapter.format_tool_result(tc.id, result)
                     self.llm.messages.append(tool_msg)
 
+                    # 检查中断（每个工具调用完成后）
+                    self.check_interrupt()
+
             # ── 达到最大轮数：总结现状，清空计数器，继续解决 ──
+            # 先检查中断
+            self.check_interrupt()
+
             logger.info(f"tool_loop: reached max_tool_rounds ({self.max_tool_rounds}), summarizing and continuing")
             summary_prompt = (
                 "你已达到本轮工具调用上限（"
@@ -195,6 +299,8 @@ class Agent:
                     summary_content = "\n".join(content.strip().split("\n")[:-1]).strip()
                     return summary_content or content
                 logger.info("tool_loop: LLM indicated [继续], resuming tool loop")
+            except AgentInterrupted:
+                raise
             except Exception as e:
                 logger.warning(f"summary call failed after max iterations: {e}")
 
@@ -236,7 +342,11 @@ class Agent:
     def run(self, user_input: str) -> str:
         """处理一轮用户输入，返回最终回复文本。"""
         self.llm.add_user_message(user_input)
-        result = self._run_tool_loop()
+        try:
+            result = self._run_tool_loop()
+        except AgentInterrupted:
+            # 标记中断摘要已由 Session 读取，后续由 Session 处理队列
+            raise
 
         tool_count = getattr(self, "_fast_path_tool_count", 0)
         reflection_hints = self._maybe_reflect(

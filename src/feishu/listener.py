@@ -293,6 +293,7 @@ class FeishuListener:
             # 通过 SessionManager 获取该 sender_id 对应的 Session
             session = self._mgr.get_or_create("feishu", open_id)
             session.partial_sender = lambda t: self._send_reply(chat_id, t)
+            session._reply_callback = lambda t: self._send_reply(chat_id, t)
 
             _progress_queue: queue.Queue[dict[str, Any]] = queue.Queue()
             _progress_done = threading.Event()
@@ -387,11 +388,24 @@ class FeishuListener:
             try:
                 result = session.handle_input(text)
             finally:
-                _progress_done.set()
-                _worker.join(timeout=3.0)
-                session.partial_sender = None
+                # 只在非入队场景下清理 progress worker
+                # 入队场景：result.reply 为空，消息会在另一个线程的处理循环中被处理
+                if result.reply or result.is_new or result.is_exit:
+                    _progress_done.set()
+                    _worker.join(timeout=3.0)
+                else:
+                    # 入队场景：快速清理 progress worker
+                    _progress_done.set()
+                    _worker.join(timeout=1.0)
                 session.agent.progress_callback = None
                 session.agent.interim_sender = None
+
+            # 入队场景：消息已入队，不回复（回复会在处理线程中发送）
+            if not result.reply and not result.is_new and not result.is_exit and not result.is_command:
+                self._dedup.mark_processed(message_id)
+                print(f"[listener] 消息已入队，等待当前任务中断后处理", flush=True)
+                return
+
             # 处理 /new 命令：重置 session
             if result.is_new and self._mgr is not None:
                 session = self._mgr.reset_session("feishu", open_id)
