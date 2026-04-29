@@ -1,6 +1,6 @@
 # Lampson 项目文档
 
-> 文档版本：2026-04-28（daemon 架构 + USER.md 注入 + boot_tasks 机制）
+> 文档版本：2026-04-29（全面整理：补 metrics/error_log/trace/熔断/反思模块，合并冗余文档）
 > 项目版本：v0.3.0-dev
 
 ---
@@ -152,6 +152,11 @@ lampson 命令（独立进程）
 | FileOps Tool | `src/tools/fileops.py` | 文件读写，带大小限制保护 |
 | Web Tool | `src/tools/web.py` | DuckDuckGo 网页搜索 |
 | Compaction | `src/core/compaction.py` | 上下文压缩：归档+摘要，可迭代 |
+| Metrics | `src/core/metrics.py` | 任务指标收集（TaskCollector → metrics.jsonl），/metrics 命令统计摘要 |
+| Error Log | `src/core/error_log.py` | 结构化错误日志（errors.jsonl），支持上下文快照和自动轮转 |
+| Reflection | `src/core/reflection.py` | 任务完成后反思沉淀（skill/project 自动创建/更新） |
+| Interrupt | `src/core/interrupt.py` | AgentInterrupted 异常 + 中断标志位 |
+| Adapters | `src/core/adapters/` | 多模型适配层（BaseModelAdapter + MiniMax/GPTOss 等实现） |
 
 
 ## 三、功能清单
@@ -530,6 +535,66 @@ total_tokens > context_window × 80% ?
 - 可迭代：未达标自动继续压缩
 - 压缩失败兜底：LLM 调用失败时截取前2000字作为紧急摘要
 
+### 4.15 任务指标收集 (`src/core/metrics.py`)
+
+每轮任务完成后记录关键指标到 `~/.lampson/metrics.jsonl`：
+
+```python
+class TaskCollector:
+    def start(model, channel, session_id, input_preview)  # 开始计时
+    def record_tool_call()       # 工具调用次数 +1
+    def record_tokens(total)     # 累计 token 消耗
+    def record_fallback()        # 标记使用了 fallback 模型
+    def record_llm_error()       # 标记 LLM 错误
+    def record_compaction()      # 标记触发了压缩
+    def record_interrupt()       # 标记被中断
+    def finish(success) → TaskMetrics  # 结束计时并写入 JSONL
+```
+
+`/metrics` 命令调用 `format_summary()` 展示最近 N 轮的统计（成功率、平均耗时、按模型分布等）。
+
+### 4.16 结构化错误日志 (`src/core/error_log.py`)
+
+写入 `~/.lampson/memory/errors.jsonl`，每条记录包含：
+
+- 错误基本信息（type、message、source：llm/tool/agent）
+- 上下文快照（最近 20 条 messages 摘要）
+- 工具信息（tool_name、tool_arguments、tool_result）
+- 异常 traceback
+
+日志文件最大 20MB，超过自动轮转（保留 5 个）。`query_recent_errors()` 支持按 source/session_id 过滤。
+
+### 4.17 反思沉淀 (`src/core/reflection.py`)
+
+任务完成后自动触发反思，判断是否有值得持久化的知识：
+
+1. 调用 LLM 分析任务执行过程，输出 `learnings` 列表
+2. 按 type 分发执行：`project_create` / `project_update` / `skill_create` / `skill_update`
+3. 自动去重、互降级（create 遇已存在 → update，update 遇不存在 → create）
+4. trigger 词自动合并（skill_update 时）
+
+**频率控制**：5 分钟内不重复反思；0-1 步 Fast Path 跳过；闲聊/失败任务跳过。
+
+### 4.18 LLM 熔断 (`src/core/agent.py` + `src/core/adapters/base.py`)
+
+三层防护：
+
+1. **fallback 超时递减**：主模型 60s，第1个 fallback 30s，依次 20s、15s
+2. **连续失败熔断**：连续 3 次 LLM 调用失败后退出 tool_loop，返回明确错误提示
+3. **进度卡片熔断**：连续 3 次卡片发送失败后停止尝试
+
+### 4.19 Trace Log (`src/memory/session_store.py`)
+
+在 JSONL 会话文件中写入调试/计费 trace 行，与对话消息行共存：
+
+- `system_prompt`：每次 LLM 调用写一行，相同 prompt_hash 时省略 content
+- `llm_call`：每次实际 LLM 调用（含重试），记录 model/tokens/duration
+- `llm_error`：LLM 调用失败，记录 error_type/detail/duration
+- `tool_call`：每次工具调用，记录 name/arguments
+- `tool_result`：工具结果，≤2KB 内联，>2KB 写入 `tool_bodies/{sha256}.json`
+
+GC：`gc_tool_bodies(ttl_days=60)` 按 mtime 清理过期文件。
+
 ---
 
 ## 五、配置说明
@@ -754,6 +819,16 @@ vim ~/.lampson/config.yaml
 | Compaction 两阶段压缩 | done | 阶段一分类归档 + 阶段二 LLM 摘要（条件触发） |
 | 过期消息阈值 60s→300s | done | listener.py MessageDeduplicator TTL 从 60s 改为 300s |
 | 项目文档 | done | PROJECT.md 完整梳理 |
+| 自我评估指标 (Metrics) | done | TaskCollector 记录每轮任务指标到 metrics.jsonl，/metrics 命令展示统计 |
+| 结构化错误日志 | done | log_error() 写入 errors.jsonl，含上下文快照，自动轮转（20MB） |
+| Trace Log | done | session_store 中的 trace 写入（system_prompt/llm_call/tool_call/tool_result），大型结果 hash 分离 |
+| LLM 熔断机制 | done | fallback 超时递减（30→20→15s），连续3次 LLM 失败退出 tool_loop，进度卡片发送熔断 |
+| 中断抢占 | done | 飞书并发：消息队列 + request_interrupt + AgentInterrupted + 线程池化 |
+| 反思沉淀 (Reflection) | done | 任务完成后自动反思：skill/project create/update，trigger 自动更新，频率控制 |
+| 进度回调 | done | Compaction 支持 progress_callback，临时 LLM 客户端 timeout 600s |
+| /search 命令 | done | 跨 session 搜索历史消息 |
+| /resume 命令 | done | 加载指定 session 对话历史到当前对话 |
+| /new 命令 | done | 结束当前 session，创建空白 session |
 
 ### 8.2 2026-04-25 更新：/model 多模型对比 + 飞书稳定性
 
@@ -894,3 +969,28 @@ vim ~/.lampson/config.yaml
 | `src/selfupdate/updater.py` | 自更新逻辑 |
 | `tests/test_compaction.py` | Compaction 单元测试（14个） |
 | `tests/test_planning.py` | Planning 单元测试（30个） |
+| `src/core/metrics.py` | 任务指标收集（TaskCollector + format_summary） |
+| `src/core/error_log.py` | 结构化错误日志（log_error + query_recent_errors） |
+| `src/core/reflection.py` | 反思沉淀（reflect_and_learn + execute_learnings） |
+| `src/core/interrupt.py` | AgentInterrupted 异常定义 |
+| `src/core/indexer.py` | SkillIndex 索引管理（关键词检索、增量构建） |
+| `src/core/retrieval.py` | 记忆检索（search_memory） |
+| `src/core/adapters/base.py` | BaseModelAdapter 基类（支持 timeout 参数） |
+| `src/core/adapters/minimax.py` | MiniMax 模型适配 |
+| `src/core/adapters/openai_compat.py` | OpenAI 兼容模型适配 |
+| `src/memory/session_store.py` | JSONL 会话存储 + trace 写入 + tool_bodies GC |
+| `src/memory/session_search.py` | FTS5 搜索 + 召回 API |
+| `docs/memory-design.md` | 记忆系统 + Trace Log 设计文档 |
+| `docs/skills-system-design.md` | 技能系统设计文档（含反思机制） |
+| `docs/interrupt-design.md` | 中断抢占设计文档 |
+| `docs/session-continuity-design.md` | Session 连续性设计文档 |
+| `tests/test_metrics.py` | Metrics 单元测试 |
+| `tests/test_error_log.py` | Error Log 单元测试 |
+| `tests/test_trace.py` | Trace Log 单元测试 |
+| `tests/test_reflection.py` | 反思沉淀单元测试（33个） |
+| `tests/test_session_new.py` | /new 命令测试 |
+| `tests/test_indexer.py` | SkillIndex 索引测试 |
+| `tests/test_skills.py` | Skills 系统测试 |
+| `tests/test_skills_on_demand.py` | 按需加载测试 |
+| `tests/test_interrupt_mechanism.py` | 中断机制测试 |
+| `tests/test_adapters.py` | 模型适配层测试 |

@@ -595,3 +595,40 @@ search_sessions(query) → SearchResult[]
 - [x] **三层搜索**：FTS5 BM25（jieba 分词）→ Embedding API（缓存优先）→ 混合打分（0.7/0.3）
 - [x] **不用 ripgrep**：统一用 FTS5，不引入 ripgrep 依赖
 - [x] **不用 sentence-transformers**：去掉本地 PyTorch 依赖，全部走远程 API
+
+---
+
+## 9. Trace Log（session_store.py 已实现）
+
+> 代码：`src/memory/session_store.py` 中的 `append_trace()` / `write_*_trace()` / `gc_tool_bodies()`
+> 测试：`tests/test_trace.py`
+
+JSONL 中除基础消息行外，还有用于调试/计费的 trace 行：
+
+### 行类型
+
+| type | 触发时机 | 关键字段 | 用途 |
+|------|----------|----------|------|
+| `system_prompt` | 每次 LLM 调用 | prompt_hash、content（hash 已存在时 content=null） | 跟踪 system prompt 变化 |
+| `llm_call` | 每次 LLM 调用（含重试） | model、input_tokens、output_tokens、duration_ms、stop_reason | 调试/计费 |
+| `llm_error` | LLM 调用失败 | model、error_type、detail（前500字）、duration_ms | 错误追踪 |
+| `tool_call` | 每次工具调用 | id、name、arguments（完整 JSON） | 调用链追踪 |
+| `tool_result` | 工具执行结果 | id、result_inline（≤2KB）或 result_ref（hash）、error | 结果追踪 |
+
+### assistant vs llm_call 边界
+
+- `assistant`：**对话摘要用**，记录最终回复，只写一次
+- `llm_call`：**调试/计费用**，记录每次实际调用（含 fallback 重试），一次调用链可能有多条
+
+### 大型 tool_result 存储分离
+
+- ≤2KB：`result_inline` 内联在 JSONL 行中
+- \>2KB：SHA256 hash 写入 `tool_bodies/{hash}.json`，JSONL 行只存 `result_ref`（只写不检查，覆盖无影响）
+
+### GC
+
+`gc_tool_bodies(ttl_days=60)` 按 mtime 时间窗口清理过期文件，不做引用计数。
+
+### 查询方式
+
+直接扫 JSONL（用 jq/grep），暂不做额外索引。
