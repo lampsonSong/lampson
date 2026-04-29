@@ -256,13 +256,13 @@ class FeishuListener:
                 flush=True,
             )
 
-            # 过期消息丢弃：超过 60 秒才投递的视为过期
+            # 过期消息丢弃：超过 5 分钟才投递的视为过期（60秒太短会误杀 WebSocket 断连重推的真实新消息）
             create_time_str = getattr(message, "create_time", None)
             if create_time_str:
                 try:
                     create_ts = int(create_time_str) / 1000
                     delay = time.time() - create_ts
-                    if delay > 60:
+                    if delay > 300:
                         print(
                             f"[listener] 消息已过期（投递延迟 {delay:.0f} 秒），丢弃",
                             flush=True,
