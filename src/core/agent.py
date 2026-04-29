@@ -126,7 +126,7 @@ class Agent:
             + ("...(已截断)" if len(skill.body) > 2000 else "")
         )
         # 插在 user message 之前
-        self.llm.messages.append({"role": "system", "content": inject})
+        self.llm.messages.append({"role": "user", "content": inject})
 
     # ── 中断检查 ───────────────────────────────────────────────────────
 
