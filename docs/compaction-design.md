@@ -130,10 +130,7 @@ def read_target_file(target: str) -> str:
 ```python
 def integrate(archive_items: list[dict], existing_content: str, target: str, msg_map: dict) -> str:
     """
-    整合新旧内容。
-
-    整合策略（见"归档策略"）：
-    - 只做 append，不做 merge/update/evict
+    当前只实现 append：追加新归档条目到已有文件末尾，不做 merge/update/evict。
     - LLM 在归档文本里自己处理去重和结构
     """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -165,11 +162,11 @@ def safe_write(path: Path, content: str) -> None:
 
 ## 归档策略
 
-当前采用 append-only 策略，merge/update/evict 作为未来演进方向。
+当前只实现了 **append**（简单追加），merge/update/evict 为未来演进方向（见代码中 _integrate 函数）。
 
 | 策略 | 条件 | 行为 |
 |------|------|------|
-| **append** | 默认 | 直接追加，LLM 在归档文本里自己处理去重和结构 |
+| **append** | 无冲突 | 直接追加新内容 |
 | **merge** | 同一 target 多次 archive | 合并多条归档为一个连贯段落 |
 | **update** | 已有内容与新内容矛盾 | 替换旧内容，保留变更历史 |
 | **evict** | 已有内容过期或被取代 | 删除旧条目 |
@@ -375,9 +372,9 @@ class ToolRef(TypedDict):
     reason: str
 
 
-class ClassifyResult(TypedDict):
-    decisions: list[Decision]
-    tool_refs: dict[str, ToolRef]
+# 注意：实际代码中 _classify_messages 返回 dict[str, Any]
+# 通过 result.get("decisions") 和 result.get("tool_refs") 分别取值
+# 下方 ClassifyResult 仅作设计参考
 
 
 def should_trigger(messages: list[dict], stop_reason: str, config: CompactionConfig) -> bool:
@@ -389,11 +386,12 @@ def should_trigger(messages: list[dict], stop_reason: str, config: CompactionCon
     return estimated_tokens >= threshold
 
 
-def classify_messages(messages: list[dict], existing_files: dict[str, str]) -> ClassifyResult:
-    """Step 1：LLM 分类，不做写入。"""
+def classify_messages(messages: list[dict], existing_files: dict[str, str]) -> tuple[list[Decision], dict[str, ToolRef]]:
+    """Step 1：LLM 分类，不做写入。返回 (decisions, tool_refs) 元组。"""
     prompt = _build_classify_prompt(messages, existing_files)
     response = llm.complete(prompt)
-    return json.loads(response)
+    parsed = json.loads(response)
+    return parsed["decisions"], parsed["tool_refs"]
 
 
 def _build_classify_prompt(messages: list[dict], existing_files: dict[str, str]) -> str:
@@ -453,26 +451,48 @@ def run_compaction(messages: list[dict]) -> list[dict]:
     """
     # Step 1: 分类（不涉及写入）
     existing_files = _list_existing_files()
-    result = classify_messages(messages, existing_files)
+    decisions, tool_refs = classify_messages(messages, existing_files)
 
     # 提取 archive 目标列表（供后续写入 JSONL 和文件用）
     archive_targets = [
         {"target": d["target"], "entry_count": 1}
-        for d in result["decisions"]
+        for d in decisions
         if d["action"] == "archive" and d.get("target")
     ]
 
     # Step 2: 写 segment_boundary 到 session JSONL（原子性保障的核心）
-    _write_segment_boundary(messages, archive_targets)
+    _write_segment_boundary(messages, archive_targets, session_id, session_store)
 
     # Step 3: 读取已有内容 + 整合写入 skill/project
-    _write_archive_entries(result["decisions"], messages)
+    _write_archive_entries(decisions, messages)
 
     # Step 4: 写压缩日志
-    _log_compaction(messages, result, archive_targets)
+    _log_compaction(messages, decisions, tool_refs, archive_targets, config)
 
-    # Step 5: 构建剩余消息列表
-    remaining = _build_remaining_messages(messages, result)
+    # Step 5: 构建剩余消息列表（阶段一）
+    remaining = _build_remaining_messages(messages, decisions, tool_refs)
+
+    # Step 6: 阶段二 — 摘要压缩（条件触发）
+    original_tokens = _estimate_tokens(messages)
+    remaining_tokens = _estimate_tokens(remaining)
+    if (
+        original_tokens > 0
+        and remaining_tokens > original_tokens * config.summary_trigger_ratio
+    ):
+        # 分离最近 N 轮 vs 其余 keep 消息
+        recent_messages, older_messages = _split_recent_turns(remaining, config.keep_recent_n)
+        # 跳过已有的 compaction summary
+        older_messages = [m for m in older_messages if not m.get("is_compaction_summary")]
+        if older_messages:
+            summary_text = _generate_summary(older_messages)
+            summary_msg = {
+                "role": "assistant",
+                "content": f"## 对话摘要
+
+{summary_text}",
+                "is_compaction_summary": True,
+            }
+            remaining = [summary_msg] + recent_messages
 
     return remaining
 
@@ -544,30 +564,38 @@ def _write_archive_entries(decisions: list[Decision], messages: list[dict]) -> N
             by_target.setdefault(d["target"], []).append(d)
 
     for target, entries in by_target.items():
-        existing = read_target_file(target)
-        new_content = integrate(entries, existing, target, msg_map)
+        existing = _read_target_file(target)
+        new_content = _integrate(entries, existing, target, msg_map)
         path = _target_to_path(target)
-        safe_write(path, new_content)
+        _safe_write(path, new_content)
 
 
-def integrate(entries: list[dict], existing: str, target: str, msg_map: dict) -> str:
-    """只追加，不做 merge/update/evict。"""
+def _integrate(entries: list[dict], existing: str, target: str, msg_map: dict) -> str:
+    """当前只实现 append：追加新归档条目到已有文件末尾。merge/update/evict 为未来计划。
+    """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-    new_entries = "\n".join(
-        f"- {msg_map[e['msg_id']]['content']} _(归档: {timestamp})_"
-        for e in entries
-        if e["msg_id"] in msg_map
-    )
-    return f"{existing}\n{new_entries}\n"
+    lines = []
+    for e in entries:
+        mid = e.get("msg_id", "")
+        if mid in msg_map:
+            content = msg_map[mid].get("content", "")
+            lines.append(f"- {content} _(归档: {timestamp})_")
+    if not lines:
+        return existing
+    new_entries = "
+".join(lines)
+    return f"{existing}
+{new_entries}
+"
 
 
-def _build_remaining_messages(messages: list[dict], result: ClassifyResult) -> list[dict]:
-    """保留 keep 列表 + 最近 3 条，原始消息不摘要。"""
+def _build_remaining_messages(messages: list[dict], decisions: list[dict], tool_refs: dict, keep_recent_n: int = 3) -> list[dict]:
+    """保留 keep 列表 + 最近 N 条，原始消息不摘要。"""
     keep_ids = {
-        d["msg_id"] for d in result["decisions"]
+        d["msg_id"] for d in decisions
         if d["action"] == "keep"
     }
-    keep_ids |= {k for k, v in result["tool_refs"].items() if v["action"] == "keep"}
+    keep_ids |= {k for k, v in tool_refs.items() if v["action"] == "keep"}
 
     remaining = [msg for msg in messages if msg["id"] in keep_ids]
 
@@ -578,7 +606,7 @@ def _build_remaining_messages(messages: list[dict], result: ClassifyResult) -> l
     return remaining
 
 
-def _log_compaction(original: list, result: ClassifyResult, archive_targets: list[dict]) -> None:
+def _log_compaction(original: list, decisions: list[dict], tool_refs: dict, archive_targets: list[dict], config: CompactionConfig) -> None:
     """写压缩操作日志。日志文件超过 10MB 时自动轮转（保留最近 5 个文件）。"""
     COMPACTION_LOG.parent.mkdir(parents=True, exist_ok=True)
 
@@ -590,7 +618,7 @@ def _log_compaction(original: list, result: ClassifyResult, archive_targets: lis
         f.write(json.dumps({
             "ts": datetime.now().isoformat(),
             "original_count": len(original),
-            "decisions": result,
+            "decisions": decisions,
             "archive_targets": archive_targets,
         }, ensure_ascii=False) + "\n")
 
@@ -661,7 +689,7 @@ Session 退出
 - [ ] Step 3 写前备份，写后校验
 - [ ] 压缩后 context token < 80% threshold
 - [ ] `.compaction_log.jsonl` 记录每次操作，超过 10MB 自动轮转
-- [ ] 只做 append，不做 merge/update/evict
+- [ ] 整合写入当前为 append-only（简单追加），merge/update/evict 为未来演进方向
 - [ ] tool_calls 结果依据 `referenced_tool_results` 字段判断是否 keep
 - [ ] 召回路径由 memory-design.md 覆盖
 - [ ] session 退出时触发 core.md 更新检查

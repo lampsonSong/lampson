@@ -305,13 +305,15 @@ class FeishuListener:
                 progress_lines: list[str] = []
                 last_update_ts = 0.0
                 update_interval = 1.5
+                _card_fail_count = 0
+                _MAX_CARD_FAILS = 3
 
                 while True:
                     try:
                         event = _progress_queue.get(timeout=0.5)
                     except queue.Empty:
                         if _progress_done.is_set():
-                            if progress_lines:
+                            if progress_lines and _card_fail_count < _MAX_CARD_FAILS:
                                 if progress_msg_id is None:
                                     self._send_progress_card(
                                         chat_id, progress_lines, finished=True
@@ -329,14 +331,15 @@ class FeishuListener:
                     if event.get("type") == "progress_reset":
                         # 阶段总结已发出，结束旧进度卡片，清空状态以便新开卡片
                         if progress_lines:
-                            if progress_msg_id is None:
-                                self._send_progress_card(
-                                    chat_id, progress_lines, finished=True
-                                )
-                            else:
-                                self._update_progress_card(
-                                    progress_msg_id, progress_lines, finished=True
-                                )
+                            if _card_fail_count < _MAX_CARD_FAILS:
+                                if progress_msg_id is None:
+                                    self._send_progress_card(
+                                        chat_id, progress_lines, finished=True
+                                    )
+                                else:
+                                    self._update_progress_card(
+                                        progress_msg_id, progress_lines, finished=True
+                                    )
                         progress_lines = []
                         progress_msg_id = None
                         last_update_ts = 0.0
@@ -348,12 +351,18 @@ class FeishuListener:
                         )
                         now = time.monotonic()
                         if now - last_update_ts >= update_interval:
-                            if progress_msg_id is None:
-                                progress_msg_id = self._send_progress_card(
-                                    chat_id, progress_lines
-                                )  # None 表示发送失败，下次重试发送
-                            else:
-                                self._update_progress_card(progress_msg_id, progress_lines)
+                            if _card_fail_count < _MAX_CARD_FAILS:
+                                if progress_msg_id is None:
+                                    progress_msg_id = self._send_progress_card(
+                                        chat_id, progress_lines
+                                    )
+                                    if progress_msg_id is None:
+                                        _card_fail_count += 1
+                                else:
+                                    try:
+                                        self._update_progress_card(progress_msg_id, progress_lines)
+                                    except Exception:
+                                        _card_fail_count += 1
                         continue
 
                     if event.get("type") != "tool_progress":
@@ -377,12 +386,18 @@ class FeishuListener:
                     if now - last_update_ts < update_interval:
                         continue
 
-                    if progress_msg_id is None:
-                        progress_msg_id = self._send_progress_card(
-                            chat_id, progress_lines
-                        )  # None 表示发送失败，下次重试发送
-                    else:
-                        self._update_progress_card(progress_msg_id, progress_lines)
+                    if _card_fail_count < _MAX_CARD_FAILS:
+                        if progress_msg_id is None:
+                            progress_msg_id = self._send_progress_card(
+                                chat_id, progress_lines
+                            )
+                            if progress_msg_id is None:
+                                _card_fail_count += 1
+                        else:
+                            try:
+                                self._update_progress_card(progress_msg_id, progress_lines)
+                            except Exception:
+                                _card_fail_count += 1
                     last_update_ts = time.monotonic()
 
             _worker = threading.Thread(

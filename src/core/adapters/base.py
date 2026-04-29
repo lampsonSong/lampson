@@ -130,6 +130,7 @@ class BaseModelAdapter(ABC):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        timeout: float | None = None,
     ) -> ChatCompletion:
         """调用 chat.completions.create；不修改 messages。
 
@@ -142,6 +143,8 @@ class BaseModelAdapter(ABC):
         if tools and self.supports_native_tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
+        if timeout is not None:
+            kwargs["timeout"] = timeout
         try:
             return self.llm.client.chat.completions.create(**kwargs)
         except APITimeoutError as e:

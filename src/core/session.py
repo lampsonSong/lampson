@@ -536,7 +536,7 @@ class Session:
     def feishu_ready(self) -> bool:
         return self._feishu_initialized
 
-    def save_summary(self) -> None:
+    def cleanup(self) -> None:
         """结束 session（退出时调用）。"""
         # 写入 session_end
         if self.session_id:

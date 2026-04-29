@@ -73,7 +73,7 @@ JSONL 中共四种行类型：
 | `session_start` | session 创建时 | 写入 sessions 表（started_at, source） |
 | 普通消息行 | 每条消息 | user/assistant，含 content、tool_calls、tool_result_summary、referenced_tool_results |
 | `segment_boundary` | compaction 触发时 | 标记 segment 结束，含 next_segment_started_at |
-| `session_end` | session 退出时 | 标记 session 结束；summary 字段在**下次启动时检查并补生成**（正常退出无 summary，下一次启动时 LLM 补生成后写入） |
+| `session_end` | session 退出时 | 标记 session 结束。不再生成或注入 summary（见 session-continuity-design.md）。 |
 
 ---
 
@@ -119,7 +119,7 @@ JSONL 中共四种行类型：
 |------|----------|------|
 | `session_start` | session 创建时 | 写入 sessions 表（started_at, source），格式见下方 |
 | `segment_boundary` | compaction 触发时 | 标记 segment 结束，含 next_segment_started_at 和 archive（归档目标列表，供 resume 重建上下文） |
-| `session_end` | session 退出 | 标记 session 正常结束；summary 字段在下一次启动时检查并补生成 |
+| `session_end` | session 退出 | 标记 session 正常结束。不再生成 summary（session summary 机制已移除）。 |
 
 **session_start 示例**：
 
@@ -141,11 +141,7 @@ JSONL 中共四种行类型：
 {"ts": 1745809999000, "session_id": "abc123", "segment": 1, "type": "session_end"}
 ```
 
-**session_end 示例（下次启动时补生成的 summary）**：
-
-```jsonl
-{"ts": 1745809999000, "session_id": "abc123", "segment": 1, "type": "session_end", "summary": "用户正在实现 SessionManager 的 idle 超时重置机制，已完成超时检测和重置流程，下一步需要集成前端页面。"}
-```
+**session_end 只标记结束，不生成 summary**。summary 补生成机制已移除（见 session-continuity-design.md）。
 
 ### 3.3 存储范围
 
@@ -181,7 +177,6 @@ JSONL 中共四种行类型：
 | 工具调用返回 | **不单独写入**（referenced_tool_results 由 Agent 分析回复内容后生成，随 assistant 行一起存） |
 | 运行时触发压缩 | segment_boundary 行（含 next_segment_started_at 和 archive），由 Agent 的 `maybe_compact()` 调用 |
 | Session 退出 | `session_end` 行 + 检查 core.md 是否需要更新 |
-| 新 session 启动 | 检查上一条 session 有无 summary；无则读 JSONL 补生成后写入 sessions 表，再 inject |
 | Session 退出时 | core.md 更新（累计 archive 次数 > 5 或距上次更新 > N 小时，由 LLM 抽取 skill/project 精华） |
 
 > **注意**：tool 返回结果的 `referenced_by` 信息通过 assistant 消息的 `referenced_tool_results` 字段持久化（见 3.2 节）。该字段由 Agent 在写入 assistant 消息时生成，compaction 读取进行分类决策。
@@ -200,7 +195,7 @@ CREATE TABLE sessions (
     started_at INTEGER,           -- 毫秒时间戳，session_start 行的 ts
     ended_at INTEGER,            -- 毫秒时间戳，session_end 行的 ts
     source TEXT NOT NULL,        -- 启动来源，不做白名单强制校验
-    summary TEXT                 -- session 结束时的进度总结（下次启动时检查，无则 LLM 补生成）
+    summary TEXT                 -- （已废弃）session summary 机制已移除，不再使用此字段
 );
 ```
 

@@ -70,6 +70,8 @@ class Agent:
         self.interim_sender: Callable[[str], None] | None = None
         # 工具调用计数器（跨多次 tool_loop 累计，用于判断是否应继续循环）
         self._total_tool_calls: int = 0
+        # 连续 LLM 调用失败计数：连续3次失败后触发熔断
+        self._consecutive_llm_failures: int = 0
 
     def refresh_tools(self) -> None:
         """重新加载工具列表（外部注册新工具后调用）。"""
@@ -194,7 +196,7 @@ class Agent:
         # 检查中断（LLM 调用前）
         self.check_interrupt()
 
-        # 1. 先试主模型
+        # 1. 先试主模型（默认60s）
         try:
             return self.adapter.chat(self.llm.messages, tools=tools)
         except LLMContextTooLongError:
@@ -206,13 +208,14 @@ class Agent:
             logger.warning(f"主模型 {self.llm.model} 调用失败（{type(e).__name__}），尝试 fallback: {e}")
             self._on_model_switch(f"主模型 {self.llm.model} 失败，切换 fallback...")
 
-        # 2. 依次试 fallback，成功即返回
-        for fb_llm, fb_adapter in self.fallback_models:
-            logger.warning(f"尝试 fallback: {fb_llm.model}")
+        # 2. 依次试 fallback，超时递减：30s, 20s, 15s, 15s...
+        for i, (fb_llm, fb_adapter) in enumerate(self.fallback_models):
+            fb_timeout = max(15, 30 - i * 10)  # 30, 20, 15, 15, ...
+            logger.warning(f"尝试 fallback: {fb_llm.model} (timeout={fb_timeout}s)")
             self._on_model_switch(f"尝试 {fb_llm.model}...")
             try:
                 fb_llm.messages = list(self.llm.messages)
-                result = fb_adapter.chat(fb_llm.messages, tools=tools)
+                result = fb_adapter.chat(fb_llm.messages, tools=tools, timeout=fb_timeout)
                 self._on_model_switch(f"已切换到 {fb_llm.model}")
                 return result
             except LLMContextTooLongError:
@@ -231,12 +234,17 @@ class Agent:
             for round_num in range(self.max_tool_rounds):
                 try:
                     response = self._chat_with_fallback(tools=self._tools)
+                    self._consecutive_llm_failures = 0  # 新增：成功则重置
                 except AgentInterrupted:
                     raise  # 直接上抛，不吞掉
                 except LLMContextTooLongError as e:
                     logger.warning(f"Prompt 超长: {e}")
                     return "[上下文过长，请使用 /compaction 手动压缩后重试]"
                 except LLMError as e:
+                    self._consecutive_llm_failures += 1
+                    if self._consecutive_llm_failures >= 3:
+                        logger.error(f"连续 {self._consecutive_llm_failures} 次 LLM 调用失败，熔断退出")
+                        return f"[LLM 错误] 连续多次调用失败，LLM 服务暂时不可用。请稍后再试。\n最后一次错误: {e}"
                     return f"[LLM 错误] {e}"
 
                 # 检查中断（收到 LLM 响应后、解析 tool_calls 前）
@@ -359,6 +367,7 @@ class Agent:
 
     def run(self, user_input: str) -> str:
         """处理一轮用户输入，返回最终回复文本。"""
+        self._consecutive_llm_failures = 0  # 新增：每次新任务开始时重置
         self.llm.add_user_message(user_input)
         try:
             result = self._run_tool_loop()

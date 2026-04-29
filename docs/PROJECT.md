@@ -67,10 +67,7 @@ lampson 命令（独立进程）
 │                                                           │
 │   session_manager.get_or_create(channel, sender_id)       │
 │   ├─ 检查 last_activity_at 是否 > 180 分钟                │
-│   │   └─ 超时：_reset_session()                           │
-│   │       1. 调用 LLM 生成 progress summary               │
-│   │       2. session_store.end_session(summary=...)        │
-│   │       3. _create_session() 自动注入旧 summary         │
+│   │   └─ 超时：end_session() → 创建新空白 session         │
 │   └─→ 返回 Session 实例                                   │
 │                                                           │
 │   channel 路由规则：                                      │
@@ -89,7 +86,7 @@ lampson 命令（独立进程）
 │                                                           │
 │   Session.from_config(config)  工厂方法（每个 Session 调用一次）│
 │   Session.handle_input(text)   统一入口 → HandleResult     │
-│   Session.exit()               退出时保存摘要 + 触发压缩    │
+│   Session.cleanup()            退出时清理（session_end + core.md 更新检查）│
 └───────────────────────────────┬──────────────────────────┘
                                 │
                                 ▼
@@ -137,7 +134,7 @@ lampson 命令（独立进程）
 |------|------|------|
 | Daemon 入口 | `src/daemon.py` | daemon 主进程。加载配置、启动飞书监听、boot_tasks 机制、主循环阻塞 |
 | CLI 入口 | `src/cli.py` | 纯交互入口（Gateway 层）。单条查询 / REPL 循环，不启动飞书监听，不连 daemon |
-| SessionManager | `src/core/session_manager.py` | 管理多个 Session 实例，按 channel+sender_id 路由；**支持 3 小时 idle 超时自动重置 + 跨 session 进度延续** |
+| SessionManager | `src/core/session_manager.py` | 管理多个 Session 实例，按 channel+sender_id 路由；支持 3 小时 idle 超时自动重置 |
 | Session | `src/core/session.py` | Agent 生命周期 + 命令路由 + 压缩触发 + 飞书初始化 |
 | Agent | `src/core/agent.py` | LLM 主循环，工具调用分发，规划执行，max_tool_rounds 循环 |
 | Planning | `src/planning/` | 任务规划器 + 步骤执行器 + Plan 状态机 |
@@ -155,7 +152,6 @@ lampson 命令（独立进程）
 | FileOps Tool | `src/tools/fileops.py` | 文件读写，带大小限制保护 |
 | Web Tool | `src/tools/web.py` | DuckDuckGo 网页搜索 |
 | Compaction | `src/core/compaction.py` | 上下文压缩：归档+摘要，可迭代 |
-| Session Resume | `src/core/session_resume.py` | **新增**：idle 超时生成 progress summary + 新 session 自动加载旧 summary |
 
 
 ## 三、功能清单
@@ -206,7 +202,7 @@ lampson 命令（独立进程）
 - WebSocket 长连接监听（非阻塞 daemon thread，路由到 SessionManager）
 - 消息去重器（基于 message_id 的滑动窗口 TTL）
 - daemon 模式常驻监听飞书，CLI 不启动 listener
-- **Session idle 超时重置**：3 小时无活动自动结束当前 session，生成 progress summary，新 session 创建时自动加载旧 summary 延续上下文
+- **Session idle 超时重置**：3 小时无活动自动结束当前 session，新 session 为空白
 
 #### 自更新
 - `/update <需求描述>`：LLM 分析需求 → 生成代码修改方案 → 用户确认 → git 分支执行
@@ -287,8 +283,7 @@ class Session:
 
     def init_feishu(self) -> bool              # 飞书客户端初始化
     def start_feishu_listener(self) -> None    # 启动 WebSocket 监听（daemon thread，非阻塞）
-    def save_summary(self) -> None             # 退出时保存会话摘要
-    def _inject_resume_summary(self, summary) -> None  # 注入上一条 session 的 progress summary 到 system prompt
+    def cleanup(self) -> None                  # 退出时清理（写入 session_end + core.md 更新检查）
 ```
 
 **新增属性**：
@@ -297,7 +292,7 @@ class Session:
 
 ### 4.3 SessionManager Idle 重置 (`src/core/session_manager.py`)
 
-**核心机制**：Session 3 小时（180 分钟）无任何对话活动自动结束，生成 progress summary，新 session 创建时自动加载旧 summary。
+**核心机制**：Session 3 小时（180 分钟）无任何对话活动自动结束，创建新的空白 session。
 
 ```python
 IDLE_TIMEOUT_MINUTES = 180  # 3 小时
@@ -305,40 +300,19 @@ IDLE_TIMEOUT_MINUTES = 180  # 3 小时
 class SessionManager:
     def get_or_create(self, channel, sender_id) -> Session:
         # 进入时检查旧 session 是否 idle 超时
-        # 超时：_reset_session() → 生成 summary → 结束旧 session → 创建新 session → 注入旧 summary
+        # 超时：end_session() → 创建新空白 session
         # 未超时：直接返回现有 session
 
     def _is_idle_expired(self, session) -> bool:
         # 检查 session.last_activity_at > 180 分钟
 
     def _reset_session(self, channel, sender_id, is_cli) -> None:
-        # 1. 读取旧 session 所有消息
-        # 2. 调用 LLM 生成 "任务/已完成/下一步" progress summary
-        # 3. session_store.end_session(old_id, summary=summary)
-        # 4. _create_session() 自动加载上一条已结束 session 的 summary
-        # 5. 新 session._inject_resume_summary() 追加到 system prompt
+        # 1. session_store.end_session(old_id)
+        # 2. _create_session() 创建新空白 session
 
     def _create_session(self, channel, sender_id) -> Session:
         # 1. session_store.create_session() 写入新 session
-        # 2. session_store.get_last_session_summary() 加载上一条已结束 session 的 summary
-        # 3. Session.from_config() 创建 Session
-        # 4. 若有 summary，调用 _inject_resume_summary() 注入到 system prompt
-```
-
-**Summary 生成**（`src/core/session_resume.py`）：
-- Prompt 要求：简洁、200字以内、三要素（任务/已完成/下一步）
-- 生成失败时 summary 为空，不阻塞重置流程
-- 只在 idle reset 时生成，手动 `/stop` 不生成
-
-**注入格式**：
-```
-## 上一轮会话进展
-
-上一轮会话因超过 3 小时无活动而结束，以下是当时的进展：
-
-{summary}
-
-请继续推进上述任务。如果任务已完成或有新需求，请告知用户。
+        # 2. Session.from_config() 创建 Session
 ```
 
 **命令路由**：`/help` `/config` `/memory` `/skills` `/feishu` `/update` `/exit` 全部在 Session 内部处理。
@@ -416,7 +390,7 @@ def dispatch(tool_name, arguments_raw):
 
 两层架构：
 - **core.md**：键值对风格，启动全量加载
-- **sessions/YYYY-MM-DD.md**：退出时 LLM 生成摘要，按时间段追加
+- **sessions/YYYY-MM-DD.md**：原始对话 JSONL 存档，按日期组织
 
 关键函数：
 - `add_memory()`：追加时间戳条目
@@ -767,7 +741,6 @@ vim ~/.lampson/config.yaml
 | 飞书 WebSocket 监听 | done | 长连接 + 去重，走 Session |
 | 飞书轮询监听 | done | 备选方案（已删除，只保留 WebSocket） |
 | 核心记忆 | done | core.md 全量加载 |
-| 会话摘要 | done | 退出时写入 |
 | 技能系统 | done | 发现/匹配/加载 |
 | 自更新 | done | git 分支 + 回滚 |
 | 首次运行引导 | done | API Key 配置 |
@@ -776,6 +749,10 @@ vim ~/.lampson/config.yaml
 | 任务规划 (Planning) | done | Plan-and-Execute，30个测试全通过 |
 | /model 多模型对比 | done | `/model all` 并发实时流式对比，`/model <name>` 切换（方案B） |
 | 过期消息丢弃 | done | 飞书投递延迟 >60s 的消息自动丢弃 |
+| 新消息抢占中断机制 | done | 飞书并发渠道：新消息入队+中断当前任务+恢复 |
+| LLM 错误分类 | done | 4种自定义异常（RateLimitError / AuthError / ConnectionError / ServerError） |
+| Compaction 两阶段压缩 | done | 阶段一分类归档 + 阶段二 LLM 摘要（条件触发） |
+| 过期消息阈值 60s→300s | done | listener.py MessageDeduplicator TTL 从 60s 改为 300s |
 | 项目文档 | done | PROJECT.md 完整梳理 |
 
 ### 8.2 2026-04-25 更新：/model 多模型对比 + 飞书稳定性
@@ -852,9 +829,6 @@ vim ~/.lampson/config.yaml
 
 | 优先级 | 功能 | 依赖 |
 |--------|------|------|
-| ~~P0~~ | ~~多轮任务规划器（Planner）~~ | ~~已完成~~ |
-| ~~P0~~ | ~~步骤跟踪 + Plan 状态机~~ | ~~已完成~~ |
-| ~~P0~~ | ~~失败处理 + 参数引用~~ | ~~已完成~~ |
 | P0 | 中途校验（Checkpoint）+ Replan | Planner |
 | P0 | 进度报告 + 人工确认点 | Planner |
 | P1 | `/skills edit`、`/skills delete` | - |
@@ -873,14 +847,13 @@ vim ~/.lampson/config.yaml
 ## 九、已知问题和限制
 
 1. **飞书 WebSocket 重连**：网络波动时断线后不会自动重连，需手动重启
-2. **Session summary 生成**：退出时用临时 LLMClient 生成摘要，若 API 异常则回退到截取前500字
-3. **危险命令拦截**：正则匹配可能漏掉变形写法
-4. **文件大小限制**：读文件 100KB 上限，大文件场景需多次分段读取
-5. **Skills 语义匹配**：`match_skill_with_llm()` 需要额外 LLM 调用，有延迟和 token 开销
-6. **Compaction 压缩质量**：依赖 LLM 对内容价值的判断，可能误判归档/丢弃
-7. **Planning prompt 待优化**：Replan 场景的 prompt 需要更多测试数据打磨
-8. **MiniMax 不稳定读 machines**：有时跳过 `project_context("machines")` 直接猜 SSH 别名，需在 system prompt 中强制要求
-9. **GPTOssModel 输出不确定**：低 temperature（0.3）下稳定走 `<tool_call:xxx>` 格式，高 temperature 偶尔返回空 content
+2. **危险命令拦截**：正则匹配可能漏掉变形写法
+3. **文件大小限制**：读文件 100KB 上限，大文件场景需多次分段读取
+4. **Skills 语义匹配**：`match_skill_with_llm()` 需要额外 LLM 调用，有延迟和 token 开销
+5. **Compaction 压缩质量**：依赖 LLM 对内容价值的判断，可能误判归档/丢弃
+6. **Planning prompt 待优化**：Replan 场景的 prompt 需要更多测试数据打磨
+7. **MiniMax 不稳定读 machines**：有时跳过 `project_context("machines")` 直接猜 SSH 别名，需在 system prompt 中强制要求
+8. **GPTOssModel 输出不确定**：低 temperature（0.3）下稳定走 `<tool_call:xxx>` 格式，高 temperature 偶尔返回空 content
 
 ---
 

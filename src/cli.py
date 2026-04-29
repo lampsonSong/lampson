@@ -197,8 +197,8 @@ def _run_repl(config: dict) -> None:
                 print(result.compaction_msg)
 
     finally:
-        print("\n正在保存会话摘要...")
-        session.save_summary()
+        print("\n正在清理会话...")
+        session.cleanup()
         print("再见！")
 
 

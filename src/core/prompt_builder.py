@@ -58,13 +58,6 @@ TOOL_USE_ENFORCEMENT = (
     "回答提问、聊天、确认等场景直接回复即可，不需要硬塞工具调用。"
 )
 
-SESSION_CONTINUITY_GUIDANCE = (
-    "当用户提到\"上次\"、\"继续\"、\"之前那个\"等暗示延续旧对话时，使用 session(action='load') 恢复上一次对话历史。\n"
-    "session(action='load') 会把旧 session 的消息加载到当前对话中，你就能自然延续上下文。\n"
-    "如果用户只是泛泛提问（如\"上次让我干啥\"），先调 session(action='load') 加载最近 session，再回答。\n"
-    "用 session(action='search') 搜索跨多个 session 的历史内容。"
-)
-
 # ── Frontmatter 解析 ─────────────────────────────────────────────────────────
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
@@ -350,7 +343,6 @@ class PromptBuilder:
         if skills_block.strip():
             l2.append(skills_block)
         l2.extend([
-            SESSION_CONTINUITY_GUIDANCE,
             SKILLS_GUIDANCE,
             TOOL_USE_ENFORCEMENT,
         ])
