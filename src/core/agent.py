@@ -187,6 +187,21 @@ class Agent:
 
     # ── LLM 调用 ───────────────────────────────────────────────────────
 
+    def _order_fallbacks(self, primary_base: str) -> list[tuple[LLMClient, BaseModelAdapter]]:
+        """重排 fallback 模型：优先不同供应商，再排同供应商。
+
+        当主模型因限流/超时失败时，同供应商的模型大概率也有问题，
+        优先尝试不同 base_url 的 fallback 可以更快找到可用模型。
+        """
+        diff_vendor: list[tuple[LLMClient, BaseModelAdapter]] = []
+        same_vendor: list[tuple[LLMClient, BaseModelAdapter]] = []
+        for fb in self.fallback_models:
+            if fb[0].base_url != primary_base:
+                diff_vendor.append(fb)
+            else:
+                same_vendor.append(fb)
+        return diff_vendor + same_vendor
+
     def _chat_with_fallback(self, tools=None):
         """每次调用都从主模型开始，失败时按顺序尝试 fallback。
 
@@ -208,14 +223,18 @@ class Agent:
             logger.warning(f"主模型 {self.llm.model} 调用失败（{type(e).__name__}），尝试 fallback: {e}")
             self._on_model_switch(f"主模型 {self.llm.model} 失败，切换 fallback...")
 
-        # 2. 依次试 fallback，超时递减：30s, 20s, 15s, 15s...
-        for i, (fb_llm, fb_adapter) in enumerate(self.fallback_models):
-            fb_timeout = max(15, 30 - i * 10)  # 30, 20, 15, 15, ...
-            logger.warning(f"尝试 fallback: {fb_llm.model} (timeout={fb_timeout}s)")
+        # 2. 按供应商分组重排 fallback：优先尝试不同供应商的模型
+        primary_base = self.llm.base_url
+        ordered = self._order_fallbacks(primary_base)
+
+        # 3. 依次试 fallback，统一 45s 超时（不递减）
+        FALLBACK_TIMEOUT = 45
+        for fb_llm, fb_adapter in ordered:
+            logger.warning(f"尝试 fallback: {fb_llm.model} (timeout={FALLBACK_TIMEOUT}s)")
             self._on_model_switch(f"尝试 {fb_llm.model}...")
             try:
                 fb_llm.messages = list(self.llm.messages)
-                result = fb_adapter.chat(fb_llm.messages, tools=tools, timeout=fb_timeout)
+                result = fb_adapter.chat(fb_llm.messages, tools=tools, timeout=FALLBACK_TIMEOUT)
                 self._on_model_switch(f"已切换到 {fb_llm.model}")
                 return result
             except LLMContextTooLongError:

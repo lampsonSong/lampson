@@ -83,6 +83,12 @@ class FeishuListener:
         self._dedup = MessageDeduplicator()
         self._ws_client: Any | None = None
         self._ws_thread: threading.Thread | None = None
+        # 线程池：将耗时的 session.handle_input 从 WebSocket 事件循环线程中脱离，
+        # 确保事件循环线程立即释放，能接收下一条消息并触发中断抢占。
+        import concurrent.futures
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="feishu-handler"
+        )
         self._lark_client = (
             lark.Client.builder()
             .app_id(app_id)
@@ -182,14 +188,11 @@ class FeishuListener:
             return None
 
     def _update_progress_card(self, message_id: str, lines: list[str], finished: bool = False) -> None:
-        """更新已有的进度卡片。"""
+        """更新已有的进度卡片；失败时 re-raise 供熔断计数。"""
         from src.feishu.client import get_client
         card = self._make_progress_card(lines, finished=finished)
-        try:
-            client = get_client()
-            client.update_message(message_id=message_id, card=card)
-        except Exception as e:
-            print(f"[listener] 更新进度卡片失败: {e}", flush=True)
+        client = get_client()
+        client.update_message(message_id=message_id, card=card)
 
     # ─── Reaction（ack 表情）─────────────────────────────────────────────
 
@@ -290,7 +293,35 @@ class FeishuListener:
                 print("[listener] SessionManager 未初始化，无法处理消息", flush=True)
                 return
 
-            # 通过 SessionManager 获取该 sender_id 对应的 Session
+            # Ack reaction: 在事件循环线程中快速完成
+            reaction_id = self._add_reaction(message_id)
+
+            # 提交到线程池，立即释放事件循环线程以接收后续消息
+            self._executor.submit(
+                self._dispatch_to_session,
+                open_id=open_id,
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+                reaction_id=reaction_id,
+            )
+
+        except Exception as e:
+            print(f"[listener] 处理消息时发生错误：{e}", flush=True)
+
+    def _dispatch_to_session(
+        self,
+        open_id: str,
+        chat_id: str,
+        message_id: str,
+        text: str,
+        reaction_id: str | None,
+    ) -> None:
+        """线程池中执行：session.handle_input + 进度卡片 + 发送回复。
+
+        从 WebSocket 事件循环线程脱离后执行，不阻塞后续消息接收。
+        """
+        try:
             session = self._mgr.get_or_create("feishu", open_id)
             session.partial_sender = lambda t: self._send_reply(chat_id, t)
             session._reply_callback = lambda t: self._send_reply(chat_id, t)
@@ -329,7 +360,6 @@ class FeishuListener:
                         continue
 
                     if event.get("type") == "progress_reset":
-                        # 阶段总结已发出，结束旧进度卡片，清空状态以便新开卡片
                         if progress_lines:
                             if _card_fail_count < _MAX_CARD_FAILS:
                                 if progress_msg_id is None:
@@ -410,28 +440,18 @@ class FeishuListener:
             def _progress_cb(event: dict) -> None:
                 _progress_queue.put(event)
 
-            # Ack reaction: 收到消息立即加表情
-            reaction_id = self._add_reaction(message_id)
-
             session.set_message_context(message_id=message_id, chat_id=chat_id)
             session.agent.progress_callback = _progress_cb
             session.agent.interim_sender = lambda t: self._send_reply(chat_id, t)
             try:
                 result = session.handle_input(text)
             finally:
-                # 只在非入队场景下清理 progress worker
-                # 入队场景：result.reply 为空，消息会在另一个线程的处理循环中被处理
-                if result.reply or result.is_new or result.is_exit:
-                    _progress_done.set()
-                    _worker.join(timeout=3.0)
-                else:
-                    # 入队场景：快速清理 progress worker
-                    _progress_done.set()
-                    _worker.join(timeout=1.0)
+                _progress_done.set()
+                _worker.join(timeout=3.0)
                 session.agent.progress_callback = None
                 session.agent.interim_sender = None
 
-            # 入队场景：消息已入队，不回复（回复会在处理线程中发送）
+            # 入队场景：消息已入队，不回复
             if not result.reply and not result.is_new and not result.is_exit and not result.is_command:
                 self._dedup.mark_processed(message_id)
                 print(f"[listener] 消息已入队，等待当前任务中断后处理", flush=True)
@@ -457,7 +477,7 @@ class FeishuListener:
                 self._send_reply(chat_id, reply)
 
         except Exception as e:
-            print(f"[listener] 处理消息时发生错误：{e}", flush=True)
+            print(f"[listener] _dispatch_to_session 错误：{e}", flush=True)
 
     def start(self) -> None:
         """启动长连接，在独立线程中运行，立即返回（不阻塞调用方）。
