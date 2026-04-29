@@ -28,6 +28,11 @@ PROMPT_STYLE = Style.from_dict({
 })
 
 
+def _cli_partial_sender(text: str) -> None:
+    """CLI 下 compaction 等进度文案即时打印。"""
+    print(text, flush=True)
+
+
 def _cli_progress_callback(event: dict) -> None:
     """CLI 模式下的工具调用进度回调，实时打印到终端。"""
     if event.get("type") != "tool_progress":
@@ -118,6 +123,7 @@ def _run_repl(config: dict) -> None:
     session = mgr.get_or_create("cli", "default")
     # CLI 模式下设置 progress_callback，工具调用时实时打印进度
     session.agent.progress_callback = _cli_progress_callback
+    session.partial_sender = _cli_partial_sender
     skill_count = len(session.skills)
     feishu_status = "已连接" if session.feishu_ready else "未配置"
     print(f"Lampson 已启动（技能: {skill_count} 个，飞书: {feishu_status}）。输入 /help 查看命令，Ctrl+C 或 /exit 退出。\n")
@@ -150,6 +156,7 @@ def _run_repl(config: dict) -> None:
                 # 通过 SessionManager 统一重置
                 session = mgr.reset_session("cli", "default")
                 session.agent.progress_callback = _cli_progress_callback
+                session.partial_sender = _cli_partial_sender
                 print("\n[新 session 已开始]\n")
                 continue
 
@@ -182,6 +189,7 @@ def _run_repl(config: dict) -> None:
                         cr = session.agent.maybe_compact(
                             session_store=session_store,
                             session_id=session.session_id or "",
+                            progress_callback=_cli_partial_sender,
                         )
                         if cr is not None:
                             if cr.success:
@@ -226,6 +234,7 @@ def main() -> None:
     if non_interactive_input is not None:
         session = mgr.get_or_create("cli", "default")
         session.agent.progress_callback = _cli_progress_callback
+        session.partial_sender = _cli_partial_sender
         result = session.handle_input(non_interactive_input)
 
         if result.reply:

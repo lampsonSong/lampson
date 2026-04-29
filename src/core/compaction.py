@@ -24,9 +24,19 @@ import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _notify_progress(cb: Callable[[str], None] | None, msg: str) -> None:
+    if cb is None:
+        return
+    try:
+        cb(msg)
+    except Exception as e:
+        logger.debug("Compaction progress_callback 失败: %s", e)
 
 # ── 目录常量 ──────────────────────────────────────────────────────────────────
 
@@ -141,6 +151,7 @@ class Compactor:
         messages: list[dict[str, Any]],
         session_store: Any = None,
         session_id: str = "",
+        progress_callback: Callable[[str], None] | None = None,
     ) -> CompactionResult:
         """执行归档流水线。
 
@@ -163,6 +174,7 @@ class Compactor:
             return CompactionResult(success=False, error="空消息列表")
 
         # Step 1: LLM 分类（不涉及写入）
+        _notify_progress(progress_callback, "[1/6] 正在分析对话内容...")
         existing_files = _list_existing_files()
         try:
             result = _classify_messages(messages, existing_files, self.llm)
@@ -197,11 +209,14 @@ class Compactor:
         archived_count = len(unique_targets)
 
         # Step 2: 写 segment_boundary 到 session JSONL（原子性保障的核心）
+        _notify_progress(progress_callback, "[2/6] 正在写入会话边界...")
         if session_store is not None and session_id:
             _write_segment_boundary(messages, unique_targets, session_id, session_store)
 
         # Step 3: 读已有 skill/project 内容
         # Step 4: 整合写入
+        _notify_progress(progress_callback, "[3/6] 正在读取已有归档文件...")
+        _notify_progress(progress_callback, "[4/6] 正在写入归档文件...")
         details_parts: list[str] = []
         for d in decisions:
             action = d.get("action", "keep")
@@ -215,6 +230,7 @@ class Compactor:
             # 不算失败，归档文件错误不影响核心功能
 
         # Step 5: 写 compaction 日志
+        _notify_progress(progress_callback, "[5/6] 正在写入压缩日志...")
         try:
             _log_compaction(
                 original_count=len(messages),
@@ -227,6 +243,7 @@ class Compactor:
             logger.warning(f"Compaction 日志写入失败: {e}")
 
         # Step 6: 构建剩余消息列表
+        _notify_progress(progress_callback, "[6/6] 正在构建剩余上下文...")
         remaining = _build_remaining_messages(
             messages, decisions, tool_refs, self.config.keep_recent_n
         )
@@ -242,7 +259,13 @@ class Compactor:
             logger.info(
                 f"Compaction 阶段一后仍占 {remaining_tokens/original_tokens:.0%}，触发阶段二摘要"
             )
+            _notify_progress(progress_callback, "[摘要] 正在生成对话摘要...")
             remaining = self._summarize_keep_messages(remaining, messages)
+
+        _notify_progress(
+            progress_callback,
+            f"[完成] 归档 {archived_count} 条内容，保留 {len(remaining)} 条消息",
+        )
 
         return CompactionResult(
             success=True,
@@ -349,6 +372,7 @@ def _make_temp_client(llm: Any) -> Any:
         api_key=client.api_key if hasattr(client, "api_key") else getattr(llm, "_api_key", ""),
         base_url=str(client.base_url) if hasattr(client, "base_url") else getattr(llm, "_base_url", ""),
         model=llm.model,
+        timeout=600.0,
     )
 
 
@@ -674,6 +698,7 @@ def apply_compaction(
     session_store: Any = None,
     *,
     force: bool = False,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> CompactionResult | None:
     """检查并执行压缩。
 
@@ -683,6 +708,7 @@ def apply_compaction(
     Args:
         force: 强制触发压缩，忽略 token 阈值和 stop_reason 检查。
             由 force_compact() 使用，避免用伪造 token 数绕过检查。
+        progress_callback: 可选，Compaction 进度文案回调。
 
     Returns:
         CompactionResult（触发了压缩）或 None（不需要压缩）。
@@ -696,7 +722,12 @@ def apply_compaction(
         return None
 
     compactor = Compactor(llm=agent_llm, config=config)
-    result = compactor.compact(messages, session_store=session_store, session_id=session_id)
+    result = compactor.compact(
+        messages,
+        session_store=session_store,
+        session_id=session_id,
+        progress_callback=progress_callback,
+    )
 
     if result.success and result.messages_kept:
         # 保留 system prompt，用 keep 消息替换对话历史

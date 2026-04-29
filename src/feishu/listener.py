@@ -285,6 +285,19 @@ class FeishuListener:
             except (json.JSONDecodeError, AttributeError):
                 text = raw_content or ""
 
+            # 富文本（post）消息：从 content 数组中提取纯文本
+            if not text and isinstance(content_obj, dict):
+                # post 消息格式：{"title":"...", "content":[[{tag:"text", text:"..."}, ...], ...]}
+                post_content = content_obj.get("content")
+                if isinstance(post_content, list):
+                    parts: list[str] = []
+                    for row in post_content:
+                        if isinstance(row, list):
+                            for elem in row:
+                                if isinstance(elem, dict):
+                                    parts.append(elem.get("text", ""))
+                    text = " ".join(parts).strip()
+
             if not text:
                 print("[listener] 消息内容为空，跳过", flush=True)
                 return

@@ -23,15 +23,17 @@ class LLMClient:
         base_url: str,
         model: str,
         channel: str = "cli",
+        timeout: float = 60.0,
     ) -> None:
         self.model = model
         self.api_key = api_key
         self.base_url = base_url
         self.channel = channel
+        self.timeout = timeout
         self.client = OpenAI(
             api_key=api_key if api_key else "not-needed",
             base_url=base_url,
-            timeout=60.0,
+            timeout=timeout,
         )
         self.messages: list[dict[str, Any]] = []
         self._prompt_builder = PromptBuilder(model=model, channel=channel)
@@ -97,6 +99,7 @@ class LLMClient:
             base_url=self.base_url,
             model=self.model,
             channel=self.channel,
+            timeout=self.timeout,
         )
         if self.messages:
             new_client.messages = [self.messages[0]]

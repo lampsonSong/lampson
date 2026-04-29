@@ -19,6 +19,8 @@ from src.core.llm import LLMClient
 from src.core import tools as tool_registry
 from src.core.compaction import CompactionConfig, CompactionResult, apply_compaction
 from src.planning.steps import Plan, PlanStatus
+from src.memory import session_store as _session_store
+from src.core.error_log import log_error as _log_error, SOURCE_LLM as _SRC_LLM, SOURCE_TOOL as _SRC_TOOL
 
 if TYPE_CHECKING:
     from src.skills.manager import Skill
@@ -73,6 +75,9 @@ class Agent:
         # 连续 LLM 调用失败计数：连续3次失败后触发熔断
         self._consecutive_llm_failures: int = 0
 
+        # ── trace / 完整复现 ───────────────────────────────────────────
+        # session_id：由 Session 注入，用于写 trace 行到 JSONL
+        self.session_id: str = ""
     def refresh_tools(self) -> None:
         """重新加载工具列表（外部注册新工具后调用）。"""
         self._tools = tool_registry.get_all_schemas()
@@ -102,9 +107,26 @@ class Agent:
         if compaction_config is not None:
             self._compaction_config = compaction_config
 
-    def _inject_skill(self, user_input: str) -> str | None:
-        """历史兼容占位；技能全文由 retrieve_for_plan 注入。"""
-        return None
+    def _inject_skill(self, user_input: str) -> None:
+        """预匹配 skills，单个匹配时直接注入 skill body 到上下文。
+
+        多个匹配时不注入，让 LLM 通过 skill 工具自行选择。
+        无匹配时也不注入。
+        """
+        from src.skills.manager import match_skills
+
+        matched = match_skills(user_input, self.skills)
+        if len(matched) != 1:
+            return
+
+        skill = matched[0]
+        inject = (
+            f"[技能激活: {skill.name}]\n"
+            f"{skill.body[:2000]}"
+            + ("...(已截断)" if len(skill.body) > 2000 else "")
+        )
+        # 插在 user message 之前
+        self.llm.messages.append({"role": "system", "content": inject})
 
     # ── 中断检查 ───────────────────────────────────────────────────────
 
@@ -202,46 +224,177 @@ class Agent:
                 same_vendor.append(fb)
         return diff_vendor + same_vendor
 
+    def _sanitize_tool_messages(self) -> None:
+        """清理 messages 中所有不完整的 tool 调用序列。
+
+        遍历整个 messages 列表，找出所有 assistant 消息的 tool_calls，
+        验证每个 tool_call 都有对应 ID 的 tool_result。
+        如果某个 tool_call 没有对应 result，补上错误占位 result。
+        这确保发给任何 LLM 的 messages 都是完整干净的。
+        """
+        msgs = self.llm.messages
+        if not msgs:
+            return
+
+        # 建立所有 tool_call_id 的集合
+        tool_call_ids: set[str] = set()
+        # 建立所有已有 tool_result 的 tool_call_id 集合
+        result_ids: set[str] = set()
+
+        for msg in msgs:
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg.get("tool_calls", []):
+                    tc_id = tc.get("id") or ""
+                    if tc_id:
+                        tool_call_ids.add(tc_id)
+            elif msg.get("role") == "tool":
+                result_ids.add(msg.get("tool_call_id") or "")
+
+        # 找出缺失的 tool_call_id
+        missing_ids = tool_call_ids - result_ids
+        if not missing_ids:
+            logger.info(f"[_sanitize_tool_messages] 无需清理（tool_call_ids={tool_call_ids}, result_ids={result_ids}）")
+            return
+
+        # 为每个缺失的 ID 追加错误占位 result
+        for tc_id in missing_ids:
+            msgs.append({
+                "role": "tool",
+                "tool_call_id": tc_id,
+                "content": "[错误] 工具执行失败或被中断，结果未获取",
+            })
+
+        logger.info(f"[_sanitize_tool_messages] 补全了 {len(missing_ids)} 个缺失的 tool_result，IDs: {missing_ids}")
+        logger.info(f"[_sanitize_tool_messages] 消息列表状态：")
+        for i, m in enumerate(msgs):
+            if m.get("role") in ("assistant", "tool", "user"):
+                tc_ids = [tc.get("id") for tc in m.get("tool_calls", [])]
+                logger.info(f"  [{i}] role={m.get('role')}, tool_calls={tc_ids}, tool_call_id={m.get('tool_call_id')}")
+
     def _chat_with_fallback(self, tools=None):
         """每次调用都从主模型开始，失败时按顺序尝试 fallback。
 
         不会永久切换模型——fallback 成功后响应仍写回主模型的 messages，
         下次调用再次从主模型开始尝试。
         """
+        # 防御性清理 messages：保证 tool_call 和 tool_result 完整匹配
+        self._sanitize_tool_messages()
+
         # 检查中断（LLM 调用前）
         self.check_interrupt()
 
         # 1. 先试主模型（默认60s）
+        _no_fallback = False
+        _fatal_error: Exception | None = None
+        # 写 system_prompt trace（hash 去重）
+        if self.session_id and self.llm.messages and self.llm.messages[0].get("role") == "system":
+            system_content = self.llm.messages[0].get("content", "")
+            if system_content:
+                _session_store.write_system_prompt_trace(self.session_id, system_content)
+
+        # 记录 LLM 调用开始时间（用于计算 duration_ms）
+        _call_start = _session_store._now_ms()
+        _call_model = self.llm.model
+
         try:
-            return self.adapter.chat(self.llm.messages, tools=tools)
+            result = self.adapter.chat(self.llm.messages, tools=tools)
+            # 写 llm_call trace（成功）
+            _call_end = _session_store._now_ms()
+            parsed = self.adapter.parse_response(result)
+            input_tokens = getattr(result.usage, 'prompt_tokens', 0) if result.usage else 0
+            output_tokens = getattr(result.usage, 'completion_tokens', 0) if result.usage else 0
+            _session_store.write_llm_call_trace(
+                self.session_id,
+                model=_call_model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                duration_ms=_call_end - _call_start,
+                stop_reason=parsed.finish_reason or "stop",
+            )
+            return result
         except LLMContextTooLongError:
-            # prompt 超长 → 不 fallback，直接上抛让上层处理
             raise
         except (LLMFatalError, LLMRateLimitError, LLMRetryableError) as e:
+            # 写 llm_error trace + 错误日志
+            if self.session_id:
+                _session_store.write_llm_error_trace(
+                    self.session_id,
+                    model=self.llm.model,
+                    error_type=type(e).__name__,
+                    detail=str(e)[:500],
+                    duration_ms=_session_store._now_ms() - _call_start,
+                )
+                _log_error(
+                    type(e).__name__, str(e)[:500], _SRC_LLM,
+                    session_id=self.session_id,
+                    detail={'model': self.llm.model, 'duration_ms': _session_store._now_ms() - _call_start},
+                    messages_snapshot=self.llm.messages,
+                    exception=e,
+                )
             if not self.fallback_models:
                 raise
-            logger.warning(f"主模型 {self.llm.model} 调用失败（{type(e).__name__}），尝试 fallback: {e}")
-            self._on_model_switch(f"主模型 {self.llm.model} 失败，切换 fallback...")
+            # 如果是参数错误（400），说明 messages 有问题，不 fallback
+            if isinstance(e, LLMFatalError) and "400" in str(e) and "tool_call" in str(e):
+                logger.warning(f"主模型 {self.llm.model} 返回参数错误（疑似 messages 不完整），不 fallback: {e}")
+                _no_fallback = True
+                _fatal_error = e
+            else:
+                logger.warning(f"主模型 {self.llm.model} 调用失败（{type(e).__name__}），尝试 fallback: {e}")
+                self._on_model_switch(f"主模型 {self.llm.model} 失败，切换 fallback...")
+
+        # 如果是 400+tool_call 错误，直接上抛，不走 fallback
+        if _no_fallback:
+            raise _fatal_error or LLMFatalError("主模型参数错误")
 
         # 2. 按供应商分组重排 fallback：优先尝试不同供应商的模型
         primary_base = self.llm.base_url
         ordered = self._order_fallbacks(primary_base)
 
-        # 3. 依次试 fallback，统一 45s 超时（不递减）
-        FALLBACK_TIMEOUT = 45
+        # 3. 依次试 fallback，统一 90s 超时（复杂 prompt 需要更长推理时间）
+        FALLBACK_TIMEOUT = 90
         for fb_llm, fb_adapter in ordered:
             logger.warning(f"尝试 fallback: {fb_llm.model} (timeout={FALLBACK_TIMEOUT}s)")
             self._on_model_switch(f"尝试 {fb_llm.model}...")
             try:
                 fb_llm.messages = list(self.llm.messages)
+                _fb_start = _session_store._now_ms()
                 result = fb_adapter.chat(fb_llm.messages, tools=tools, timeout=FALLBACK_TIMEOUT)
+                _fb_end = _session_store._now_ms()
                 self._on_model_switch(f"已切换到 {fb_llm.model}")
+                # 写 llm_call trace（fallback 成功）
+                parsed = self.adapter.parse_response(result)
+                input_tokens = getattr(result.usage, 'prompt_tokens', 0) if result.usage else 0
+                output_tokens = getattr(result.usage, 'completion_tokens', 0) if result.usage else 0
+                _session_store.write_llm_call_trace(
+                    self.session_id,
+                    model=fb_llm.model,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    duration_ms=_fb_end - _fb_start,
+                    stop_reason=parsed.finish_reason or "stop",
+                )
                 return result
             except LLMContextTooLongError:
                 # prompt 超长换模型也没用，直接上抛
                 raise
             except (LLMFatalError, LLMRateLimitError, LLMRetryableError) as e:
                 logger.warning(f"fallback {fb_llm.model} 也失败（{type(e).__name__}）: {e}")
+                # 写 llm_error trace + 错误日志
+                if self.session_id:
+                    _session_store.write_llm_error_trace(
+                        self.session_id,
+                        model=fb_llm.model,
+                        error_type=type(e).__name__,
+                        detail=str(e)[:500],
+                        duration_ms=_session_store._now_ms() - _fb_start,
+                    )
+                    _log_error(
+                        type(e).__name__, str(e)[:500], _SRC_LLM,
+                        session_id=self.session_id,
+                        detail={'model': fb_llm.model, 'duration_ms': _session_store._now_ms() - _fb_start, 'is_fallback': True},
+                        messages_snapshot=self.llm.messages,
+                        exception=e,
+                    )
                 continue
 
         raise LLMFatalError("所有模型（含 fallback）均调用失败")
@@ -285,8 +438,42 @@ class Agent:
 
                 for tc in parsed.tool_calls:
                     logger.info(f"tool_loop round {round_num+1}: dispatch {tc.name}({tc.raw_arguments[:200]})")
+
+                    # 写 tool_call trace
+                    if self.session_id:
+                        try:
+                            args_dict = json.loads(tc.raw_arguments) if isinstance(tc.raw_arguments, str) else tc.raw_arguments
+                        except Exception:
+                            args_dict = {"raw": tc.raw_arguments}
+                        _session_store.write_tool_call_trace(
+                            self.session_id,
+                            tool_call_id=tc.id,
+                            name=tc.name,
+                            arguments=args_dict,
+                        )
+
                     result = tool_registry.dispatch(tc.name, tc.raw_arguments)
                     self._fast_path_tool_count += 1
+
+                    # 写 tool_result trace + 错误日志
+                    if self.session_id:
+                        error_info = None
+                        if result.startswith("[错误]") or result.startswith("[Exception"):
+                            error_info = {"type": "ToolError", "message": result[:200]}
+                            _log_error(
+                                "ToolExecutionError", result[:500], _SRC_TOOL,
+                                session_id=self.session_id,
+                                tool_name=tc.name,
+                                tool_arguments=args_dict,
+                                tool_result=result,
+                                messages_snapshot=self.llm.messages,
+                            )
+                        _session_store.write_tool_result_trace(
+                            self.session_id,
+                            tool_call_id=tc.id,
+                            result=result,
+                            error=error_info,
+                        )
 
                     # 实时通知 listener：一个工具调用完成
                     self._on_tool_progress(round_num + 1, tc.name, tc.raw_arguments, result)
@@ -387,6 +574,10 @@ class Agent:
     def run(self, user_input: str) -> str:
         """处理一轮用户输入，返回最终回复文本。"""
         self._consecutive_llm_failures = 0  # 新增：每次新任务开始时重置
+
+        # 预匹配 skills，注入匹配的 skill 上下文
+        self._inject_skill(user_input)
+
         self.llm.add_user_message(user_input)
         try:
             result = self._run_tool_loop()
@@ -416,12 +607,14 @@ class Agent:
         self,
         session_store: Any = None,
         session_id: str = "",
+        progress_callback: Callable[[str], None] | None = None,
     ) -> CompactionResult | None:
         """检查并执行上下文压缩。
 
         Args:
             session_store: session_store 模块，用于写入 segment_boundary。
             session_id: 当前会话 id，需与 JSONL 一致；空字符串则仍执行压缩逻辑但不落 segment 边界。
+            progress_callback: 可选，Compaction 各阶段进度文案（发往 UI）。
         """
         if self._compaction_config is None:
             return None
@@ -442,6 +635,7 @@ class Agent:
                 stop_reason=self.last_stop_reason,
                 session_id=session_id,
                 session_store=session_store,
+                progress_callback=progress_callback,
             )
         except Exception as e:
             logger.warning(f"压缩异常: {e}")
@@ -451,11 +645,15 @@ class Agent:
         self,
         session_store: Any = None,
         session_id: str = "",
+        progress_callback: Callable[[str], None] | None = None,
     ) -> CompactionResult | None:
         """手动触发上下文压缩（/compaction 命令调用，无视 token 阈值）。
 
         使用 threading.Lock 保证多线程安全（飞书 WebSocket 回调可能并发触发）。
         如果另一条压缩正在执行，返回 None。
+
+        Args:
+            progress_callback: 可选，Compaction 各阶段进度文案（发往 UI）。
         """
         if not self._compaction_lock.acquire(blocking=False):
             logger.info("force_compact: 另一次压缩正在执行，跳过")
@@ -480,6 +678,7 @@ class Agent:
                     session_id=session_id,
                     session_store=session_store,
                     force=True,
+                    progress_callback=progress_callback,
                 )
             except Exception as e:
                 logger.warning(f"手动压缩异常: {e}")

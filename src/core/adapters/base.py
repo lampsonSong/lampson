@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import httpx
-from openai import APIConnectionError, APITimeoutError, RateLimitError
+from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
 from openai.types.chat import ChatCompletion
 
 if TYPE_CHECKING:
@@ -168,8 +168,13 @@ class BaseModelAdapter(ABC):
                 original_error=e,
                 status_code=429,
             )
+        except APIStatusError as e:
+            # OpenAI SDK 统一异常：覆盖 400/401/403/404/500 等所有 HTTP 错误
+            status_code = e.status_code
+            body = str(e.message or "")[:300]
+            return self._handle_http_status_error(status_code, body, e)
         except httpx.HTTPStatusError as e:
-            # 有明确状态码的 HTTP 错误
+            # 兜底：httpx 直接抛出的 HTTP 错误（非 OpenAI SDK 路径）
             status_code = e.response.status_code
             body = ""
             if hasattr(e.response, "text"):
@@ -186,7 +191,7 @@ class BaseModelAdapter(ABC):
         self,
         status_code: int,
         body: str,
-        original_error: httpx.HTTPStatusError,
+        original_error: Exception,
     ) -> ChatCompletion:
         """根据 HTTP 状态码分类抛出不同异常。"""
         model = self.llm.model

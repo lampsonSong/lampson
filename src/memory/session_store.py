@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import hashlib
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -25,6 +26,7 @@ import jieba
 LAMPSON_DIR = Path.home() / ".lampson"
 SESSIONS_DIR = LAMPSON_DIR / "memory" / "sessions"
 SEARCH_DB = LAMPSON_DIR / "memory" / "search.db"
+TOOL_BODIES_DIR = LAMPSON_DIR / "memory" / "tool_bodies"
 
 # ── session_id → source 内存缓存（进程级别）──────────────────────────────
 
@@ -400,16 +402,26 @@ def append_message(
     tool_result: str | None = None,
     referenced_tool_results: list[str] | None = None,
     segment: int = 0,
+    # ── trace 扩展字段（仅 assistant 行有效） ──
+    model: str | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    stop_reason: str | None = None,
 ) -> None:
-    """追加一条消息到 JSONL 文件，同时更新 SQLite 索引。"""
+    """追加一条消息到 JSONL 文件，同时更新 SQLite 索引。
+
+    assistant 行可额外传入 model、input_tokens、output_tokens、stop_reason，
+    用于完整复现（写入 JSONL 行内）。
+    """
     now_ms = _now_ms()
 
-    row = {
+    row: dict[str, Any] = {
         "ts": now_ms,
         "session_id": session_id,
         "segment": segment,
         "role": role,
         "content": content,
+        "type": "assistant" if role == "assistant" else "user",
     }
     if tool_calls:
         row["tool_calls"] = tool_calls
@@ -417,6 +429,17 @@ def append_message(
         row["tool_result"] = tool_result
     if referenced_tool_results:
         row["referenced_tool_results"] = referenced_tool_results
+
+    # trace 扩展字段（assistant 行）
+    if role == "assistant":
+        if model:
+            row["model"] = model
+        if input_tokens is not None:
+            row["input_tokens"] = input_tokens
+        if output_tokens is not None:
+            row["output_tokens"] = output_tokens
+        if stop_reason:
+            row["stop_reason"] = stop_reason
 
     _jsonl_append(session_id, row)
 
@@ -897,3 +920,232 @@ def _flush_batch(conn: sqlite3.Connection, batch: list[dict]) -> None:
             )
 
     conn.commit()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Trace Log（完整复现支持）
+# 设计文档：docs/trace-design.md
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _ensure_tool_bodies_dir() -> Path:
+    """确保 tool_bodies 目录存在并返回路径。"""
+    TOOL_BODIES_DIR.mkdir(parents=True, exist_ok=True)
+    return TOOL_BODIES_DIR
+
+
+def _sha256_hash(content: str) -> str:
+    """计算内容的 SHA256 hash，返回格式化的 hash 字符串（sha256:{前16位}）。"""
+    h = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    return f"sha256:{h[:16]}"
+
+
+def append_trace(session_id: str, row: dict) -> None:
+    """追加一条 trace 行到 JSONL（不更新 SQLite 索引）。
+
+    供 system_prompt / llm_call / llm_error / tool_call / tool_result 使用。
+    写入位置与该 session 的 sessions/ JSONL 相同。
+    """
+    _jsonl_append(session_id, row)
+
+
+def write_system_prompt_trace(
+    session_id: str,
+    content: str,
+    ts: int | None = None,
+) -> dict:
+    """写入 system_prompt 行，处理 hash 去重。
+
+    如果 prompt_hash 相同则 content=null（行仍写入，省的是磁盘而非 I/O）。
+    Returns: 写入的 row dict。
+    """
+    now_ms = ts or _now_ms()
+    prompt_hash = _sha256_hash(content)
+
+    row = {
+        "ts": now_ms,
+        "type": "system_prompt",
+        "session_id": session_id,
+        "prompt_hash": prompt_hash,
+        "content": content,
+    }
+    append_trace(session_id, row)
+    return row
+
+
+def write_llm_call_trace(
+    session_id: str,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    duration_ms: int,
+    stop_reason: str,
+    ts: int | None = None,
+) -> dict:
+    """写入 llm_call 行（调试/计费用）。"""
+    now_ms = ts or _now_ms()
+
+    row = {
+        "ts": now_ms,
+        "type": "llm_call",
+        "session_id": session_id,
+        "model": model,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "duration_ms": duration_ms,
+        "stop_reason": stop_reason,
+    }
+    append_trace(session_id, row)
+    return row
+
+
+def write_llm_error_trace(
+    session_id: str,
+    model: str,
+    error_type: str,
+    detail: str,
+    duration_ms: int,
+    ts: int | None = None,
+) -> dict:
+    """写入 llm_error 行。"""
+    now_ms = ts or _now_ms()
+
+    row = {
+        "ts": now_ms,
+        "type": "llm_error",
+        "session_id": session_id,
+        "model": model,
+        "error_type": error_type,
+        "detail": detail[:500],  # 截断到前 500 字
+        "duration_ms": duration_ms,
+    }
+    append_trace(session_id, row)
+    return row
+
+
+def write_tool_call_trace(
+    session_id: str,
+    tool_call_id: str,
+    name: str,
+    arguments: dict,
+    ts: int | None = None,
+) -> dict:
+    """写入 tool_call 行。"""
+    now_ms = ts or _now_ms()
+
+    row = {
+        "ts": now_ms,
+        "type": "tool_call",
+        "session_id": session_id,
+        "id": tool_call_id,
+        "name": name,
+        "arguments": json.dumps(arguments, ensure_ascii=False),  # 序列化为字符串
+    }
+    append_trace(session_id, row)
+    return row
+
+
+def write_tool_result_trace(
+    session_id: str,
+    tool_call_id: str,
+    result: str,
+    ts: int | None = None,
+    error: dict | None = None,
+) -> dict:
+    """写入 tool_result 行，处理去重和 inline 逻辑。
+
+    采用「只写不检查」策略（方案 B）：
+    - 直接计算 hash 并写入 tool_bodies/{hash}.json
+    - 不检查文件是否已存在，避免额外 I/O
+    - 返回的 row dict 含 result_ref（>2KB）或 result_inline（≤2KB）
+
+    Args:
+        session_id: session ID
+        tool_call_id: 对应的 tool_call id
+        result: 工具执行结果内容
+        ts: 时间戳（毫秒），默认当前时间
+        error: 错误信息（结构化对象 {type, message}），无错误则 None
+
+    Returns: 写入的 row dict（含 result_ref 或 result_inline）。
+    """
+    now_ms = ts or _now_ms()
+    size = len(result.encode("utf-8"))
+
+    if size <= 2048:
+        # 小型结果内联
+        row: dict[str, Any] = {
+            "ts": now_ms,
+            "type": "tool_result",
+            "session_id": session_id,
+            "id": tool_call_id,
+            "result_size": size,
+            "result_inline": result if not error else None,
+            "error": error,
+        }
+        append_trace(session_id, row)
+        return row
+
+    # 大型结果写 hash 文件
+    hash_key = _sha256_hash(result)
+    h = hash_key.split(":")[1]  # 提取 hash 值（去掉 sha256: 前缀）
+    path = _ensure_tool_bodies_dir() / f"{h}.json"
+
+    path.write_text(
+        json.dumps({
+            "hash": hash_key,
+            "size": size,
+            "content": result,
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    return {
+        "ts": now_ms,
+        "type": "tool_result",
+        "session_id": session_id,
+        "id": tool_call_id,
+        "result_size": size,
+        "result_ref": hash_key,
+        "error": error,
+    }
+
+
+# ── GC / 清理策略 ──────────────────────────────────────────────────────
+
+def gc_tool_bodies(ttl_days: int = 60) -> dict:
+    """GC tool_bodies：只用时间窗口清理，不做引用计数。
+
+    Args:
+        ttl_days: 时间窗口天数，默认 60 天
+
+    Returns: {"deleted": int, "total_freed_bytes": int}
+    """
+    import time
+
+    deleted = 0
+    total_freed_bytes = 0
+    cutoff_ts = time.time() - (ttl_days * 86400)  # ttl_days 天前的时间戳
+
+    try:
+        tool_bodies_dir = _ensure_tool_bodies_dir()
+    except Exception:
+        tool_bodies_dir = TOOL_BODIES_DIR
+
+    if tool_bodies_dir.exists():
+        for f in tool_bodies_dir.iterdir():
+            if not f.is_file() or not f.name.endswith(".json"):
+                continue
+
+            try:
+                # 检查是否过期
+                if f.stat().st_mtime < cutoff_ts:
+                    file_size = f.stat().st_size
+                    f.unlink()
+                    total_freed_bytes += file_size
+                    deleted += 1
+            except Exception:
+                continue
+
+    return {
+        "deleted": deleted,
+        "total_freed_bytes": total_freed_bytes,
+    }

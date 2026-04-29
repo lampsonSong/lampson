@@ -34,6 +34,7 @@ from src.memory import session_store
 from src.memory.session_search import search_sessions
 from src.core import skills_tools as skills_tools_reg
 from src.skills import manager as skills_mgr
+from src.core.metrics import TaskCollector, format_summary
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,7 @@ HELP_TEXT = """\
   /update <需求描述>              触发自更新
   /update rollback               回滚自更新
   /update list                   列出自更新分支
+  /metrics                       查看最近任务指标统计
   /compaction                    手动触发上下文压缩
   /new                           开始新 session（清空当前对话上下文）
   /exit                          退出
@@ -290,6 +292,7 @@ class Session:
         # 创建 session（JSONL 写入需要 session_id）
         si = session_store.create_session(source="cli")
         session.session_id = si.session_id
+        agent.session_id = si.session_id
         session._current_segment = 0
         session.skill_index = sidx
         session.project_index = pidx
@@ -364,9 +367,21 @@ class Session:
 
         user_input_for_llm = user_input
 
+        # 启动指标收集
+        collector = TaskCollector()
+        collector.start(
+            model=self._current_model_name,
+            channel=self.channel,
+            session_id=self.session_id or "",
+            input_preview=user_input,
+        )
+        self.agent.metrics_collector = collector
+
         try:
             reply = self.agent.run(user_input_for_llm)
         except Exception as e:
+            collector.finish(success=False)
+            self.agent.metrics_collector = None
             return HandleResult(reply=f"[错误] {e}")
 
         if self.session_id:
@@ -377,16 +392,20 @@ class Session:
             cr = self.agent.maybe_compact(
                 session_store=session_store,
                 session_id=self.session_id or "",
+                progress_callback=self.partial_sender,
             )
             if cr is not None:
                 if cr.success:
                     compaction_msg = f"[上下文压缩] 已完成，归档 {cr.archived_count} 条内容。"
                     self._current_segment += 1
+                    collector.record_compaction()
                 else:
                     compaction_msg = f"[上下文压缩] 失败: {cr.error}"
         except Exception:
             pass
 
+        collector.finish(success=True)
+        self.agent.metrics_collector = None
         return HandleResult(reply=reply, compaction_msg=compaction_msg)
 
     def _process_with_interrupt(self, user_input: str) -> HandleResult:
@@ -421,11 +440,24 @@ class Session:
                     segment=self._current_segment,
                 )
 
+            # 启动指标收集
+            collector = TaskCollector()
+            collector.start(
+                model=self._current_model_name,
+                channel=self.channel,
+                session_id=self.session_id or "",
+                input_preview=current_input,
+            )
+            self.agent.metrics_collector = collector
+
             # 调用 agent
             try:
                 reply = self.agent.run(user_input_for_llm)
             except AgentInterrupted as e:
                 # 被新消息中断
+                collector.record_interrupt()
+                collector.finish(success=False)
+                self.agent.metrics_collector = None
                 interrupt_summary = e.progress_summary
                 self._pending_task_messages_snapshot = list(self.agent.llm.messages)
                 logger.info("[session] 任务被中断: %s", e.progress_summary[:100])
@@ -450,6 +482,8 @@ class Session:
                 continue  # 循环处理新消息
 
             except Exception as e:
+                collector.finish(success=False)
+                self.agent.metrics_collector = None
                 return HandleResult(reply=f"[错误] {e}")
 
             # 处理成功
@@ -462,15 +496,20 @@ class Session:
                 cr = self.agent.maybe_compact(
                     session_store=session_store,
                     session_id=self.session_id or "",
+                    progress_callback=self.partial_sender,
                 )
                 if cr is not None:
                     if cr.success:
                         compaction_msg = f"[上下文压缩] 已完成，归档 {cr.archived_count} 条内容。"
                         self._current_segment += 1
+                        collector.record_compaction()
                     else:
                         compaction_msg = f"[上下文压缩] 失败: {cr.error}"
             except Exception:
                 pass
+
+            collector.finish(success=True)
+            self.agent.metrics_collector = None
 
             # 检查是否有被中断的任务需要恢复
             has_pending_resume = bool(self._pending_task_summary)
@@ -552,7 +591,11 @@ class Session:
             pass
 
     def _write_assistant_to_jsonl(self) -> None:
-        """将 agent.llm.messages 中的最后一条 assistant 消息写入 JSONL。"""
+        """将 agent.llm.messages 中的最后一条 assistant 消息写入 JSONL。
+
+        扩展字段（model, input_tokens, output_tokens, stop_reason）写入 trace 行，
+        用于完整复现。
+        """
         msgs = self.agent.llm.messages
         if not msgs:
             return
@@ -569,6 +612,14 @@ class Session:
         tool_calls = assistant_msg.get("tool_calls")
         referenced_ids = _infer_referenced_tool_call_ids(msgs, assistant_msg)
 
+        # 扩展字段（从 agent 获取）
+        model = getattr(self.agent.llm, "model", None) or self._current_model_name
+        total_tokens = getattr(self.agent, "last_total_tokens", 0)
+        # 粗略拆分 input/output（total = input + output，比例约 1:3）
+        input_tokens = total_tokens // 4
+        output_tokens = total_tokens - input_tokens
+        stop_reason = getattr(self.agent, "last_stop_reason", None) or "stop"
+
         try:
             session_store.append_message(
                 session_id=self.session_id,
@@ -577,6 +628,10 @@ class Session:
                 tool_calls=tool_calls,
                 referenced_tool_results=referenced_ids if referenced_ids else None,
                 segment=self._current_segment,
+                model=model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                stop_reason=stop_reason,
             )
         except Exception:
             pass
@@ -677,6 +732,9 @@ class Session:
         if command == "/new":
             return HandleResult(is_new=True, is_command=True)
 
+        if command == "/metrics":
+            return HandleResult(reply=format_summary(), is_command=True)
+
         if command == "/compaction":
             return self._handle_compaction()
 
@@ -718,6 +776,7 @@ class Session:
             cr = self.agent.force_compact(
                 session_store=session_store,
                 session_id=self.session_id or "",
+                progress_callback=self.partial_sender,
             )
             if cr is None:
                 return HandleResult(reply="压缩不可用（未配置 compaction 或有计划正在执行）", is_command=True)

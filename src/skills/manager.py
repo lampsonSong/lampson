@@ -92,17 +92,76 @@ def get_skills_summary(skills: dict[str, Skill]) -> str:
 
 
 def match_skill(user_input: str, skills: dict[str, Skill]) -> Skill | None:
-    """简单关键词匹配：检查用户输入是否触发某个技能。"""
+    """简单关键词匹配：检查用户输入是否触发某个技能。
+
+    注意：只返回第一个匹配。若需要多匹配判断，用 match_skills()。
+    """
+    matched = match_skills(user_input, skills)
+    return matched[0] if matched else None
+
+
+def match_skills(user_input: str, skills: dict[str, Skill]) -> list[Skill]:
+    """收集所有被触发词匹配的 skill，供上层决策。
+
+    当匹配到多个 skill 时，由调用方用 LLM 或规则决定用哪个。
+    """
     if not skills:
-        return None
+        return []
     user_lower = user_input.lower()
+    matched: list[Skill] = []
     for skill in skills.values():
         for trigger in skill.triggers:
             if trigger.lower() in user_lower:
-                return skill
-        if skill.description and skill.description.lower() in user_lower:
-            return skill
-    return None
+                if skill not in matched:
+                    matched.append(skill)
+                break
+    return matched
+
+
+
+
+def decide_best_skill(user_input: str, matched_skills: list[Skill], llm_client: Any | None = None) -> Skill | None:
+    """从多个匹配的 skill 中选最合适的一个。
+
+    策略：
+    1. 只有 1 个匹配 → 直接用
+    2. 多个匹配 → 优先用 LLM 语义判断；无 LLM 时用触发词长度 heuristics
+    """
+    if not matched_skills:
+        return None
+    if len(matched_skills) == 1:
+        return matched_skills[0]
+
+    # 多个匹配时，用 LLM 语义判断
+    if llm_client is not None:
+        try:
+            lines = []
+            for s in matched_skills:
+                triggers_str = ", ".join(s.triggers) if s.triggers else "(无)"
+                lines.append("- name: " + s.name + ", description: " + s.description + ", triggers: " + triggers_str)
+            skill_list = "\n".join(lines)
+            prompt = (
+                "用户输入：" + repr(user_input) + "\n\n"
+                "以下技能都被触发了，请判断哪个最合适：\n" + skill_list + "\n\n"
+                "只回复技能的 name（原文），不要其他内容。如果都不合适，回复 none。"
+            )
+            if hasattr(llm_client, "clone_for_inference"):
+                client = llm_client.clone_for_inference()
+            else:
+                client = llm_client
+            client.set_system_context()
+            client.add_user_message(prompt)
+            response = client.chat()
+            answer = (response.choices[0].message.content or "").strip()
+            if answer and answer.lower() != "none":
+                for s in matched_skills:
+                    if s.name.lower() == answer.lower():
+                        return s
+        except Exception:
+            pass
+
+    # Fallback：触发词最长的最具体，优先用
+    return max(matched_skills, key=lambda s: max((len(t) for t in s.triggers), default=0))
 
 
 def match_skill_with_llm(user_input: str, skills: dict[str, Skill], llm_client: Any) -> Skill | None:
