@@ -50,6 +50,8 @@ class Agent:
         self.last_total_tokens: int = 0
         self.last_stop_reason: str | None = None
         self._fast_path_tool_count: int = 0
+        # 本轮激活的 skill 名称（由 _inject_skill 设置，用于反思判断）
+        self._last_activated_skill: str | None = None
 
         self._compaction_config: CompactionConfig | None = compaction_config
         self.max_tool_rounds: int = max_tool_rounds or _DEFAULT_MAX_TOOL_ROUNDS
@@ -590,6 +592,7 @@ class Agent:
             goal=user_input,
             is_fast_path=True,
             tool_call_count=tool_count,
+            skill_activated=self._last_activated_skill,
         )
         if reflection_hints:
             result += "\n\n" + "\n".join(reflection_hints)
@@ -693,6 +696,7 @@ class Agent:
         is_fast_path: bool = False,
         tool_call_count: int = 0,
         intent: str = "",
+        skill_activated: str | None = None,
     ) -> list[str]:
         """任务完成后触发反思，自动沉淀 skill 或 project 信息。"""
         from src.core.reflection import (
@@ -707,11 +711,14 @@ class Agent:
             is_fast_path=is_fast_path,
             tool_call_count=tool_call_count,
             intent=intent,
+            skill_activated=skill_activated,
         ):
             return []
 
         if plan is not None:
             exec_summary = format_execution_summary(plan)
+        elif skill_activated:
+            exec_summary = f"Fast Path 任务，激活了技能 [{skill_activated}]，调用了 {tool_call_count} 个工具"
         else:
             exec_summary = f"Fast Path 任务，调用了 {tool_call_count} 个工具"
 
@@ -720,6 +727,7 @@ class Agent:
                 goal=goal,
                 execution_summary=exec_summary,
                 llm_client=self.llm,
+                skill_activated=skill_activated,
             )
             if not learnings:
                 return []

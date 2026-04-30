@@ -96,6 +96,7 @@ def should_reflect(
     is_fast_path: bool = False,
     tool_call_count: int = 0,
     intent: str = "",
+    skill_activated: str | None = None,
 ) -> bool:
     """判断是否应该触发反思。"""
     import time
@@ -104,6 +105,10 @@ def should_reflect(
     now = time.time()
     if now - _last_reflect_time < _REFLECT_COOLDOWN:
         return False
+
+    # Skill 被激活时：用户可能在使用或纠正 skill，始终值得反思
+    if skill_activated:
+        return True
 
     # Fast Path 且只用了 0-1 个工具 → 跳过
     if is_fast_path and tool_call_count <= 1:
@@ -142,6 +147,7 @@ def reflect_and_learn(
     goal: str,
     execution_summary: str,
     llm_client: Any,
+    skill_activated: str | None = None,
 ) -> list[dict[str, Any]]:
     """执行反思，返回 learnings 列表。调用方负责后续的沉淀执行。"""
     import time
@@ -150,12 +156,19 @@ def reflect_and_learn(
     existing_skills = _get_existing_skills_summary()
     existing_projects = _get_existing_projects_summary()
 
+    # 构建反思上下文：如果有 skill 被激活，补充 skill 全文
+    skill_context = ""
+    if skill_activated:
+        skill_summary = _get_skill_full_content(skill_activated)
+        if skill_summary:
+            skill_context = "\n## 本轮激活的技能 [{}]\n{}".format(skill_activated, skill_summary)
+
     prompt = REFLECT_PROMPT.format(
         goal=goal,
         execution_summary=execution_summary,
         existing_skills=existing_skills,
         existing_projects=existing_projects,
-    )
+    ) + skill_context
 
     try:
         resp = llm_client.client.chat.completions.create(
@@ -348,6 +361,17 @@ def _update_skill(
 
 
 # ── 辅助函数 ─────────────────────────────────────────────────────────────────
+
+def _get_skill_full_content(skill_name: str) -> str:
+    """读取指定 skill 的完整内容（用于反思上下文）。"""
+    skill_file = SKILLS_DIR / skill_name / "SKILL.md"
+    if not skill_file.exists():
+        return ""
+    try:
+        return skill_file.read_text(encoding="utf-8")[:3000]
+    except OSError:
+        return ""
+
 
 def _content_already_exists(existing: str, new_content: str) -> bool:
     """简单去重：检查新内容的核心片段是否已存在。"""
