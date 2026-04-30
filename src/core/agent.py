@@ -507,6 +507,9 @@ class Agent:
                     return parsed.content or ""
 
                 for tc in parsed.tool_calls:
+                    # 检查中断（每个工具调用执行前）
+                    self.check_interrupt()
+
                     logger.info(f"tool_loop round {round_num+1}: dispatch {tc.name}({tc.raw_arguments[:200]})")
 
                     # 写 tool_call trace

@@ -565,12 +565,17 @@ class Session:
                 # 保存被中断任务的摘要（用于后续恢复）
                 self._pending_task_summary = interrupt_summary
 
-                # 合并中断摘要 + 新消息
-                current_input = (
-                    interrupt_summary
-                    + "\n\n--- 任务被新消息中断 ---\n\n"
-                    + "**新消息**：" + current_input
+                # 将中断摘要注入 agent messages（作为上下文），新消息独立处理
+                interrupt_context = (
+                    "[任务被中断，以下是已完成的进度]\n\n"
+                    + interrupt_summary
+                    + "\n\n--- 新消息已处理完毕，继续之前的任务 ---\n\n"
+                    + "请根据上述进度，继续完成原来的任务。如果任务已经完成或不需要继续，请告知用户。"
                 )
+                # 注入摘要到 agent messages（作为 context，不作为 user_input）
+                self.agent.llm.messages.append({"role": "user", "content": interrupt_context})
+                # 新消息保持原样，独立处理
+                # current_input 不变，直接 continue 让循环把它作为新的 user_input
 
                 continue  # 循环处理新消息
 
