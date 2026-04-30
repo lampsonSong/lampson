@@ -644,6 +644,13 @@ class Session:
             self.agent.skill_index = self.skill_index
             skills_tools_reg.set_retrieval_indices(self.skill_index, self.project_index)
 
+    def _refresh_system_prompt(self) -> None:
+        """skills/projects 变更后刷新 system prompt，让后续轮次感知。"""
+        try:
+            self.agent.llm.refresh_system_prompt()
+        except Exception:
+            pass
+
     def load_session(self, session_id: str = "", limit: int = 50) -> str:
         """加载指定或最近 session 的对话历史到当前 llm.messages。
 
@@ -862,6 +869,7 @@ class Session:
             # 重新加载技能
             self.skills.clear()
             self.skills.update(skills_mgr.load_all_skills())
+            self._refresh_system_prompt()
             return result
 
         if sub == "consolidate":
@@ -885,6 +893,7 @@ class Session:
             self.skills.clear()
             self.skills.update(skills_mgr.load_all_skills())
             self._reload_skill_index()
+            self._refresh_system_prompt()
             return f"分析：{analysis}\n\n{result}"
 
         return "用法: /skills [list|show <name>|create <name>|consolidate]"

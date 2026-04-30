@@ -6,12 +6,15 @@
 from __future__ import annotations
 
 import copy
+import logging
 from typing import Any
 
 from openai import OpenAI, APITimeoutError, APIConnectionError, RateLimitError
 from openai.types.chat import ChatCompletion
 
 from src.core.prompt_builder import PromptBuilder
+
+logger = logging.getLogger(__name__)
 
 
 class LLMClient:
@@ -42,6 +45,19 @@ class LLMClient:
         """设置 system prompt（通过 PromptBuilder 分层构建）。"""
         content = self._prompt_builder.build()
         self.messages = [{"role": "system", "content": content}]
+
+    def refresh_system_prompt(self) -> None:
+        """原地刷新 system prompt 内容（不丢弃对话历史）。
+
+        适用于 skills/projects 在对话中途被修改后，需要让后续轮次感知到变更。
+        """
+        new_content = self._prompt_builder.build()
+        if self.messages and self.messages[0].get("role") == "system":
+            self.messages[0]["content"] = new_content
+            logger.debug("已刷新 system prompt（skills/projects 索引已更新）")
+        else:
+            # 没有 system message（异常情况），插入到开头
+            self.messages.insert(0, {"role": "system", "content": new_content})
 
     def add_user_message(self, content: str) -> None:
         self.messages.append({"role": "user", "content": content})
