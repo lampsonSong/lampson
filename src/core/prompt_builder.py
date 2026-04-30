@@ -141,9 +141,9 @@ def build_skills_index() -> str:
     key = _skills_mtime_fingerprint(paths)
     lines: list[str] = [
         "## Skills（按需加载）",
-        "以下是你已掌握的技能目录，根据描述选择是否加载。",
-        "**规则**：当任务与某个 skill 相关时，调用 skill(action='view', name='技能名') 加载全文，然后按 skill 指导执行。",
-        "如果没有任何 skill 与当前任务相关，直接回答即可。",
+        "以下是你已掌握的技能目录，每项包含名称和描述。",
+        "**强制规则**：执行任何编码、调试、部署、代码审查等任务前，必须先调用 skill(action='view', name='对应技能名') 加载工作流全文，按工作流执行。不允许跳过这一步直接开始工作。",
+        "如果任务不涉及任何已列出的技能，直接回答即可。",
         "",
     ]
     for path in paths:
