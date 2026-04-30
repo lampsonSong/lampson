@@ -141,9 +141,9 @@ def build_skills_index() -> str:
     key = _skills_mtime_fingerprint(paths)
     lines: list[str] = [
         "## Skills（按需加载）",
-        "以下是你已掌握的技能目录，每项包含触发词。",
-        "**规则**：当用户输入匹配某个 skill 的触发词时，你必须在回复之前先调用 skill(action='view', name='技能名') 加载全文，然后按 skill 指导执行任务。",
-        "如果没有 skill 的触发词与当前任务相关，直接回答即可。",
+        "以下是你已掌握的技能目录，根据描述选择是否加载。",
+        "**规则**：当任务与某个 skill 相关时，调用 skill(action='view', name='技能名') 加载全文，然后按 skill 指导执行。",
+        "如果没有任何 skill 与当前任务相关，直接回答即可。",
         "",
     ]
     for path in paths:
@@ -160,12 +160,7 @@ def build_skills_index() -> str:
             name = path.parent.name
             desc = ""
             triggers = []
-        if isinstance(triggers, str):
-            tr_list = [triggers] if triggers.strip() else []
-        else:
-            tr_list = [str(t) for t in triggers] if isinstance(triggers, list) else []
-        trig_part = f"（触发: {', '.join(tr_list)}）" if tr_list else ""
-        lines.append(f"- **{name}**: {desc}{trig_part}")
+        lines.append(f"- **{name}**: {desc}")
     text = "\n".join(lines)
     _skills_index_cache = (key, text)
     return text

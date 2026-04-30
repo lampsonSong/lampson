@@ -50,8 +50,6 @@ class Agent:
         self.last_total_tokens: int = 0
         self.last_stop_reason: str | None = None
         self._fast_path_tool_count: int = 0
-        # 本轮激活的 skill 名称（由 _inject_skill 设置，用于反思判断）
-        self._last_activated_skill: str | None = None
 
         self._compaction_config: CompactionConfig | None = compaction_config
         self.max_tool_rounds: int = max_tool_rounds or _DEFAULT_MAX_TOOL_ROUNDS
@@ -646,10 +644,6 @@ class Agent:
     def run(self, user_input: str) -> str:
         """处理一轮用户输入，返回最终回复文本。"""
         self._consecutive_llm_failures = 0  # 新增：每次新任务开始时重置
-        self._last_activated_skill = None  # 重置 skill 激活标记
-
-        # 预匹配 skills，注入匹配的 skill 上下文
-        self._inject_skill(user_input)
 
         self.llm.add_user_message(user_input)
         try:
@@ -664,7 +658,7 @@ class Agent:
             goal=user_input,
             is_fast_path=True,
             tool_call_count=tool_count,
-            skill_activated=self._last_activated_skill,
+            skill_activated=None,
             recent_context=recent_context,
         )
         if reflection_hints:
