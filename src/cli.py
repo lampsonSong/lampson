@@ -230,6 +230,29 @@ def main() -> None:
 
     mgr = get_session_manager(config)
 
+    # 初始化 PlatformManager（多平台网关 + 后台任务支持）
+    import asyncio
+    import threading
+    from src.platforms.manager import PlatformManager
+    from src.platforms.adapters.cli import CliAdapter
+
+    pm = PlatformManager(config)
+    PlatformManager._instance = pm
+    _cli_loop = asyncio.new_event_loop()
+    pm._loop = _cli_loop
+    _cli_loop_thread = threading.Thread(target=_cli_loop.run_forever, daemon=True)
+    _cli_loop_thread.start()
+    pm.register(CliAdapter())
+
+    # 注册飞书 adapter（如果有配置）
+    feishu_cfg = config.get("feishu", {})
+    if feishu_cfg.get("app_id") and feishu_cfg.get("app_secret"):
+        from src.platforms.adapters.feishu import FeishuAdapter
+        pm.register(FeishuAdapter({
+            "app_id": feishu_cfg["app_id"],
+            "app_secret": feishu_cfg["app_secret"],
+        }))
+
     # 非交互模式
     if non_interactive_input is not None:
         session = mgr.get_or_create("cli", "default")

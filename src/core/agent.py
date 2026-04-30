@@ -77,6 +77,13 @@ class Agent:
         # 连续 LLM 调用失败计数：连续3次失败后触发熔断
         self._consecutive_llm_failures: int = 0
 
+        # ── fallback 缓存 ───────────────────────────────────────────────
+        # 主模型失败后 fallback 成功时，缓存该模型 10 分钟，避免每次重试主模型
+        self._fallback_cache_model: str = ""        # 缓存的 fallback 模型名
+        self._fallback_cache_adapter = None         # 缓存的 adapter
+        self._fallback_cache_llm = None             # 缓存的 LLMClient
+        self._fallback_cache_until: float = 0.0     # 缓存过期时间戳
+
         # ── trace / 完整复现 ───────────────────────────────────────────
         # session_id：由 Session 注入，用于写 trace 行到 JSONL
         self.session_id: str = ""
@@ -213,6 +220,22 @@ class Agent:
 
     # ── LLM 调用 ───────────────────────────────────────────────────────
 
+    def _set_fallback_cache(self, llm: LLMClient, adapter: BaseModelAdapter, ttl_seconds: int = 600) -> None:
+        """缓存成功的 fallback 模型，ttl_seconds 内优先使用。"""
+        import time as _time
+        self._fallback_cache_model = llm.model
+        self._fallback_cache_llm = llm
+        self._fallback_cache_adapter = adapter
+        self._fallback_cache_until = _time.time() + ttl_seconds
+        logger.info(f"已缓存 fallback 模型 {llm.model}，{ttl_seconds}s 内优先使用")
+
+    def _clear_fallback_cache(self) -> None:
+        """清除 fallback 缓存。"""
+        self._fallback_cache_model = ""
+        self._fallback_cache_llm = None
+        self._fallback_cache_adapter = None
+        self._fallback_cache_until = 0.0
+
     def _order_fallbacks(self, primary_base: str) -> list[tuple[LLMClient, BaseModelAdapter]]:
         """重排 fallback 模型：优先不同供应商，再排同供应商。
 
@@ -276,16 +299,59 @@ class Agent:
                 logger.info(f"  [{i}] role={m.get('role')}, tool_calls={tc_ids}, tool_call_id={m.get('tool_call_id')}")
 
     def _chat_with_fallback(self, tools=None):
-        """每次调用都从主模型开始，失败时按顺序尝试 fallback。
+        """从主模型开始，失败时 fallback；fallback 成功后缓存 10 分钟。
 
-        不会永久切换模型——fallback 成功后响应仍写回主模型的 messages，
-        下次调用再次从主模型开始尝试。
+        - 缓存有效期内直接用缓存的 fallback 模型，跳过主模型。
+        - 缓存过期后恢复正常流程，先试主模型。
+        - 不会永久切换模型——响应仍写回主模型的 messages。
         """
         # 防御性清理 messages：保证 tool_call 和 tool_result 完整匹配
         self._sanitize_tool_messages()
 
         # 检查中断（LLM 调用前）
         self.check_interrupt()
+
+        # 0. 检查 fallback 缓存：有效期内直接用缓存的模型
+        import time as _time
+        if (
+            self._fallback_cache_llm
+            and _time.time() < self._fallback_cache_until
+        ):
+            cached_name = self._fallback_cache_model
+            cached_llm = self._fallback_cache_llm
+            cached_adapter = self._fallback_cache_adapter
+            logger.info(f"fallback 缓存命中，直接使用 {cached_name}（剩余 {int(self._fallback_cache_until - _time.time())}s）")
+            try:
+                cached_llm.messages = list(self.llm.messages)
+                _fb_start = _session_store._now_ms()
+                result = cached_adapter.chat(cached_llm.messages, tools=tools, timeout=90)
+                _fb_end = _session_store._now_ms()
+                parsed = self.adapter.parse_response(result)
+                input_tokens = getattr(result.usage, 'prompt_tokens', 0) if result.usage else 0
+                output_tokens = getattr(result.usage, 'completion_tokens', 0) if result.usage else 0
+                _session_store.write_llm_call_trace(
+                    self.session_id,
+                    model=cached_name,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    duration_ms=_fb_end - _fb_start,
+                    stop_reason=parsed.finish_reason or "stop",
+                )
+                return result
+            except LLMContextTooLongError:
+                raise
+            except (LLMFatalError, LLMRateLimitError, LLMRetryableError) as e:
+                logger.warning(f"缓存模型 {cached_name} 也失败了，清除缓存，回退到正常流程: {e}")
+                self._clear_fallback_cache()
+                if self.session_id:
+                    _session_store.write_llm_error_trace(
+                        self.session_id,
+                        model=cached_name,
+                        error_type=type(e).__name__,
+                        detail=str(e)[:500],
+                        duration_ms=_session_store._now_ms() - _fb_start,
+                    )
+                # 继续走下面的正常流程
 
         # 1. 先试主模型（默认60s）
         _no_fallback = False
@@ -377,6 +443,8 @@ class Agent:
                     duration_ms=_fb_end - _fb_start,
                     stop_reason=parsed.finish_reason or "stop",
                 )
+                # 缓存成功的 fallback 模型，10 分钟内直接用
+                self._set_fallback_cache(fb_llm, fb_adapter, ttl_seconds=600)
                 return result
             except LLMContextTooLongError:
                 # prompt 超长换模型也没用，直接上抛

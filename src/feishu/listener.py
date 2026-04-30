@@ -169,7 +169,9 @@ class FeishuListener:
         if len(lines) > 15:
             elements.append({"tag": "markdown", "content": f"_...前 {len(lines) - 15} 条省略_"})
         for line in shown:
-            elements.append({"tag": "markdown", "content": line})
+            # 防御性截断：每行最多 200 字符，避免卡片超长导致 400
+            safe_line = line[:200] + ("..." if len(line) > 200 else "")
+            elements.append({"tag": "markdown", "content": safe_line})
         return {
             "schema": "2.0",
             "header": {
@@ -180,7 +182,7 @@ class FeishuListener:
         }
 
     def _send_progress_card(self, chat_id: str, lines: list[str], finished: bool = False) -> str | None:
-        """发送进度卡片，返回 message_id。"""
+        """发送进度卡片，返回 message_id。失败时 fallback 到文本消息。"""
         from src.feishu.client import get_client
         card = self._make_progress_card(lines, finished=finished)
         try:
@@ -188,7 +190,19 @@ class FeishuListener:
             data = client.send_card(receive_id=chat_id, card=card, receive_id_type="chat_id")
             return data.get("data", {}).get("message_id")
         except Exception as e:
-            print(f"[listener] 发送进度卡片失败: {e}", flush=True)
+            # 打印详细错误（含 response body）
+            resp_body = getattr(getattr(e, 'response', None), 'text', 'N/A')
+            print(f"[listener] 发送进度卡片失败: {e}\n  response: {resp_body[:500]}", flush=True)
+            # fallback: 用文本消息发送进度
+            try:
+                client = get_client()
+                status = "已完成" if finished else "处理中"
+                text_lines = [f"[Lampson 工作进度 - {status} ({len(lines)} 个工具调用)]"]
+                for line in lines[-10:]:
+                    text_lines.append(line[:150])
+                client.send_text(receive_id=chat_id, text="\n".join(text_lines), receive_id_type="chat_id")
+            except Exception as e2:
+                print(f"[listener] 进度文本 fallback 也失败: {e2}", flush=True)
             return None
 
     def _update_progress_card(self, message_id: str, lines: list[str], finished: bool = False) -> None:
@@ -196,7 +210,12 @@ class FeishuListener:
         from src.feishu.client import get_client
         card = self._make_progress_card(lines, finished=finished)
         client = get_client()
-        client.update_message(message_id=message_id, card=card)
+        try:
+            client.update_message(message_id=message_id, card=card)
+        except Exception as e:
+            resp_body = getattr(getattr(e, 'response', None), 'text', 'N/A')
+            print(f"[listener] 更新进度卡片失败: {e}\n  response: {resp_body[:500]}", flush=True)
+            raise
 
     # ─── Reaction（ack 表情）─────────────────────────────────────────────
 

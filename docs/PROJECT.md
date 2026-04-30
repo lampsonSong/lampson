@@ -1,6 +1,6 @@
 # Lampson 项目文档
 
-> 文档版本：2026-04-30（补 Heartbeat/Watchdog/Safe Mode 模块，更新已完成功能清单）
+> 文档版本：2026-04-30（按代码实际情况更新：工具列表11个、后台任务已实现、Prompt 8+1层、配置字段修正、命令列表完整）
 > 项目版本：v0.3.0-dev
 
 ---
@@ -144,7 +144,7 @@ lampson 命令（独立进程）
 | Config | `src/core/config.py` | 加载/保存配置，首次运行引导 |
 | Memory | `src/memory/manager.py` | 两层记忆（core.md + sessions/） |
 | Skills | `src/skills/manager.py` | 技能发现、匹配、加载 |
-| Skills Tools | `src/core/skills_tools.py` | Agent 可调用的 skill_view / skills_list / project_context |
+| Skills Tools | `src/core/skills_tools.py` | Agent 工具：skill / project_context / search_projects |
 | Feishu Client | `src/feishu/client.py` | 飞书 REST API 封装（发送/读取消息） |
 | Feishu Listener | `src/feishu/listener.py` | WebSocket 非阻塞监听（daemon thread），消息路由到 SessionManager |
 | Self-update | `src/selfupdate/updater.py` | 自更新流程（LLM生成方案 → 用户确认 → git分支执行） |
@@ -179,18 +179,22 @@ lampson 命令（独立进程）
 - System prompt 分层构建（9层）
 - 模型引导语（Model Guidance）
 
-#### 工具系统（9个工具）
+#### 工具系统（11个工具）
 | 工具 | 功能 | 安全机制 |
 |------|------|----------|
 | `shell` | 执行 shell 命令 | 危险命令拦截（rm -rf /、mkfs 等） |
+| `search` | 按文件名/内容搜索（ripgrep） | 自动加 -maxdepth 保护远程机器 |
 | `file_read` | 读文件 | 100KB 大小限制 |
 | `file_write` | 写文件 | 自动创建父目录 |
+| `web_search` | DuckDuckGo HTML 搜索 | - |
 | `feishu_send` | 发送飞书消息 | - |
 | `feishu_read` | 读取飞书消息 | - |
-| `web_search` | DuckDuckGo 搜索 | - |
-| `skill_view` | 按需加载技能全文 | - |
-| `skills_list` | 列出/搜索技能 | - |
+| `skill` | 按名称加载/搜索技能（action=view/search） | - |
 | `project_context` | 加载项目上下文 | - |
+| `search_projects` | 语义搜索项目索引 | - |
+| `session` | 搜索/加载历史会话（action=search/load） | - |
+
+**注**：`skill_view` 和 `skills_list` 已合并为统一的 `skill` 工具，通过 `action` 参数区分。
 
 #### 记忆系统
 - 核心记忆 `core.md`：启动全量加载，5KB 限制，自动警告
@@ -238,7 +242,7 @@ lampson 命令（独立进程）
 ### 3.2 暂未实现（Roadmap）
 ### 3.2 暂未实现（Roadmap）
 
-- **TaskQueue 后台任务架构**：多任务并行/排队/探索/缓存推送（设计文档：`docs/task-queue-design.md`，纯设计零代码）
+- **后台任务**：轻量版已完成（`src/platforms/background.py`），支持 `/background`、`/tasks`、`/cancel`，不做 TaskQueue/持久化/状态机
 - **主动探索能力**：工具连续失败自动探索根因（设计文档：`docs/self-exploration-design.md`，纯设计零代码）
 - MCP Server 接入（预留接口，Phase 2）
 - `file_edit`（patch 模式）
@@ -299,6 +303,8 @@ class Session:
 - `last_activity_at: float` — 秒级时间戳，`handle_input()` 被调用时更新
 - `_session_manager: SessionManager` — SessionManager 引用（用于 FeishuListener 路由）
 
+**支持的命令**：`/help` `/config` `/model` `/memory` `/skills` `/feishu` `/update` `/metrics` `/compaction` `/search` `/resume` `/background` `/tasks` `/cancel` `/safemode` `/new` `/exit`
+
 ### 4.3 SessionManager Idle 重置 (`src/core/session_manager.py`)
 
 **核心机制**：Session 3 小时（180 分钟）无任何对话活动自动结束，创建新的空白 session。
@@ -331,69 +337,67 @@ class SessionManager:
 ```python
 class Agent:
     def run(self, user_input: str) -> str:
+        # 预匹配 skills，单个匹配时注入 skill body
+        self._inject_skill(user_input)
         self.llm.add_user_message(user_input)
-        if native: return self._run_native()   # tool_calls 模式
-        else:      return self._run_prompt_based()  # XML tag 模式
+        return self._run_tool_loop()   # 统一入口，含 fallback 逻辑
 
-    def _run_native(self):
-        for _ in range(MAX_TOOL_ROUNDS=10):
-            response = self.llm.chat(tools=schemas)
-            if stop: return content
-            for tool_call in message.tool_calls:
-                result = dispatch(tool_name, args)
-                self.llm.add_tool_result(id, result)
-```
+    def _run_tool_loop(self):
+        for round_num in range(self.max_tool_rounds):  # 默认 30
+            response = self._chat_with_fallback(tools=self._tools)
+            # 检查中断、解析 tool_calls、分发执行
+            ...
+        # 达到上限：LLM 总结现状后自动继续，直到主动声明完成
 
-**设计决策**：
-- 最多 10 轮工具调用，防止死循环
-- Skills 通过 `skill_view(name)` 工具按需加载，不每轮自动注入
-- `_inject_tools_prompt()` 只在 prompt-based 模式注入一次
+    def _chat_with_fallback(self, tools):
+        # 主模型失败时按供应商分组切换 fallback（不永久切换，下次从主模型重试）
+
 
 ### 4.5 LLM 客户端 (`src/core/llm.py`)
 
 ```python
 class LLMClient:
-    def __init__(
-        api_key, base_url, model,
-        supports_native_tool_calling=True
-    ):
-    def chat(tools=None) -> ChatCompletion:
-        # 原生模式: 传 tools 给 SDK
-        # prompt模式: 不传 tools，暂存到 _pending_tools
+    def __init__(api_key, base_url, model, channel="cli", timeout=60.0):
+        # 消息管理与 API 调用封装，tool calling 逻辑由 Model Adapter 处理
+    def set_system_context() -> None:      # 设置 system prompt
+    def refresh_system_prompt() -> None:   # 原地刷新（skill/project 中途变更后）
+    def migrate_from(old_llm) -> None:     # 迁移对话历史到新 client
 ```
 
-**异常处理**：超时、连接错误、频率限制
+**Tool calling 逻辑**已从 `LLMClient` 移至 `Model Adapter` 层（`src/core/adapters/`）。
+**异常处理**：通过 `adapters/base.py` 的自定义异常分类——LLMRetryableError / LLMRateLimitError / LLMFatalError / LLMContextTooLongError
 
 ### 4.6 分层 System Prompt (`src/core/prompt_builder.py`)
 
-9层结构：
+8+1 层结构：
 
 | 层 | 内容 | 说明 |
 |----|------|------|
 | L1 | Identity | `~/.lampson/SOUL.md` 全文，Lampson 身份声明 |
-| L2 | Tool Guidance | Memory/Skills/Session-Search 使用指引 |
+| L2 | Tool Guidance | Memory 使用指引 + Skills 索引块 + Session Search + Skills 维护指引 |
 | L3 | Memory Block | `core.md` 全文 |
-| L4 | Project Index | 项目索引 + `project_context` 工具 |
+| L4 | Project Index | `projects_index.md` + `project_context` 工具 |
 | L5 | Context Files | `.lampson.md` / `AGENTS.md` |
-| L6 | Model Guidance | 模型适配语（GLM 等） |
-| L7 | Platform Hints + **USER.md** + DAEMON_HINTS | CLI 环境提示；**USER.md 全文（用户画像）**；daemon 身份声明 |
+| L6 | Model Guidance | 模型适配语（按模型名称动态加载） |
+| L7 | Platform Hints | CLI 环境提示 + 远程机器 SSH 指引 |
+| L7.5 | Channel Context（条件） | 非 CLI 渠道时注入消息来源标识 |
 | L8 | Timestamp | 会话开始时间 |
 
-**SOUL.md vs USER.md 边界**：SOUL.md 是 Lampson 的自我认知，USER.md 是服务对象的画像。两者分离，不混在一起。
-- SOUL.md：Lampson 是什么、怎么运行、会什么工具
-- USER.md：用户昵称、chat_id、沟通偏好、渠道偏好
+**注**：USER.md 和 DAEMON_HINTS 在代码中不存在。Channel Context（L7.5）为条件层，文档原版漏记。
 
 ### 4.7 工具注册与分发 (`src/core/tools.py`)
 
 ```python
-_REGISTRY: dict[str, tuple[schema, runner]]
+_REGISTRY: dict[str, tuple[schema, runner]]  # 共 11 个工具
 
-def dispatch(tool_name, arguments_raw):
-    # JSON字符串 → dict → runner 执行
-    # 异常捕获，返回错误信息字符串
+_register(schema, runner)  # 模块加载时注册，懒加载飞书客户端
+dispatch(tool_name, arguments_raw)
+get_all_schemas() -> list[dict]  # 返回所有 schema 供 LLM 调用
+register_external(schema, runner)  # 供外部模块动态注册
 ```
 
-每个工具提供：schema（OpenAI function calling 格式）+ runner（实际执行函数）。
+**11 个注册工具**：shell, search, file_read, file_write, web_search, feishu_send, feishu_read, skill, project_context, search_projects, session
+**飞书工具懒加载**：feishu 客户端在首次调用时从 config 读取 app_id/secret 初始化。
 
 ### 4.8 记忆管理 (`src/memory/manager.py`)
 
@@ -518,7 +522,7 @@ total_tokens > context_window × 80% ?
 
 ### 4.14 任务规划 (`src/planning/`)
 
-设计文档：`docs/planning-design.md`
+（planning 模块无独立设计文档，设计细节在本文档 4.14 节）
 
 **模块组成**：
 
@@ -607,35 +611,42 @@ GC：`gc_tool_bodies(ttl_days=60)` 按 mtime 清理过期文件。
 
 ```yaml
 llm:
-  api_key: ""                                     # 智谱 API Key（必填）
+  api_key: ""                                        # 智谱 API Key（必填）
   base_url: "https://open.bigmodel.cn/api/paas/v4/"  # LLM API 地址
-  model: "glm-5.1"                               # 模型名
-  native_tool_calling: true                        # 是否使用原生 tool_calls（默认 true）
+  model: "glm-5.1"                                   # 模型名
 
 feishu:
-  app_id: ""                                      # 飞书应用 App ID（可选）
-  app_secret: ""                                  # 飞书应用 App Secret（可选）
-  chat_ids: []                                    # 要监听的 chat_id 列表（可选）
+  app_id: ""      # 飞书应用 App ID（可选）
+  app_secret: ""  # 飞书应用 App Secret（可选）
 
-memory_path: "~/.lampson/memory"                  # 记忆文件目录
-skills_path: "~/.lampson/skills"                  # 技能文件目录
+memory_path: "~/.lampson/memory"   # 记忆文件存储路径
+skills_path: "~/.lampson/skills"   # 技能文件存储路径
+projects_path: "~/.lampson/projects"  # 项目记录目录（.md）
+
+skills_management:
+  cleanup_max_skills: 300      # 触发冷技能清理的 skill 总数阈值
+  cleanup_age_days: 10         # 创建超过此天数的 skill 参与清理
+  cleanup_min_invocations: 0   # 调用次数不超过此值的参与清理
+
+embedding:
+  provider: "zhipu"
+  model: "embedding-3"
+  # base_url / api_key 需显式配置，不配则降级为纯关键词搜索
+
+retrieval:
+  skill_top_k: 3
+  project_top_k: 2
+  similarity_threshold: 0.3
 
 compaction:
-  enabled: true                                   # 是否启用自动压缩
-  trigger_threshold: 0.8                          # 触发压缩的 token 占比（0-1）
-  end_threshold: 0.3                              # 压缩后的目标 token 占比
-  context_window: 131072                          # 模型上下文窗口大小（token 数）
-  max_iterations: 3                               # 单次压缩最大迭代轮数
-  enable_archive: true                            # 是否启用归档阶段（写入 skill/project）
-
-# MCP 服务器配置（Phase 2 预留）
-# mcp:
-#   servers:
-#     - name: filesystem
-#       command: "npx"
-#       args: ["-y", "@modelcontextprotocol/server-filesystem", "/home/user"]
-#       enabled: true
+  enabled: true
+  trigger_threshold: 0.8
+  end_threshold: 0.3
+  context_window: 131072
+  max_iterations: 3
+  enable_archive: true
 ```
+**注**：`native_tool_calling` 和 `chat_ids` 字段已从配置中移除。`embedding` / `retrieval` / `skills_management` 为文档原版漏记的实际配置项。
 
 **首次运行**：`lampson` 启动 REPL，若未配置则自动进入 `run_setup_wizard()` 引导填写 API Key 等信息。
 
@@ -771,22 +782,22 @@ vim ~/.lampson/config.yaml
 ~/.lampson/
 ├── config.yaml          # 主配置文件
 ├── SOUL.md              # Lampson 身份声明
-├── USER.md              # 用户画像（注入 system prompt）
 ├── boot_tasks.json      # 重启前待办（daemon 读后清空）
+├── projects_index.md    # 项目索引（LLM 动态更新）
 ├── memory/
 │   ├── core.md          # 核心记忆
+│   ├── errors.jsonl     # 结构化错误日志
 │   └── sessions/        # 会话摘要
 │       └── 2026-04-24.md
-├── skills/              # 用户技能
+├── skills/              # 用户技能（LLM 反思自动创建/更新）
 │   ├── code-writing/
-│   │   └── SKILL.md
 │   └── debug/
-│       └── SKILL.md
-├── projects_index.md    # 项目索引
+├── projects/            # 项目上下文（LLM 反思自动沉淀）
 └── logs/
     ├── launchd.log     # daemon stdout
     └── launchd.err.log  # daemon stderr
 ```
+**注**：USER.md 在代码中不存在，skills/sessions/projects 等目录为运行时自动创建。
 
 ### 7.5 内置技能安装
 
@@ -810,7 +821,14 @@ vim ~/.lampson/config.yaml
 | 飞书 WebSocket 监听 | done | 长连接 + 去重，走 Session |
 | 飞书轮询监听 | done | 备选方案（已删除，只保留 WebSocket） |
 | 核心记忆 | done | core.md 全量加载 |
-| 技能系统 | done | 发现/匹配/加载 |
+| 技能系统 | done | 发现/匹配/加载，含 SkillIndex 加速匹配 |
+| 搜索工具 search | done | 合并 search_files + search_content（ripgrep），自动加 -maxdepth |
+| session 历史工具 | done | 合并 session_search + session_load（action=search/load）|
+| 语义搜索 search_projects | done | 项目上下文语义检索 |
+| 后台任务 background | done | `/background` `/tasks` `/cancel`，轻量版不做 TaskQueue |
+| SkillIndex 索引 | done | 关键词索引 + 增量构建，加速 skill 匹配 |
+| 反思沉淀 Reflection | done | skill/project 自动 create/update，trigger 自动更新 |
+| 多模型 fallback | done | 按供应商分组切换 fallback，不永久切换模型 |
 | 自更新 | done | git 分支 + 回滚 |
 | 首次运行引导 | done | API Key 配置 |
 | Prompt 分层 | done | 9层 system prompt |
@@ -826,7 +844,7 @@ vim ~/.lampson/config.yaml
 | 自我评估指标 (Metrics) | done | TaskCollector 记录每轮任务指标到 metrics.jsonl，/metrics 命令展示统计 |
 | 结构化错误日志 | done | log_error() 写入 errors.jsonl，含上下文快照，自动轮转（20MB） |
 | Trace Log | done | session_store 中的 trace 写入（system_prompt/llm_call/tool_call/tool_result），大型结果 hash 分离 |
-| LLM 熔断机制 | done | fallback 超时递减（30→20→15s），连续3次 LLM 失败退出 tool_loop，进度卡片发送熔断 |
+| LLM 熔断机制 | done | 主模型 60s / fallback 统一 90s；连续 3 次 LLM 失败退出 tool_loop；进度卡片发送熔断 |
 | 中断抢占 | done | 飞书并发：消息队列 + request_interrupt + AgentInterrupted + 线程池化 |
 | 反思沉淀 (Reflection) | done | 任务完成后自动反思：skill/project create/update，trigger 自动更新，频率控制 |
 | 进度回调 | done | Compaction 支持 progress_callback，临时 LLM 客户端 timeout 600s |
@@ -851,8 +869,8 @@ vim ~/.lampson/config.yaml
 | 裸 JSON 工具调用解析 | `session.py` | GPTOssModel 有时输出 `{"command":"..."}` 不走 `<tool_call:xxx>` 格式，加 json.loads fallback |
 | PLATFORM_HINTS 远程机器提示 | `prompt_builder.py` | 强制要求先 `project_context("machines")` 获取 SSH 别名，find 加 `-maxdepth` |
 | max_tool_rounds 循环模式 | `config.yaml`, `agent.py` | 从 config 读取，默认 30。30轮内解决则返回；达到上限则 LLM 总结现状后**自动继续**（不交用户选择），直到 LLM 主动声明完成 |
-| MessageDeduplicator TTL | `listener.py` | 60s → 600s，/model all 工具调用耗时超过 60s 导致重复处理 |
-| 过期消息丢弃 | `listener.py` | 投递延迟超过 60 秒的消息直接丢弃，防止飞书 WebSocket 积压后补投旧消息 |
+| MessageDeduplicator TTL | `listener.py` | 滑动窗口 TTL 600s（去重），过期消息丢弃阈值 300s（5分钟投递延迟）|
+| 过期消息丢弃 | `listener.py` | 投递延迟超过 300 秒的消息直接丢弃，防止 WebSocket 积压后补投旧消息 |
 | executor `_safe_replace_value` | `executor.py` | 多行 `$step[N].result` 引用截断为第一行，避免破坏 shell 命令语法 |
 | 删除 poller.py | `feishu/` | 只保留 WebSocket listener 模式 |
 
@@ -890,11 +908,11 @@ vim ~/.lampson/config.yaml
 **目标**：Lampson 能接一个复杂任务（如"帮我部署 XXX"、"实现 YYY 功能"），自主拆解、多轮执行、跟踪进度、遇到问题自行调整。
 
 现状：
-- Agent 单轮对话能力强（LLM + 9个工具）
+- Agent 单轮对话能力强（LLM + 11个工具）
 - Compaction 保证长对话不爆上下文
 - **任务规划器已实现**：`src/planning/` 模块（Planner + Executor + Plan 状态机），30 个测试全通过
 - Agent.run() 已集成规划器，所有输入统一走 Plan-and-Execute（1-step 退化 + 失败回退）
-- 设计文档：`docs/planning-design.md`
+- （planning 模块无独立设计文档，设计细节在本文档 4.14 节）
 
 已实现：
 - [x] **任务规划器（Planner）**：接收复杂任务后生成结构化执行计划（步骤列表）
@@ -945,10 +963,10 @@ vim ~/.lampson/config.yaml
 
 | 文件 | 说明 |
 |------|------|
-| `docs/PRD.md` | 产品需求文档 |
 | `docs/PROJECT.md` | 本文档 |
 | `docs/compaction-design.md` | Context Compaction 设计文档 |
-| `docs/planning-design.md` | 任务规划设计文档 |
+| `docs/platform-architecture-design.md` | 多平台架构设计方案（v2） |
+| `docs/compaction-design.md` | Context Compaction 设计文档 |
 | `pyproject.toml` | 包配置 |
 | `config/default.yaml` | 默认配置模板（含 compaction 配置） |
 | `config/default_skills/` | 内置技能 |
@@ -957,11 +975,17 @@ vim ~/.lampson/config.yaml
 | `src/cli.py` | CLI 入口（纯 Gateway：参数解析 + REPL） |
 | `src/core/session.py` | Session 中间层（生命周期 + 命令路由 + 压缩） |
 | `src/core/agent.py` | Agent 主循环（LLM + 工具 + 规划执行） |
-| `src/core/llm.py` | LLM 调用封装 |
+| `src/core/llm.py` | LLM 调用封装（消息管理 + API，tool calling 在 adapter 层）|
 | `src/core/prompt_builder.py` | 分层 Prompt 构建器 |
 | `src/core/tools.py` | 工具注册与分发 |
 | `src/core/config.py` | 配置管理 |
-| `src/core/skills_tools.py` | Skills 工具（skill_view 等） |
+| `src/core/skills_tools.py` | Agent 工具：skill / project_context / search_projects |
+| `src/tools/search.py` | search 工具：ripgrep 封装（mode=files/content） |
+| `src/tools/session.py` | session 工具：历史会话搜索/加载（action=search/load）|
+| `src/platforms/background.py` | 后台任务管理器：BackgroundTaskManager / BackgroundTask |
+| `src/platforms/manager.py` | PlatformManager（多渠道统一管理） |
+| `src/platforms/base.py` | PlatformAdapter 基类 |
+| `src/platforms/adapters/` | 各渠道 adapter 实现 |
 | `src/core/compaction.py` | 上下文压缩（归档+摘要） |
 | `src/planning/__init__.py` | 规划模块入口 |
 | `src/planning/steps.py` | Plan/Step 数据类 + 状态机 |
@@ -995,7 +1019,6 @@ vim ~/.lampson/config.yaml
 | `docs/session-continuity-design.md` | Session 连续性设计文档 |
 | `docs/heartbeat-design.md` | 心跳 + Watchdog 设计文档 |
 | `docs/self-exploration-design.md` | 主动探索能力设计文档（未实现） |
-| `docs/task-queue-design.md` | TaskQueue 后台任务架构设计文档（未实现） |
 | `tests/test_metrics.py` | Metrics 单元测试 |
 | `tests/test_error_log.py` | Error Log 单元测试 |
 | `tests/test_trace.py` | Trace Log 单元测试 |

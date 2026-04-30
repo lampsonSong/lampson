@@ -52,6 +52,9 @@ HELP_TEXT = """\
   /search <keyword>              搜索历史对话记录
   /resume                        列出最近 5 个 session
   /resume <id>                   加载指定 session 到当前对话
+  /background <prompt>           后台运行任务，完成后推送结果
+  /tasks                         查看运行中的后台任务
+  /cancel <task_id>              取消后台任务
   /skills list                   列出所有技能
   /skills show <name>            查看技能详情
   /skills create <name>          创建新技能
@@ -209,6 +212,95 @@ class Session:
         """由 gateway 层（listener）在 handle_input 前调用，注入当条消息的元数据。"""
         self._current_message_id = message_id
         self._current_chat_id = chat_id
+
+    def set_reply_channel(self, platform: str, chat_id: str,
+                          thread_id: str | None = None) -> None:
+        """注入回复渠道，PlatformManager 在 dispatch 时调用。"""
+        from src.platforms.manager import PlatformManager
+        mgr = PlatformManager.instance()
+        self._reply_adapter = mgr._adapters.get(platform)
+        self._reply_chat_id = chat_id
+        self._reply_thread_id = thread_id
+
+    def _send_reply_via_channel(self, text: str) -> None:
+        """通过主事件循环安全发送回复（避免 asyncio.run 嵌套）。"""
+        if not getattr(self, "_reply_adapter", None):
+            return
+        from src.platforms.manager import PlatformManager
+        mgr = PlatformManager.instance()
+        if mgr._loop is None:
+            return
+        coro = self._reply_adapter.send(
+            self._reply_chat_id, text, getattr(self, "_reply_thread_id", None)
+        )
+        mgr.schedule_async(coro)
+
+    def _snapshot_context(self, max_turns: int = 6) -> "ContextSnapshot":
+        """提取当前 session 上下文快照，供后台任务继承。"""
+        from src.platforms.background import ContextSnapshot
+        messages = self.agent.llm.messages
+
+        recent = []
+        for msg in reversed(messages):
+            role = msg.get("role", "")
+            if role in ("user", "assistant") and len(recent) < max_turns * 2:
+                recent.insert(0, {"role": role, "content": msg.get("content", "")[:500]})
+
+        system = ""
+        if messages and messages[0].get("role") == "system":
+            system = messages[0].get("content", "")
+
+        return ContextSnapshot(
+            recent_messages=recent,
+            system_prompt=system,
+            session_id=self.session_id,
+            channel=self.channel,
+            chat_id=self._current_chat_id,
+        )
+
+    def _handle_background(self, prompt: str) -> HandleResult:
+        """处理 /background 命令：启动后台任务。"""
+        from src.platforms.manager import PlatformManager
+        snapshot = self._snapshot_context()
+        mgr = PlatformManager.instance()
+        task_id = mgr._background_mgr.start(
+            prompt=prompt,
+            platform=self.channel,
+            chat_id=self._current_chat_id,
+            thread_id=None,
+            snapshot=snapshot,
+        )
+        preview = prompt[:60] + ("..." if len(prompt) > 60 else "")
+        reply = (
+            f"🔄 后台任务已启动\n"
+            f"Task ID: {task_id}\n"
+            f'"{preview}"\n\n'
+            f"完成后会自动通知，继续聊天即可。"
+        )
+        return HandleResult(reply=reply, is_command=True)
+
+    def _handle_tasks(self) -> HandleResult:
+        """处理 /tasks 命令：列出运行中的后台任务。"""
+        from src.platforms.manager import PlatformManager
+        mgr = PlatformManager.instance()
+        tasks = mgr._background_mgr.list()
+        if not tasks:
+            return HandleResult(reply="当前没有运行中的后台任务。", is_command=True)
+        lines = ["运行中的后台任务：\n"]
+        for t in tasks:
+            lines.append(f"  - [{t['status']}] {t['task_id']}: {t['prompt']}")
+        return HandleResult(reply="\n".join(lines), is_command=True)
+
+    def _handle_cancel(self, parts: list[str]) -> HandleResult:
+        """处理 /cancel 命令：取消后台任务。"""
+        if len(parts) < 2:
+            return HandleResult(reply="用法: /cancel <task_id>", is_command=True)
+        from src.platforms.manager import PlatformManager
+        mgr = PlatformManager.instance()
+        ok = mgr._background_mgr.cancel(parts[1])
+        if ok:
+            return HandleResult(reply=f"已取消任务 {parts[1]}", is_command=True)
+        return HandleResult(reply=f"取消失败：任务 {parts[1]} 不存在或已完成", is_command=True)
 
     # ── 工厂方法 ──
 
@@ -771,6 +863,18 @@ class Session:
 
         if command == "/search":
             return HandleResult(reply=self._handle_search(parts), is_command=True)
+
+        if command == "/background":
+            prompt = " ".join(parts[1:]) if len(parts) > 1 else ""
+            if not prompt:
+                return HandleResult(reply="用法: /background <prompt>", is_command=True)
+            return self._handle_background(prompt)
+
+        if command == "/tasks":
+            return self._handle_tasks()
+
+        if command == "/cancel":
+            return self._handle_cancel(parts)
 
         if command == "/safemode":
             return HandleResult(reply="正在切换到安全模式...", is_safe_mode=True, is_command=True)

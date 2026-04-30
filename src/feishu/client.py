@@ -93,10 +93,17 @@ class FeishuClient:
             card: 卡片内容字典，参考飞书卡片格式
             receive_id_type: ID 类型，默认 user_id
         """
+        card_json = json.dumps(card, ensure_ascii=False)
+        # 飞书 interactive 消息 content 上限约 30KB，超出会 400
+        MAX_CONTENT_LEN = 28000
+        if len(card_json) > MAX_CONTENT_LEN:
+            import logging as _log
+            _log.getLogger(__name__).warning(f"卡片内容过长 ({len(card_json)} chars)，截断到 {MAX_CONTENT_LEN}")
+            card_json = card_json[:MAX_CONTENT_LEN]
         payload = {
             "receive_id": receive_id,
             "msg_type": "interactive",
-            "content": json.dumps(card, ensure_ascii=False),
+            "content": card_json,
         }
         resp = self._http.post(
             f"{FEISHU_BASE}/im/v1/messages",
@@ -104,6 +111,9 @@ class FeishuClient:
             headers=self._headers(),
             json=payload,
         )
+        if resp.status_code >= 400:
+            import logging as _log
+            _log.getLogger(__name__).error(f"飞书卡片发送 {resp.status_code}: {resp.text[:500]}")
         resp.raise_for_status()
         data = resp.json()
         if data.get("code") != 0:
