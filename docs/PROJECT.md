@@ -1,6 +1,6 @@
 # Lampson 项目文档
 
-> 文档版本：2026-04-29（全面整理：补 metrics/error_log/trace/熔断/反思模块，合并冗余文档）
+> 文档版本：2026-04-30（补 Heartbeat/Watchdog/Safe Mode 模块，更新已完成功能清单）
 > 项目版本：v0.3.0-dev
 
 ---
@@ -157,6 +157,9 @@ lampson 命令（独立进程）
 | Reflection | `src/core/reflection.py` | 任务完成后反思沉淀（skill/project 自动创建/更新） |
 | Interrupt | `src/core/interrupt.py` | AgentInterrupted 异常 + 中断标志位 |
 | Adapters | `src/core/adapters/` | 多模型适配层（BaseModelAdapter + MiniMax/GPTOss 等实现） |
+| Heartbeat | `src/core/heartbeat.py` | 进程内心跳管理器，定期写心跳文件，支持 user_stopped 标记 |
+| Watchdog | `src/watchdog.py` | 独立看门狗进程，监控 daemon 心跳，超时则通过 launchctl 重启 |
+| Safe Mode | `src/safe_mode.py` | 安全恢复入口，支持备份/恢复/飞书监听/最小化 LLM 对话 |
 
 
 ## 三、功能清单
@@ -233,7 +236,10 @@ lampson 命令（独立进程）
 - 压缩失败不影响正常对话
 
 ### 3.2 暂未实现（Roadmap）
+### 3.2 暂未实现（Roadmap）
 
+- **TaskQueue 后台任务架构**：多任务并行/排队/探索/缓存推送（设计文档：`docs/task-queue-design.md`，纯设计零代码）
+- **主动探索能力**：工具连续失败自动探索根因（设计文档：`docs/self-exploration-design.md`，纯设计零代码）
 - MCP Server 接入（预留接口，Phase 2）
 - `file_edit`（patch 模式）
 - `code_search`（代码搜索）
@@ -242,8 +248,6 @@ lampson 命令（独立进程）
 - 语义搜索记忆
 - TUI 界面
 - 多用户支持
-
----
 
 ## 四、模块详解
 
@@ -829,6 +833,11 @@ vim ~/.lampson/config.yaml
 | /search 命令 | done | 跨 session 搜索历史消息 |
 | /resume 命令 | done | 加载指定 session 对话历史到当前对话 |
 | /new 命令 | done | 结束当前 session，创建空白 session |
+| Heartbeat 心跳 | done | HeartbeatManager 独立线程定期写心跳文件，支持 user_stopped 标记（daemon 退出时） |
+| Watchdog 看门狗 | done | 独立进程监控 daemon 心跳，30s 超时判定死亡，launchctl kickstart 重启，user_stopped 不重拉 |
+| Safe Mode 安全模式 | done | daemon 异常时的恢复入口：备份/恢复 skills+memory、飞书监听、shell 命令、最小 LLM 对话 |
+| Session 连续性 | done | session_store JSONL 持久化 + session_search FTS5 搜索 + /search + /resume 命令 |
+| SkillIndex 索引 | done | 关键词索引 + 增量构建，加速 skill 匹配 |
 
 ### 8.2 2026-04-25 更新：/model 多模型对比 + 飞书稳定性
 
@@ -984,6 +993,9 @@ vim ~/.lampson/config.yaml
 | `docs/skills-system-design.md` | 技能系统设计文档（含反思机制） |
 | `docs/interrupt-design.md` | 中断抢占设计文档 |
 | `docs/session-continuity-design.md` | Session 连续性设计文档 |
+| `docs/heartbeat-design.md` | 心跳 + Watchdog 设计文档 |
+| `docs/self-exploration-design.md` | 主动探索能力设计文档（未实现） |
+| `docs/task-queue-design.md` | TaskQueue 后台任务架构设计文档（未实现） |
 | `tests/test_metrics.py` | Metrics 单元测试 |
 | `tests/test_error_log.py` | Error Log 单元测试 |
 | `tests/test_trace.py` | Trace Log 单元测试 |
@@ -994,3 +1006,7 @@ vim ~/.lampson/config.yaml
 | `tests/test_skills_on_demand.py` | 按需加载测试 |
 | `tests/test_interrupt_mechanism.py` | 中断机制测试 |
 | `tests/test_adapters.py` | 模型适配层测试 |
+| `src/core/heartbeat.py` | 心跳管理器（HeartbeatManager + HeartbeatRecord） |
+| `src/watchdog.py` | Watchdog 看门狗主逻辑（独立进程） |
+| `src/safe_mode.py` | Safe Mode 安全恢复入口 |
+| `docs/heartbeat-design.md` | 心跳 + Watchdog 设计文档 |

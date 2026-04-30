@@ -115,23 +115,114 @@ def close_orphan_sessions() -> int:
     """关闭所有未正常结束的孤儿 session（ended_at IS NULL）。
 
     在进程启动时调用，清理上次异常退出留下的 session。
+    
+    防御策略：
+    1. 先执行 UPDATE ... WHERE ended_at IS NULL
+    2. 验证 + WAL checkpoint 重试（防止 SQLite WAL 竞态）
+    3. 扫描 JSONL 兜底（防止 SQLite 完全没记录的 session）
+    
     Returns: 关闭的 session 数量。
     """
     now_ms = _now_ms()
     conn = _get_db()
+    total_closed = 0
     try:
+        # 第一轮：标准 UPDATE
         cursor = conn.execute(
             "UPDATE sessions SET ended_at = ? WHERE ended_at IS NULL",
             (now_ms,),
         )
-        count = cursor.rowcount
+        total_closed = cursor.rowcount
         conn.commit()
-        if count > 0:
+
+        # 第二轮：验证 — WAL checkpoint 后重试
+        remaining = conn.execute(
+            "SELECT session_id FROM sessions WHERE ended_at IS NULL"
+        ).fetchall()
+        if remaining:
+            try:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except Exception:
+                pass
+            conn.commit()
+            cursor = conn.execute(
+                "UPDATE sessions SET ended_at = ? WHERE ended_at IS NULL",
+                (now_ms,),
+            )
+            total_closed += cursor.rowcount
+            conn.commit()
+
+        # 第三轮：JSONL 兜底 — 扫描有 start 无 end 的孤儿
+        jsonl_orphans = _find_jsonl_orphan_sessions()
+        for sid in jsonl_orphans:
+            end_row = {"ts": now_ms, "session_id": sid, "type": "session_end"}
+            _jsonl_append(sid, end_row)
+            conn.execute(
+                "UPDATE sessions SET ended_at = ? WHERE session_id = ? AND ended_at IS NULL",
+                (now_ms, sid),
+            )
+            total_closed += 1
+        if jsonl_orphans:
+            conn.commit()
+
+        if total_closed > 0:
             import logging
-            logging.getLogger(__name__).info(f"已关闭 {count} 个孤儿 session")
-        return count
+            logging.getLogger(__name__).info(
+                f"已关闭 {total_closed} 个孤儿 session"
+                + (f"（含 {len(jsonl_orphans)} 个 JSONL 兜底）" if jsonl_orphans else "")
+            )
+            print(
+                f"[session_store] 已关闭 {total_closed} 个孤儿 session", flush=True
+            )
+        return total_closed
     finally:
         conn.close()
+
+
+def _find_jsonl_orphan_sessions() -> list[str]:
+    """扫描 JSONL 文件，找出有 session_start 但无 session_end 的孤儿 session。
+
+    只扫描最近 2 天的文件，避免扫描全量历史。
+    Returns: 孤儿 session_id 列表。
+    """
+    orphans: list[str] = []
+    from datetime import timedelta
+
+    check_dates = [
+        date.today().isoformat(),
+        (date.today() - timedelta(days=1)).isoformat(),
+    ]
+    for d in check_dates:
+        day_dir = SESSIONS_DIR / d
+        if not day_dir.exists():
+            continue
+        for jsonl_path in day_dir.rglob("*.jsonl"):
+            try:
+                has_start = False
+                has_end = False
+                sid = ""
+                with open(jsonl_path, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            row = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        t = row.get("type", "")
+                        if t == "session_start":
+                            has_start = True
+                            sid = row.get("session_id", "")
+                        elif t == "session_end":
+                            has_end = True
+                if has_start and not has_end and sid:
+                    orphans.append(sid)
+            except OSError:
+                continue
+    return orphans
+
+
 
 
 def purge_empty_sessions() -> int:

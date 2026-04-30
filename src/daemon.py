@@ -281,6 +281,13 @@ def _restore_daemon(mgr) -> None:
 
 
 def main() -> None:
+    # 强制 stdout/stderr 行缓冲：launchd 重定向到文件时默认全缓冲，
+    # 会导致日志丢失（进程崩溃时缓冲区内容不刷盘）。
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(line_buffering=True)
+
     parser = argparse.ArgumentParser(
         prog="python -m src.daemon",
         description=(
