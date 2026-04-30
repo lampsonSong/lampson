@@ -127,6 +127,8 @@ class Agent:
             f"{skill.body[:2000]}"
             + ("...(已截断)" if len(skill.body) > 2000 else "")
         )
+        # 记录激活的 skill（供反思使用）
+        self._last_activated_skill = skill.name
         # 插在 user message 之前
         self.llm.messages.append({"role": "user", "content": inject})
 
@@ -576,6 +578,7 @@ class Agent:
     def run(self, user_input: str) -> str:
         """处理一轮用户输入，返回最终回复文本。"""
         self._consecutive_llm_failures = 0  # 新增：每次新任务开始时重置
+        self._last_activated_skill = None  # 重置 skill 激活标记
 
         # 预匹配 skills，注入匹配的 skill 上下文
         self._inject_skill(user_input)
@@ -588,11 +591,13 @@ class Agent:
             raise
 
         tool_count = getattr(self, "_fast_path_tool_count", 0)
+        recent_context = self._get_recent_context(max_turns=5)
         reflection_hints = self._maybe_reflect(
             goal=user_input,
             is_fast_path=True,
             tool_call_count=tool_count,
             skill_activated=self._last_activated_skill,
+            recent_context=recent_context,
         )
         if reflection_hints:
             result += "\n\n" + "\n".join(reflection_hints)
@@ -689,6 +694,24 @@ class Agent:
         finally:
             self._compaction_lock.release()
 
+    def _get_recent_context(self, max_turns: int = 5) -> str:
+        """提取最近几轮对话的文本摘要，供反思模块分析。"""
+        messages = self.llm.messages
+        # 只取最近 max_turns*2 条（user+assistant 为一轮）
+        recent = messages[-(max_turns * 2):] if len(messages) > max_turns * 2 else messages
+        lines = []
+        for msg in recent:
+            role = msg.get("role", "")
+            if role not in ("user", "assistant"):
+                continue
+            c = msg.get("content", "")
+            if not c or c.startswith("[技能激活:"):
+                continue
+            # 截断过长内容
+            preview = c[:300] + ("..." if len(c) > 300 else "")
+            lines.append(f"{role}: {preview}")
+        return "\n".join(lines) if lines else "（无对话记录）"
+
     def _maybe_reflect(
         self,
         goal: str = "",
@@ -697,6 +720,7 @@ class Agent:
         tool_call_count: int = 0,
         intent: str = "",
         skill_activated: str | None = None,
+        recent_context: str = "",
     ) -> list[str]:
         """任务完成后触发反思，自动沉淀 skill 或 project 信息。"""
         from src.core.reflection import (
@@ -712,6 +736,7 @@ class Agent:
             tool_call_count=tool_call_count,
             intent=intent,
             skill_activated=skill_activated,
+            user_input=goal,
         ):
             return []
 
@@ -728,6 +753,7 @@ class Agent:
                 execution_summary=exec_summary,
                 llm_client=self.llm,
                 skill_activated=skill_activated,
+                recent_context=recent_context,
             )
             if not learnings:
                 return []

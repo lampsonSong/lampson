@@ -31,9 +31,9 @@ _REFLECT_COOLDOWN = 300  # 5 分钟
 _last_reflect_time: float = 0.0
 
 # Skill 内容最短长度（字符），低于此不创建
-_MIN_SKILL_CONTENT_LEN = 200
+_MIN_SKILL_CONTENT_LEN = 80
 # 新建 skill 至少需要多少个 trigger
-_MIN_TRIGGER_COUNT = 3
+_MIN_TRIGGER_COUNT = 1
 
 # 全局 LLM Client（由 Session 初始化时注入，供 _auto_consolidate 使用）
 _llm_client: Any = None
@@ -80,7 +80,8 @@ REFLECT_PROMPT = """你是一个知识管理助手。请分析这次任务执行
 - skill 的 content 应该是方法论（通用步骤），不是具体答案（具体路径）
 - project_update 的 content 是增量信息（新增内容），不是整个文件重写
 - triggers 应该覆盖用户未来可能的表达方式（中英文都要考虑）
-- 新建 skill 的 triggers 至少 3 个
+- 新建 skill 的 triggers 至少 1 个
+- 种子模式：如果知识值得记录但内容还不够丰富（比如刚学到一个操作技巧），可以只写简短描述 + 1 个触发词，后续会自动补充
 
 示例：
 {{"learnings": []}}
@@ -90,6 +91,20 @@ REFLECT_PROMPT = """你是一个知识管理助手。请分析这次任务执行
 
 # ── 公开接口 ─────────────────────────────────────────────────────────────────
 
+# 用户纠正信号关键词
+_CORRECTION_SIGNALS = (
+    "不对", "错了", "不是这样的", "应该是", "不应该", "不是", "你搞错",
+    "说错了", "理解错了", "搞反了", "反了", "为什么不是", "我想说的是",
+    "我的意思是", "不对吧", "弄错了", "搞混了",
+)
+
+
+def _detect_user_correction(user_input: str) -> bool:
+    """检测用户输入中是否包含纠正信号。"""
+    text = user_input.lower()
+    return any(sig in text for sig in _CORRECTION_SIGNALS)
+
+
 def should_reflect(
     plan: Plan | None = None,
     *,
@@ -97,6 +112,7 @@ def should_reflect(
     tool_call_count: int = 0,
     intent: str = "",
     skill_activated: str | None = None,
+    user_input: str = "",
 ) -> bool:
     """判断是否应该触发反思。"""
     import time
@@ -106,12 +122,16 @@ def should_reflect(
     if now - _last_reflect_time < _REFLECT_COOLDOWN:
         return False
 
+    # 用户纠正信号：始终触发反思（最高优先级）
+    if user_input and _detect_user_correction(user_input):
+        return True
+
     # Skill 被激活时：用户可能在使用或纠正 skill，始终值得反思
     if skill_activated:
         return True
 
-    # Fast Path 且只用了 0-1 个工具 → 跳过
-    if is_fast_path and tool_call_count <= 1:
+    # Fast Path 且没有工具调用 → 跳过（1 个工具也值得反思）
+    if is_fast_path and tool_call_count == 0:
         return False
 
     # 闲聊/简单查询 → 跳过
@@ -148,6 +168,7 @@ def reflect_and_learn(
     execution_summary: str,
     llm_client: Any,
     skill_activated: str | None = None,
+    recent_context: str = "",
 ) -> list[dict[str, Any]]:
     """执行反思，返回 learnings 列表。调用方负责后续的沉淀执行。"""
     import time
@@ -156,19 +177,23 @@ def reflect_and_learn(
     existing_skills = _get_existing_skills_summary()
     existing_projects = _get_existing_projects_summary()
 
-    # 构建反思上下文：如果有 skill 被激活，补充 skill 全文
-    skill_context = ""
+    # 构建反思上下文
+    extra_context = ""
+    # 1. 如果有 skill 被激活，补充 skill 全文
     if skill_activated:
         skill_summary = _get_skill_full_content(skill_activated)
         if skill_summary:
-            skill_context = "\n## 本轮激活的技能 [{}]\n{}".format(skill_activated, skill_summary)
+            extra_context += "\n## 本轮激活的技能 [{}]\n{}".format(skill_activated, skill_summary)
+    # 2. 补充最近对话上下文（让 LLM 看到用户反馈）
+    if recent_context and recent_context != "（无对话记录）":
+        extra_context += "\n## 最近对话\n{}".format(recent_context)
 
     prompt = REFLECT_PROMPT.format(
         goal=goal,
         execution_summary=execution_summary,
         existing_skills=existing_skills,
         existing_projects=existing_projects,
-    ) + skill_context
+    ) + extra_context
 
     try:
         resp = llm_client.client.chat.completions.create(
@@ -373,13 +398,38 @@ def _get_skill_full_content(skill_name: str) -> str:
         return ""
 
 
+def _extract_keywords(text: str) -> set[str]:
+    """从文本中提取关键词集合（用于去重比较）。"""
+    import re as _re
+    # 去掉 markdown 标记和标点
+    cleaned = _re.sub(r"[#|\-*\n\r]", " ", text)
+    # 按空白分词，过滤短词
+    words = {w.strip() for w in cleaned.split() if len(w.strip()) >= 2}
+    return words
+
+
 def _content_already_exists(existing: str, new_content: str) -> bool:
-    """简单去重：检查新内容的核心片段是否已存在。"""
-    # 取新内容的前 100 字符做模糊匹配
+    """去重检查：基于关键词集合相似度判断新内容是否已存在。
+
+    同时保留前缀匹配作为快速路径。
+    """
     core = new_content.strip()[:100]
     if not core:
         return True
-    return core in existing
+    # 快速路径：前缀完全匹配
+    if core in existing:
+        return True
+    # 关键词集合 Jaccard 相似度
+    existing_kw = _extract_keywords(existing)
+    new_kw = _extract_keywords(new_content)
+    if not new_kw:
+        return True
+    intersection = existing_kw & new_kw
+    union = existing_kw | new_kw
+    if not union:
+        return True
+    similarity = len(intersection) / len(union)
+    return similarity >= 0.6
 
 
 def _merge_triggers(skill_content: str, new_triggers: list[str]) -> str:
