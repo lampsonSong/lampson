@@ -14,7 +14,7 @@ Lampson 是一个可以自己更新自己代码的 CLI 智能助手。
 2. CLI: Prompt Toolkit（轻量 REPL）
 3. 飞书: 直接调飞书 API
 4. 包管理: pip install -e .
-5. 自更新保护文件: cli.py, agent.py, llm.py, feishu/client.py, tools/shell.py
+5. 自更新保护文件: cli.py, agent.py, llm.py, feishu/client.py, tools/shell.py, safe_mode.py
 
 ## 代码规范
 - Python 3.11+，用 type hints

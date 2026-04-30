@@ -108,15 +108,23 @@ class SessionManager:
 
         from src.memory import session_store as ss
 
-        try:
-            si = ss.create_session(source=channel)
-            session_id = si.session_id
-        except Exception:
-            session_id = None
+        # 重试 create_session，扛住数据库锁等瞬时错误
+        session_id = None
+        for attempt in range(3):
+            try:
+                si = ss.create_session(source=channel)
+                session_id = si.session_id
+                break
+            except Exception as e:
+                print(f"[session_manager] create_session 失败 (attempt {attempt+1}/3): {e}", flush=True)
+                if attempt < 2:
+                    time.sleep(0.5 * (attempt + 1))
 
         session = Session.from_config(self._config, channel=channel)
         if session_id:
             session.session_id = session_id
+        else:
+            print("[session_manager] 警告: session_id 为空，SQLite 索引将不可用", flush=True)
         session._session_manager = self
         session.last_activity_at = time.time()
 

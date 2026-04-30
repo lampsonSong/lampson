@@ -3,10 +3,11 @@
 职责：
 1. 加载配置、初始化 SessionManager
 2. 启动飞书 WebSocket 长连接监听
-3. 启动后写 boot_task，让 LLM 通过 system prompt 通知 owner
-4. 检查并执行 boot_tasks（重启前指定的待办）
-5. 主线程阻塞（signal 驱动优雅退出）
-6. 退出时先 join 监听线程，再保存 session
+3. 启动心跳（HeartbeatManager）
+4. 启动后写 boot_task，让 LLM 通过 system prompt 通知 owner
+5. 检查并执行 boot_tasks（重启前指定的待办）
+6. 主线程阻塞（signal 驱动优雅退出）
+7. 退出时先 join 监听线程，再保存 session
 
 CLI（src.cli）为独立人机交互入口，不承载飞书常驻监听。
 """
@@ -18,17 +19,23 @@ import json
 import os
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 import threading
 from pathlib import Path
 
-from src.core.config import load_config, is_config_complete
+from src.core.config import load_config, is_config_complete, LAMPSON_DIR
+from src.core.heartbeat import HeartbeatManager
 from src.core.session_manager import get_session_manager
 
-LAMPSON_DIR = Path.home() / ".lampson"
+LOG_DIR = LAMPSON_DIR / "logs"
 _BOOT_TASKS_PATH = LAMPSON_DIR / "boot_tasks.json"
+_DAEMON_PID_PATH = LOG_DIR / "daemon.pid"
 _shutdown = threading.Event()
+_heartbeat_mgr: HeartbeatManager | None = None
+SAFE_MODE_SCRIPT = Path(__file__).resolve().parent / "safe_mode.py"
+DAEMON_ENTRY = f"{sys.executable} -m src.daemon"
 
 # boot_tasks 限制
 _MAX_TASKS = 20
@@ -38,6 +45,12 @@ _MAX_TOTAL_BYTES = 10 * 1024  # 10KB
 def _signal_handler(signum: int, _frame: object | None) -> None:
     print(f"\n[daemon] 收到信号 {signum}，准备退出...", flush=True)
     _shutdown.set()
+
+
+def _write_daemon_pid() -> None:
+    """写 daemon pid 到文件，供 watchdog 查找。"""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    _DAEMON_PID_PATH.write_text(str(os.getpid()), encoding="utf-8")
 
 
 def _send_boot_notification(config: dict, pid: int) -> None:
@@ -159,6 +172,114 @@ def _inject_boot_tasks(session, tasks: list[dict]) -> None:
         print(f"[daemon] boot_tasks 执行失败: {e}", flush=True)
 
 
+def _trigger_safe_mode() -> None:
+    """由飞书 listener 线程池调用：在子线程中独立完成 safe_mode 切换。
+
+    完全不依赖主线程，即使主线程卡死也能工作。
+    流程：停心跳 → 停 listener → 启动 safe_mode.py（独立进程，阻塞等待） → 恢复 listener 和心跳。
+    daemon 进程本身不退出，launchd 不会干扰。
+    """
+    print("[daemon] 切换到 Safe Mode...", flush=True)
+
+    # 1. 停心跳
+    if _heartbeat_mgr is not None:
+        try:
+            _heartbeat_mgr.stop(user_initiated=True)
+            print("[daemon] 心跳已停止", flush=True)
+        except Exception as e:
+            print(f"[daemon] 停止心跳出错: {e}", flush=True)
+
+    # 2. 停飞书监听（释放 WebSocket 连接，让 safe_mode 能接管）
+    #    从 _session_manager 获取当前 session 的 listener
+    from src.core.session_manager import get_session_manager
+    mgr = get_session_manager()
+    # 停所有 session 的 listener
+    for key, sess in list(mgr._sessions.items()):
+        listener = getattr(sess, "_feishu_listener", None)
+        if listener is not None:
+            try:
+                listener.shutdown(timeout=15)
+                print(f"[daemon] 飞书监听已停止 (key={key})", flush=True)
+            except Exception as e:
+                print(f"[daemon] 停止飞书监听出错: {e}", flush=True)
+
+    # 3. 保存 session
+    try:
+        mgr.close_all()
+        print("[daemon] Session 已保存", flush=True)
+    except Exception as e:
+        print(f"[daemon] 保存会话出错: {e}", flush=True)
+
+    # 4. 启动 safe_mode.py（独立进程，阻塞等待它结束）
+    if SAFE_MODE_SCRIPT.exists():
+        print(f"[daemon] 启动 safe_mode: {SAFE_MODE_SCRIPT}", flush=True)
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, str(SAFE_MODE_SCRIPT)],
+                cwd=str(LAMPSON_DIR.parent / "lampson"),
+                stdout=open(LOG_DIR / "safe_mode.log", "a"),
+                stderr=open(LOG_DIR / "safe_mode.err.log", "a"),
+            )
+            print(f"[daemon] safe_mode 进程已启动 (PID={proc.pid})", flush=True)
+            proc.wait()
+            print(f"[daemon] safe_mode 已退出 (code={proc.returncode})", flush=True)
+        except Exception as e:
+            print(f"[daemon] safe_mode 启动失败: {e}", flush=True)
+    else:
+        print(f"[daemon] safe_mode 脚本不存在: {SAFE_MODE_SCRIPT}", flush=True)
+
+    # 5. safe_mode 结束，恢复 daemon
+    print("[daemon] Safe Mode 结束，恢复主程序...", flush=True)
+    _restore_daemon(mgr)
+
+
+def _restore_daemon(mgr) -> None:
+    """safe_mode 结束后，重新初始化 listener 和心跳，daemon 恢复正常工作。"""
+    from src.core.config import load_config
+
+    config = load_config()
+    if not is_config_complete(config):
+        print("[daemon] 恢复失败：配置不完整", flush=True)
+        _shutdown.set()
+        return
+
+    # 重建 session 和 listener
+    session = mgr.get_or_create("cli", "default")
+    try:
+        session.start_feishu_listener(
+            safe_mode_callback=_trigger_safe_mode,
+            shutdown_callback=lambda: _shutdown.set(),
+        )
+        print("[daemon] 飞书监听已恢复", flush=True)
+    except Exception as e:
+        print(f"[daemon] 恢复飞书监听失败: {e}", flush=True)
+        _shutdown.set()
+        return
+
+    # 恢复心跳
+    global _heartbeat_mgr
+    _heartbeat_mgr = HeartbeatManager(task_id="daemon")
+    _heartbeat_mgr.start()
+    print("[daemon] 心跳已恢复", flush=True)
+
+    # 恢复上线通知
+    pid = os.getpid()
+    from src.feishu.client import FeishuClient
+    owner_chat_id = config.get("feishu", {}).get("owner_chat_id", "").strip()
+    app_id = config.get("feishu", {}).get("app_id", "").strip()
+    app_secret = config.get("feishu", {}).get("app_secret", "").strip()
+    if owner_chat_id and app_id and app_secret:
+        try:
+            client = FeishuClient(app_id=app_id, app_secret=app_secret)
+            client.send_message(
+                receive_id=owner_chat_id,
+                text="✅ Safe Mode 已退出，主程序已恢复。",
+                receive_id_type="chat_id",
+            )
+        except Exception:
+            pass
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="python -m src.daemon",
@@ -178,13 +299,25 @@ def main() -> None:
     session = mgr.get_or_create("cli", "default")
 
     try:
-        session.start_feishu_listener()
+        session.start_feishu_listener(
+            safe_mode_callback=_trigger_safe_mode,
+            shutdown_callback=lambda: _shutdown.set(),
+        )
     except Exception as e:
         print(f"[daemon] 飞书监听启动失败: {e}", file=sys.stderr)
         sys.exit(1)
 
     pid = os.getpid()
     print(f"[daemon] Lampson daemon 已启动 (PID={pid})", flush=True)
+
+    # 写 pid 文件（供 watchdog 查找）
+    _write_daemon_pid()
+
+    # 启动心跳
+    global _heartbeat_mgr
+    _heartbeat_mgr = HeartbeatManager(task_id="daemon")
+    _heartbeat_mgr.start()
+    print("[daemon] 心跳已启动", flush=True)
 
     # 常驻上线通知：daemon 直接调 HTTP API 发送，不走 LLM
     _send_boot_notification(config, pid)
@@ -201,6 +334,11 @@ def main() -> None:
     while not _shutdown.is_set():
         signal.pause()
 
+    # 优雅退出：标记 user_stopped，停止心跳
+    if _heartbeat_mgr is not None:
+        _heartbeat_mgr.stop(user_initiated=True)
+        print("[daemon] 心跳已停止", flush=True)
+
     listener = getattr(session, "_feishu_listener", None)
     if listener is not None:
         try:
@@ -212,6 +350,14 @@ def main() -> None:
         mgr.close_all()
     except Exception as e:
         print(f"[daemon] 保存会话时出错: {e}", flush=True)
+
+    # 删除 pid 文件
+    if _DAEMON_PID_PATH.exists():
+        try:
+            _DAEMON_PID_PATH.unlink()
+        except OSError:
+            pass
+
     print("[daemon] 已退出。", flush=True)
 
 

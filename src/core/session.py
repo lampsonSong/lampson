@@ -141,6 +141,7 @@ class HandleResult:
     is_exit: bool = False        # 用户要求退出
     is_command: bool = False     # 这是一条 / 命令（不需要再格式化）
     is_new: bool = False        # 用户要求开始新 session
+    is_safe_mode: bool = False  # 用户要求进入 safe_mode
     compaction_msg: str = ""     # 压缩通知（空字符串表示没压缩）
 
 
@@ -692,7 +693,7 @@ class Session:
         loaded_count = len(inject_msgs)
         return f"已加载 session {session_id} 的最近 {loaded_count} 条消息。"
 
-    def start_feishu_listener(self) -> None:
+    def start_feishu_listener(self, safe_mode_callback=None, shutdown_callback=None) -> None:
         """启动飞书长连接监听（daemon thread，不阻塞 REPL）。"""
         feishu_cfg = self.config.get("feishu", {})
         app_id = feishu_cfg.get("app_id", "").strip()
@@ -712,6 +713,8 @@ class Session:
             app_id=app_id,
             app_secret=app_secret,
             session_manager=mgr,
+            safe_mode_callback=safe_mode_callback,
+            shutdown_callback=shutdown_callback,
         )
         self._feishu_listener = listener
         listener.start()  # WebSocket 在后台线程运行，详见 FeishuListener.shutdown
@@ -762,6 +765,8 @@ class Session:
         if command == "/search":
             return HandleResult(reply=self._handle_search(parts), is_command=True)
 
+        if command == "/safemode":
+            return HandleResult(reply="正在切换到安全模式...", is_safe_mode=True, is_command=True)
         if command == "/resume":
             return HandleResult(reply=self._handle_resume(parts), is_command=True)
 

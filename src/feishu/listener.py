@@ -14,7 +14,7 @@ import queue
 import re
 import threading
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import (
@@ -76,10 +76,14 @@ class FeishuListener:
         app_id: str,
         app_secret: str,
         session_manager: "SessionManager | None" = None,
+        safe_mode_callback: Callable[[], None] | None = None,
+        shutdown_callback: Callable[[], None] | None = None,
     ) -> None:
         self.app_id = app_id
         self.app_secret = app_secret
         self._mgr = session_manager
+        self._safe_mode_callback = safe_mode_callback
+        self._shutdown_callback = shutdown_callback
         self._dedup = MessageDeduplicator()
         self._ws_client: Any | None = None
         self._ws_thread: threading.Thread | None = None
@@ -107,7 +111,7 @@ class FeishuListener:
 
     @staticmethod
     def _should_use_card(text: str) -> bool:
-        """判断回复是否含结构化数据（表格/指标），适合用卡片展示。"""
+        """判断回复是否含结构化数据（表格/指标等），适合用卡片展示。"""
         # 包含 markdown 表格
         if "|---" in text or "| ---" in text:
             return True
@@ -465,9 +469,25 @@ class FeishuListener:
                 session.agent.interim_sender = None
 
             # 入队场景：消息已入队，不回复
-            if not result.reply and not result.is_new and not result.is_exit and not result.is_command:
+            if not result.reply and not result.is_new and not result.is_exit and not result.is_command and not result.is_safe_mode:
                 self._dedup.mark_processed(message_id)
                 print(f"[listener] 消息已入队，等待当前任务中断后处理", flush=True)
+                return
+
+            # 处理 /exit 命令：退出
+            if result.is_exit:
+                self._dedup.mark_processed(message_id)
+                self._send_reply(chat_id, result.reply or "正在退出...")
+                if self._shutdown_callback:
+                    self._shutdown_callback()
+                return
+
+            # 处理 /recovery 命令：切换到 safe_mode
+            if result.is_safe_mode and self._safe_mode_callback:
+                self._dedup.mark_processed(message_id)
+                self._send_reply(chat_id, result.reply or "正在切换到安全模式...")
+                # 调用回调，通知 daemon 切换到 safe_mode
+                self._safe_mode_callback()
                 return
 
             # 处理 /new 命令：重置 session

@@ -451,6 +451,12 @@ def append_message(
     # 更新 SQLite 索引
     conn = _get_db()
     try:
+        # 防御：确保 sessions 表有这条记录（重启/异常可能丢失）
+        conn.execute(
+            "INSERT OR IGNORE INTO sessions(session_id, started_at, source) VALUES(?, ?, ?)",
+            (session_id, now_ms, "unknown"),
+        )
+
         # 查当前 session 的 latest segment
         latest_seg = conn.execute(
             "SELECT MAX(segment) FROM segments WHERE session_id = ?",
