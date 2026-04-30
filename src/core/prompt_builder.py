@@ -1,18 +1,14 @@
 """分层 System Prompt 构建器。
 
-参考 Hermes 的分层设计，Lampson 的 system prompt 分 8 层：
+Lampson system prompt 分层加载：
 
-Layer 1  Identity         - SOUL.md 文件内容
-Layer 2  Tool Guidance    - Memory、~/.lampson/skills 目录块、session_search、Skills 维护指引、Tool-use
-Layer 3  Memory Block     - 核心记忆结构化文本
-Layer 4  Project Index   - 项目索引（projects_index + project_context）
-Layer 5  (reserved)
-Layer 6  Context Files   - .lampson.md / AGENTS.md
-Layer 7  Model Guidance   - 模型适配指引
-Layer 8  Platform Hints   - CLI 环境提示
-Layer 9  Timestamp        - 对话开始时间
+Layer 1    Identity        - MEMORY.md（Agent 人格与行为准则）
+Layer 1.5  User            - USER.md（用户画像与偏好，多用户基础）
+Layer 2    Tool Guidance   - 记忆指引 + Skills 索引 + 工具使用规范
+Layer 3    Project Index   - 动态扫描 projects/*.md 生成项目列表
+Layer 4    Model Guidance  - 模型适配指引（如 GLM tool_calls 提示）
+Layer 5    Channel Context - 消息来源标识（非 CLI 时注入）
 """
-
 from __future__ import annotations
 
 import os
@@ -26,11 +22,10 @@ import yaml
 
 
 LAMPSON_DIR = Path.home() / ".lampson"
-SOUL_PATH = LAMPSON_DIR / "SOUL.md"
+MEMORY_PATH = LAMPSON_DIR / "MEMORY.md"
+USER_PATH = LAMPSON_DIR / "USER.md"
 SKILLS_DIR = LAMPSON_DIR / "skills"
-# 项目目录（哥哥的工作区）
-PROJECTS_DIR = Path.home() / ".openclaw" / "workspace" / "projects"
-PROJECTS_INDEX = LAMPSON_DIR / "projects_index.md"
+PROJECTS_DIR = LAMPSON_DIR / "projects"
 
 # ── Tool Guidance 常量 ────────────────────────────────────────────────────────
 
@@ -178,22 +173,73 @@ def build_skills_index() -> str:
 
 # ── Project Index & Context ───────────────────────────────────────────────────
 
-def build_project_index() -> str:
-    """生成项目索引，告诉 LLM 有哪些项目及其一句话描述。"""
-    if not PROJECTS_INDEX.exists():
-        return ""
+_projects_index_cache: tuple[frozenset[tuple[str, float]], str] | None = None
+
+
+def _projects_mtime_fingerprint() -> frozenset[tuple[str, float]]:
+    if not PROJECTS_DIR.exists():
+        return frozenset()
+    items: list[tuple[str, float]] = []
+    for p in PROJECTS_DIR.glob("*.md"):
+        try:
+            items.append((str(p.resolve()), p.stat().st_mtime))
+        except OSError:
+            items.append((str(p), 0.0))
+    return frozenset(items)
+
+
+def _extract_project_info(path: Path) -> tuple[str, str]:
+    """从 project md 文件提取项目名和一句话描述。"""
     try:
-        content = PROJECTS_INDEX.read_text(encoding="utf-8").strip()
-        if not content:
-            return ""
-        return (
-            "## Projects (项目上下文，按需加载)\n\n"
-            "当用户提到或暗示与某个项目相关的内容时，\n"
-            "使用 project_context(name=\"项目名\") 加载该项目的完整上下文。\n\n"
-            + content
-        )
+        lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
+        return path.stem, ""
+
+    # 取第一行作为名字（去掉 # 号）
+    name = ""
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            name = stripped[2:].strip()
+            break
+    if not name:
+        name = path.stem
+
+    # 取第一段非空内容作为描述，跳过表格行
+    desc = ""
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and not stripped.startswith("|"):
+            desc = stripped
+            break
+
+    return name, desc
+
+
+def build_project_index() -> str:
+    """扫描 ~/.lampson/projects/*.md，生成项目索引。"""
+    global _projects_index_cache
+    if not PROJECTS_DIR.exists():
+        _projects_index_cache = (frozenset(), "")
         return ""
+
+    key_before = _projects_mtime_fingerprint()
+    if _projects_index_cache is not None and _projects_index_cache[0] == key_before:
+        return _projects_index_cache[1]
+
+    lines: list[str] = [
+        "## Projects（按需加载）",
+        "当用户提到或暗示与某个项目相关时，",
+        "使用 project_context(name=\"项目名\") 加载完整上下文。",
+        "",
+    ]
+    for p in sorted(PROJECTS_DIR.glob("*.md")):
+        name, desc = _extract_project_info(p)
+        lines.append(f"- **{name}**: {desc}")
+
+    text = "\n".join(lines)
+    _projects_index_cache = (key_before, text)
+    return text
 
 
 def load_project_context(name: str) -> str:
@@ -201,12 +247,11 @@ def load_project_context(name: str) -> str:
     if not name:
         return "project_context 需要 name 参数，例如：project_context(name=\"Lampson\")"
 
-    # 支持模糊匹配：找第一个名字包含 keyword 的项目文件
     if not PROJECTS_DIR.exists():
         return f"[项目目录不存在：{PROJECTS_DIR}]"
 
-    # 尝试精确匹配 projects/xxx.md
-    for md_file in PROJECTS_DIR.rglob("*.md"):
+    # 精确匹配
+    for md_file in PROJECTS_DIR.glob("*.md"):
         if md_file.stem.lower() == name.lower():
             try:
                 content = md_file.read_text(encoding="utf-8").strip()
@@ -215,8 +260,8 @@ def load_project_context(name: str) -> str:
             except OSError:
                 pass
 
-    # 模糊匹配：文件名包含 keyword
-    for md_file in PROJECTS_DIR.rglob("*.md"):
+    # 模糊匹配
+    for md_file in PROJECTS_DIR.glob("*.md"):
         if name.lower() in md_file.stem.lower():
             try:
                 content = md_file.read_text(encoding="utf-8").strip()
@@ -225,8 +270,7 @@ def load_project_context(name: str) -> str:
             except OSError:
                 pass
 
-    # 列出可用项目
-    available = [f.stem for f in PROJECTS_DIR.rglob("*.md")]
+    available = [f.stem for f in PROJECTS_DIR.glob("*.md")]
     avail_str = ", ".join(available) if available else "(none)"
     return f"[项目 '{name}' not found]\n\nAvailable projects: {avail_str}"
 
@@ -245,10 +289,10 @@ DEFAULT_IDENTITY = (
 
 
 def load_identity() -> str:
-    """加载 ~/.lampson/SOUL.md，不存在则用 DEFAULT_IDENTITY。"""
-    if SOUL_PATH.exists():
+    """加载 ~/.lampson/MEMORY.md，不存在则用 DEFAULT_IDENTITY。"""
+    if MEMORY_PATH.exists():
         try:
-            content = SOUL_PATH.read_text(encoding="utf-8").strip()
+            content = MEMORY_PATH.read_text(encoding="utf-8").strip()
             if content:
                 return content
         except OSError:
@@ -256,25 +300,19 @@ def load_identity() -> str:
     return DEFAULT_IDENTITY
 
 
-# ── Context Files 加载 ────────────────────────────────────────────────────────
-
-def load_context_file(cwd: str | None = None) -> str:
-    """加载项目目录的 .lampson.md / AGENTS.md（优先 .lampson.md）。"""
-    if cwd is None:
-        cwd = os.getcwd()
-
-    for name in (".lampson.md", "AGENTS.md"):
-        p = Path(cwd) / name
-        if p.exists():
-            try:
-                content = p.read_text(encoding="utf-8").strip()
-                if content:
-                    meta, body = _parse_frontmatter(content)
-                    # 去掉 frontmatter 后输出
-                    return f"## {name}\n\n{body or content}"
-            except OSError:
-                pass
-    return ""
+def load_user() -> str:
+    """加载 ~/.lampson/USER.md，返回用户画像内容（限 500 字符以内）。"""
+    if not USER_PATH.exists():
+        return ""
+    try:
+        content = USER_PATH.read_text(encoding="utf-8").strip()
+        if not content:
+            return ""
+        if len(content) > 500:
+            content = content[:500] + "\n\n_(已截断)_"
+        return content
+    except OSError:
+        return ""
 
 
 # ── Model Guidance ────────────────────────────────────────────────────────────
@@ -293,30 +331,6 @@ def build_model_guidance(model: str) -> list[str]:
     return layers
 
 
-# ── Platform Hints ───────────────────────────────────────────────────────────
-
-PLATFORM_HINTS = """\
-# 运行环境
-你运行在 CLI 终端环境中。
-回复应简洁，优先使用单行命令。
-路径处理：~ 展开为 /Users/songyuhao/
-
-# 远程机器
-当用户提到"训练机器"、"远程机器"或特定机器名时，你需要通过 SSH 连接到远程机器执行命令。
-本机 ~/.ssh/config 已配置好所有机器的 SSH 别名。在连接远程机器之前，**必须先用 project_context 工具加载 machines 项目**获取正确的 SSH 别名，不要猜测别名。
-在远程机器上执行 find 命令时，务必加 -maxdepth 限制深度（如 -maxdepth 5），避免搜索 NFS/NAS 大目录导致超时。
-
-# 技能与项目
-复杂任务中若需要特定工作流，你会在单轮/规划阶段收到「匹配的技能」等检索注入内容，以注入文本为准，勿声称「未列出 skill 目录」。"""
-
-
-# ── Timestamp ────────────────────────────────────────────────────────────────
-
-def build_timestamp() -> str:
-    now = time.strftime("%Y-%m-%d %H:%M:%S")
-    return f"# Session Info\n\nConversation started: {now}"
-
-
 # ── PromptBuilder ────────────────────────────────────────────────────────────
 
 class PromptBuilder:
@@ -326,53 +340,36 @@ class PromptBuilder:
         self.model = model
         self.channel = channel
 
-    def build(
-        self,
-        core_memory: str = "",
-        cwd: str | None = None,
-    ) -> str:
+    def build(self) -> str:
         """按层级拼装 system prompt。"""
         layers: list[str] = []
 
         # L1: Identity
         layers.append(load_identity())
 
-        # L2: Tool guidance（技能目录插在记忆指引与 session_search 之间）
+        # L1.5: User
+        user_block = load_user()
+        if user_block.strip():
+            layers.append(f"## 用户\n\n{user_block.strip()}")
+
+        # L2: Tool guidance
         l2: list[str] = [MEMORY_GUIDANCE]
         skills_block = build_skills_index()
         if skills_block.strip():
             l2.append(skills_block)
-        l2.extend([
-            SKILLS_GUIDANCE,
-            TOOL_USE_ENFORCEMENT,
-        ])
+        l2.extend([SKILLS_GUIDANCE, TOOL_USE_ENFORCEMENT])
         layers.extend(l2)
 
-        # L3: Memory block
-        if core_memory.strip():
-            layers.append(f"## 记忆\n\n{core_memory.strip()}")
-
-        # L4: Project index
+        # L3: Project index
         project_index = build_project_index()
         if project_index:
             layers.append(project_index)
 
-        # L5: Context files
-        ctx = load_context_file(cwd)
-        if ctx:
-            layers.append(ctx)
-
-        # L6: Model guidance
+        # L4: Model guidance
         layers.extend(build_model_guidance(self.model))
 
-        # L7: Platform hints
-        layers.append(PLATFORM_HINTS)
-
-        # L7.5: Channel Context（非 cli 渠道注入渠道标识）
+        # L5: Channel Context
         if self.channel != "cli":
             layers.append("# Channel Context\n\n当前消息来源: " + self.channel)
-
-        # L8: Timestamp
-        layers.append(build_timestamp())
 
         return "\n\n".join(layer for layer in layers if layer.strip())

@@ -4,7 +4,7 @@ Memory 模块：管理 Lampson 的记忆系统。
 JSONL + SQLite FTS5 架构：
 - session_store: JSONL 写入 + SQLite 索引同步
 - session_search: FTS5 搜索 + LIKE 降级 + 召回 API
-- manager: core.md 核心记忆读写（load_core, add_memory, search_memory 等）
+- manager: MEMORY.md 长期记忆读写（load_memory, add_memory, search_memory 等）
 """
 
 from __future__ import annotations

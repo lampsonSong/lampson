@@ -45,7 +45,7 @@ HELP_TEXT = """\
   /model                         显示当前模型和可用模型列表
   /model <name>                  切换到指定模型
   /model all <question>          同时向所有可用模型提问，对比回答
-  /memory show                   查看核心记忆
+  /memory show                   查看长期记忆
   /memory add <text>             添加记忆条目
   /memory search <keyword>       搜索记忆
   /memory forget <keyword>       删除含关键词的记忆条目
@@ -677,9 +677,9 @@ class Session:
             except Exception:
                 pass
 
-        # core.md 更新检查（累计 archive > 5 或距上次更新 > 24h）
+        # MEMORY.md 更新检查（累计 archive > 5 或距上次更新 > 24h）（累计 archive > 5 或距上次更新 > 24h）
         try:
-            self._maybe_update_core_md()
+            self._maybe_update_memory_md()
         except Exception:
             pass
 
@@ -931,7 +931,7 @@ class Session:
         sub = parts[1] if len(parts) > 1 else "show"
 
         if sub == "show":
-            return memory_mgr.show_core()
+            return memory_mgr.show_memory()
 
         if sub == "add":
             if len(parts) < 3:
@@ -1217,8 +1217,8 @@ class Session:
         lines.append("\n使用 /resume <id> 加载指定 session。")
         return "\n".join(lines)
 
-    def _maybe_update_core_md(self) -> None:
-        """检查是否需要更新 core.md（退出时调用）。
+    def _maybe_update_memory_md(self) -> None:
+        """检查是否需要更新 MEMORY.md（退出时调用）。
 
         触发条件：累计 archive 次数 > 5 或距上次更新超过 24 小时。
         """
@@ -1241,11 +1241,11 @@ class Session:
             except Exception:
                 pass
 
-        # 读取 core.md 最后修改时间
-        core_md_path = LAMPSON_DIR / "core.md"
+        # 读取 MEMORY.md 最后修改时间
+        memory_path = LAMPSON_DIR / "MEMORY.md"
         hours_since_update = float("inf")
-        if core_md_path.exists():
-            mtime = core_md_path.stat().st_mtime
+        if memory_path.exists():
+            mtime = memory_path.stat().st_mtime
             hours_since_update = (time.time() - mtime) / 3600
 
         if archive_count <= 5 and hours_since_update < 24:
@@ -1277,7 +1277,7 @@ class Session:
         all_content = "\n\n".join(skill_summaries + project_summaries)
         prompt = (
             "以下是 Lampson 的归档知识（skill 和 project），"
-            "请抽取对长期记忆最有价值的精华，生成简洁的 core.md 内容。\n"
+            "请抽取对长期记忆最有价值的精华，生成简洁的 MEMORY.md 内容。\n"
             "只保留：用户偏好、关键决策、重要约束、常用工具技巧。\n"
             "每条一行，用简洁的中文描述。不要超过 50 行。\n\n"
             f"## Skills\n{all_content}\n"
@@ -1285,13 +1285,13 @@ class Session:
         try:
             result = self.agent.run(prompt)
             if result and result.strip():
-                core_md_path.parent.mkdir(parents=True, exist_ok=True)
+                memory_path.parent.mkdir(parents=True, exist_ok=True)
                 # 写前备份
-                if core_md_path.exists():
+                if memory_path.exists():
                     import shutil
-                    shutil.copy2(core_md_path, core_md_path.with_suffix(".md.bak"))
-                core_md_path.write_text(result.strip(), encoding="utf-8")
-                print(f"[core.md] 已更新（archive={archive_count}, 距上次 {hours_since_update:.0f}h）")
+                    shutil.copy2(memory_path, memory_path.with_suffix(".md.bak"))
+                memory_path.write_text(result.strip(), encoding="utf-8")
+                print(f"[MEMORY.md] 已更新（archive={archive_count}, 距上次 {hours_since_update:.0f}h）")
         except Exception as e:
             logger.warning(f"core.md 更新失败: {e}")
 
