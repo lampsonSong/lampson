@@ -419,6 +419,165 @@ def scan_learned_modules() -> list[AuditFinding]:
 
 # ── 主审计流程 ───────────────────────────────────────────────────────────────
 
+
+def scan_user_patterns(days: int = 7) -> list[AuditFinding]:
+    """扫描近期 session 日志，检测用户高频重复操作，判断是否需要沉淀为 skill。
+
+    检测逻辑：
+    1. 统计近期 session 中用户请求的出现频次
+    2. 将语义相似的请求聚合（关键词交集）
+    3. 过滤掉已有 skill 覆盖的操作
+    4. 出现 3 次以上的模式标记为建议沉淀
+    """
+    import json
+    from collections import Counter
+    from datetime import date, timedelta
+
+    findings: list[AuditFinding] = []
+    sessions_dir = LAMPSON_DIR / "memory" / "sessions"
+    if not sessions_dir.exists():
+        return findings
+
+    # 1. 收集近期用户消息
+    today = date.today()
+    cutoff = today - timedelta(days=days)
+    user_messages: list[str] = []
+
+    for day_dir in sorted(sessions_dir.iterdir()):
+        if not day_dir.is_dir() or day_dir.name.endswith(".md"):
+            continue
+        try:
+            day_date = date.fromisoformat(day_dir.name)
+        except ValueError:
+            continue
+        if day_date < cutoff:
+            continue
+
+        for channel_dir in day_dir.iterdir():
+            if not channel_dir.is_dir():
+                continue
+            for jsonl_file in channel_dir.glob("*.jsonl"):
+                try:
+                    with open(jsonl_file, encoding="utf-8") as f:
+                        for line in f:
+                            rec = json.loads(line)
+                            if rec.get("role") == "user":
+                                text = rec.get("content", "")
+                                if isinstance(text, str) and len(text.strip()) > 3:
+                                    # 过滤掉太短的、命令类的、闲聊类的
+                                    stripped = text.strip()
+                                    if stripped.startswith("/"):
+                                        continue
+                                    if len(stripped) < 5:
+                                        continue
+                                    user_messages.append(stripped)
+                except Exception:
+                    continue
+
+    if not user_messages:
+        return findings
+
+    # 2. 精确去重统计
+    msg_counter = Counter(user_messages)
+
+    # 3. 关键词聚合：将语义相似的消息合并
+    # 提取每条消息的关键词集合
+    def extract_keywords(text: str) -> set[str]:
+        stop_words = {"的", "了", "吗", "呢", "吧", "啊", "我", "你", "是", "在",
+                       "有", "不", "也", "都", "就", "要", "会", "可以", "能",
+                       "把", "给", "让", "跟", "和", "对", "这个", "那个",
+                       "一下", "一个", "什么", "怎么", "如何", "帮我"}
+        words = set(re.findall(r"[\w]+", text.lower()))
+        return words - stop_words - {w for w in words if len(w) < 2}
+
+    # 按频次排序，高频优先做聚类中心
+    sorted_msgs = msg_counter.most_common()
+    clustered: dict[int, list[tuple[str, int]]] = {}  # cluster_id -> [(msg, count)]
+    assigned: dict[str, int] = {}  # msg -> cluster_id
+    cluster_id = 0
+
+    for msg, count in sorted_msgs:
+        if msg in assigned:
+            continue
+        kw = extract_keywords(msg)
+        if not kw:
+            continue
+
+        # 检查是否和已有聚类中心相似
+        found_cluster = None
+        for cid, members in clustered.items():
+            center_msg = members[0][0]
+            center_kw = extract_keywords(center_msg)
+            if not center_kw:
+                continue
+            overlap = kw & center_kw
+            union = kw | center_kw
+            similarity = len(overlap) / len(union) if union else 0
+            if similarity >= 0.4:
+                found_cluster = cid
+                break
+
+        if found_cluster is not None:
+            clustered[found_cluster].append((msg, count))
+            assigned[msg] = found_cluster
+        else:
+            clustered[cluster_id] = [(msg, count)]
+            assigned[msg] = cluster_id
+            cluster_id += 1
+
+    # 4. 加载已有 skills 的 description 和 triggers，用于过滤
+    existing_skill_keywords: set[str] = set()
+    if SKILLS_DIR.exists():
+        for skill_md in SKILLS_DIR.glob("*/SKILL.md"):
+            try:
+                text = skill_md.read_text(encoding="utf-8").lower()
+                existing_skill_keywords.update(extract_keywords(text))
+            except OSError:
+                continue
+
+    # 5. 找出高频且未覆盖的模式
+    for cid, members in clustered.items():
+        total_count = sum(c for _, c in members)
+        representative = members[0][0]  # 频次最高的作为代表
+
+        if total_count < 3:
+            continue
+
+        # 检查是否已被现有 skill 覆盖
+        rep_kw = extract_keywords(representative)
+        overlap_with_skills = rep_kw & existing_skill_keywords
+        coverage_ratio = len(overlap_with_skills) / len(rep_kw) if rep_kw else 0
+
+        if coverage_ratio >= 0.7:
+            continue  # 已被现有 skill 覆盖
+
+        # 过滤掉纯闲聊/问候
+        chat_patterns = {"你好", "咋样", "啥情况", "继续", "你在干啥", "谢谢",
+                          "你刚才在做什么", "我上次在让你干啥", "刚刚你在",
+                          "刚刚你", "上次我最后让你干的事儿", "我上次",
+                          "你在做什么", "你刚才", "你好吗"}
+        if any(p in representative for p in chat_patterns):
+            continue
+
+        # 过滤掉已有命令覆盖的操作（如 /restart-lampson skill 已有重启能力）
+        # 合并语义相似的变体到同一条 finding，避免多条重复建议
+        skip_keywords = {"重启一下你自己，然后告诉", "重启一下你自己，然后说"}
+        if any(k in representative for k in skip_keywords):
+            # 这是 restart-lampson 的变体，已被覆盖
+            continue
+
+        examples = [m for m, _ in members[:5]]
+        findings.append(AuditFinding(
+            severity="info",
+            category="skill",
+            target="高频操作模式",
+            message=f"检测到高频操作（{total_count}次）：{representative}",
+            suggestion=f"考虑沉淀为 skill。相关请求：{examples}",
+        ))
+
+    return findings
+
+
 def run_audit() -> AuditReport:
     """执行完整审计，返回报告。"""
     import time
@@ -435,6 +594,7 @@ def run_audit() -> AuditReport:
     findings.extend(scan_skills())
     findings.extend(scan_projects())
     findings.extend(scan_learned_modules())
+    findings.extend(scan_user_patterns())
 
     duration = time.time() - start
 
