@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import copy
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from openai import OpenAI, APITimeoutError, APIConnectionError, RateLimitError
 from openai.types.chat import ChatCompletion
@@ -15,6 +15,9 @@ from openai.types.chat import ChatCompletion
 from src.core.prompt_builder import PromptBuilder
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from src.core.llm import LLMClient
 
 
 class LLMClient:
@@ -61,6 +64,22 @@ class LLMClient:
             # 没有 system message（异常情况），插入到开头
             self.messages.insert(0, {"role": "system", "content": new_content})
 
+    def migrate_from(self, source: "LLMClient") -> None:
+        """从另一个 LLMClient 迁移对话历史（保留自身的 system prompt）。
+
+        用于模型切换时将对话历史迁移到新模型实例。
+        只迁移 source 的非 system 消息，保持自身的 system prompt。
+        """
+        # 获取 source 的非 system 消息
+        source_history = [m for m in source.messages if m.get("role") != "system"]
+        
+        # 保留自身的 system prompt，追加 source 的历史
+        if self.messages and self.messages[0].get("role") == "system":
+            self.messages = [self.messages[0]] + source_history
+        else:
+            # 异常情况：自身没有 system prompt，直接使用 source 的全部历史
+            self.messages = list(source.messages)
+
     def add_user_message(self, content: str) -> None:
         self.messages.append({"role": "user", "content": content})
 
@@ -70,3 +89,17 @@ class LLMClient:
             "tool_call_id": tool_call_id,
             "content": result,
         })
+
+    def chat(self, timeout: float | None = None) -> ChatCompletion:
+        """直接调用 chat.completions.create，返回原始响应。
+
+        适用于不需要 adapter 解析的简单调用场景（如压缩、skill 分析等）。
+        注意：不会更新 self.messages，调用方需自行管理消息状态。
+        """
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": self.messages,
+        }
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        return self.client.chat.completions.create(**kwargs)

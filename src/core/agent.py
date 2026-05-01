@@ -481,7 +481,18 @@ class Agent:
                     raise  # 直接上抛，不吞掉
                 except LLMContextTooLongError as e:
                     logger.warning(f"Prompt 超长: {e}")
-                    return "[上下文过长，请使用 /compaction 手动压缩后重试]"
+                    # 尝试自动压缩
+                    cr = self.maybe_compact(
+                        session_store=_session_store,
+                        session_id=self.session_id or "",
+                        progress_callback=self.progress_callback,
+                    )
+                    if cr is not None and cr.success:
+                        logger.info(f"自动压缩成功，归档 {cr.archived_count} 条，继续重试")
+                        self._on_model_switch("已自动压缩上下文，继续执行")
+                        continue  # 继续重试
+                    else:
+                        return "[上下文过长，自动压缩失败，请使用 /compaction 手动压缩后重试]"
                 except LLMError as e:
                     self._consecutive_llm_failures += 1
                     if self._consecutive_llm_failures >= 3:
