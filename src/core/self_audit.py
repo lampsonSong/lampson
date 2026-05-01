@@ -535,29 +535,17 @@ def scan_user_patterns(days: int = 7) -> list[AuditFinding]:
             assigned[msg] = cluster_id
             cluster_id += 1
 
-    # 4. 加载已有 skills 的 frontmatter（triggers + description），用于过滤
-    # 只读 frontmatter 中的 triggers 和 description，避免全文关键词导致误报覆盖
-    existing_skill_keywords: set[str] = set()
-    if SKILLS_DIR.exists():
-        import yaml
-        for skill_md in SKILLS_DIR.glob("*/SKILL.md"):
-            try:
-                text = skill_md.read_text(encoding="utf-8")
-                fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", text, re.DOTALL)
-                if not fm_match:
-                    continue
-                meta = yaml.safe_load(fm_match.group(1)) or {}
-                # 只从 description 和 triggers 提取关键词
-                desc = meta.get("description", "")
-                if isinstance(desc, str) and desc:
-                    existing_skill_keywords.update(extract_keywords(desc))
-                triggers = meta.get("triggers", [])
-                if isinstance(triggers, list):
-                    for t in triggers:
-                        if isinstance(t, str) and t:
-                            existing_skill_keywords.update(extract_keywords(t))
-            except (OSError, Exception):
-                continue
+    # 4. 使用 SkillIndex 检索判断高频操作是否已被现有 skill 覆盖
+    # 复用和 skill 触发相同的检索机制（SkillIndex.search），保持一致性
+    from src.core.indexer import SkillIndex
+    from src.core.config import INDEX_DIR
+
+    skill_index = SkillIndex(SKILLS_DIR, INDEX_DIR)
+    try:
+        skill_index.load_or_build()
+    except Exception as e:
+        logger.warning(f"scan_user_patterns: SkillIndex 加载失败: {e}")
+        skill_index = None
 
     # 5. 找出高频且未覆盖的模式
     for cid, members in clustered.items():
@@ -567,14 +555,6 @@ def scan_user_patterns(days: int = 7) -> list[AuditFinding]:
         if total_count < 3:
             continue
 
-        # 检查是否已被现有 skill 覆盖
-        rep_kw = extract_keywords(representative)
-        overlap_with_skills = rep_kw & existing_skill_keywords
-        coverage_ratio = len(overlap_with_skills) / len(rep_kw) if rep_kw else 0
-
-        if coverage_ratio >= 0.7:
-            continue  # 已被现有 skill 覆盖
-
         # 过滤掉纯闲聊/问候
         chat_patterns = {"你好", "咋样", "啥情况", "继续", "你在干啥", "谢谢",
                           "你刚才在做什么", "我上次在让你干啥", "刚刚你在",
@@ -583,12 +563,27 @@ def scan_user_patterns(days: int = 7) -> list[AuditFinding]:
         if any(p in representative for p in chat_patterns):
             continue
 
-        # 过滤掉已有命令覆盖的操作（如 /restart-lampson skill 已有重启能力）
-        # 合并语义相似的变体到同一条 finding，避免多条重复建议
-        skip_keywords = {"重启一下你自己，然后告诉", "重启一下你自己，然后说"}
-        if any(k in representative for k in skip_keywords):
-            # 这是 restart-lampson 的变体，已被覆盖
-            continue
+        # 使用 SkillIndex.search 检查是否已被现有 skill 覆盖
+        # 这与 skill 触发时的检索逻辑一致（关键词匹配 + search_text）
+        covered_by = ""
+        if skill_index is not None:
+            matched = skill_index.search(representative, top_k=1, similarity_threshold=0.3)
+            if matched:
+                # 提取匹配 skill 的名称
+                import re as _re
+                for m in matched:
+                    fm = _re.match(r"^---\s*\n(.*?)\n---\s*\n", m, _re.DOTALL)
+                    if fm:
+                        try:
+                            import yaml
+                            meta = yaml.safe_load(fm.group(1)) or {}
+                            covered_by = meta.get("name", "")
+                        except Exception:
+                            pass
+                        break
+
+        if covered_by:
+            continue  # 已被现有 skill 覆盖，跳过
 
         examples = [m for m, _ in members[:5]]
         findings.append(AuditFinding(
