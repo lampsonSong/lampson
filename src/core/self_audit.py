@@ -535,14 +535,28 @@ def scan_user_patterns(days: int = 7) -> list[AuditFinding]:
             assigned[msg] = cluster_id
             cluster_id += 1
 
-    # 4. 加载已有 skills 的 description 和 triggers，用于过滤
+    # 4. 加载已有 skills 的 frontmatter（triggers + description），用于过滤
+    # 只读 frontmatter 中的 triggers 和 description，避免全文关键词导致误报覆盖
     existing_skill_keywords: set[str] = set()
     if SKILLS_DIR.exists():
+        import yaml
         for skill_md in SKILLS_DIR.glob("*/SKILL.md"):
             try:
-                text = skill_md.read_text(encoding="utf-8").lower()
-                existing_skill_keywords.update(extract_keywords(text))
-            except OSError:
+                text = skill_md.read_text(encoding="utf-8")
+                fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", text, re.DOTALL)
+                if not fm_match:
+                    continue
+                meta = yaml.safe_load(fm_match.group(1)) or {}
+                # 只从 description 和 triggers 提取关键词
+                desc = meta.get("description", "")
+                if isinstance(desc, str) and desc:
+                    existing_skill_keywords.update(extract_keywords(desc))
+                triggers = meta.get("triggers", [])
+                if isinstance(triggers, list):
+                    for t in triggers:
+                        if isinstance(t, str) and t:
+                            existing_skill_keywords.update(extract_keywords(t))
+            except (OSError, Exception):
                 continue
 
     # 5. 找出高频且未覆盖的模式
