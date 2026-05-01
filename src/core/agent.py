@@ -685,12 +685,14 @@ class Agent:
 
         tool_count = getattr(self, "_fast_path_tool_count", 0)
         recent_context = self._get_recent_context(max_turns=5)
+        active_project = self._infer_active_project()
         reflection_hints = self._maybe_reflect(
             goal=user_input,
             is_fast_path=True,
             tool_call_count=tool_count,
             skill_activated=None,
             recent_context=recent_context,
+            active_project=active_project,
         )
         if reflection_hints:
             result += "\n\n" + "\n".join(reflection_hints)
@@ -787,6 +789,29 @@ class Agent:
         finally:
             self._compaction_lock.release()
 
+    def _infer_active_project(self) -> str:
+        """从对话历史中推断当前操作的项目名。"""
+        import re
+        # 从 messages 中的 tool call 参数提取文件路径
+        path_pattern = re.compile(r"/Users/\S+?/([a-zA-Z0-9_-]+)/(?:src|lib|app|pkg)/")
+        project_counts: dict[str, int] = {}
+        for msg in self.llm.messages:
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    args_str = tc.get("function", {}).get("arguments", "")
+                    for m in path_pattern.finditer(args_str):
+                        name = m.group(1)
+                        project_counts[name] = project_counts.get(name, 0) + 1
+            elif msg.get("role") == "tool":
+                tool_content = msg.get("content", "")
+                for m in path_pattern.finditer(tool_content):
+                    name = m.group(1)
+                    project_counts[name] = project_counts.get(name, 0) + 1
+        if not project_counts:
+            return ""
+        # 返回出现次数最多的项目名
+        return max(project_counts, key=project_counts.get)
+
     def _get_recent_context(self, max_turns: int = 5) -> str:
         """提取最近几轮对话的文本摘要，供反思模块分析。"""
         messages = self.llm.messages
@@ -814,6 +839,7 @@ class Agent:
         intent: str = "",
         skill_activated: str | None = None,
         recent_context: str = "",
+        active_project: str = "",
     ) -> list[str]:
         """任务完成后触发反思，自动沉淀 skill 或 project 信息。"""
         from src.core.reflection import (
@@ -847,6 +873,7 @@ class Agent:
                 llm_client=self.llm,
                 skill_activated=skill_activated,
                 recent_context=recent_context,
+                active_project=active_project,
             )
             if not learnings:
                 return []

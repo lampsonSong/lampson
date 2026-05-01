@@ -178,6 +178,7 @@ def reflect_and_learn(
     llm_client: Any,
     skill_activated: str | None = None,
     recent_context: str = "",
+    active_project: str = "",
 ) -> list[dict[str, Any]]:
     """执行反思，返回 learnings 列表。调用方负责后续的沉淀执行。"""
     import time
@@ -197,6 +198,10 @@ def reflect_and_learn(
     # 2. 补充最近对话上下文（让 LLM 看到用户反馈）
     if recent_context and recent_context != "（无对话记录）":
         extra_context += "\n## 最近对话\n{}".format(recent_context)
+
+    # 注入当前操作的项目（防止沉淀到错误的项目）
+    if active_project:
+        extra_context += "\n## 当前操作的项目\n{}（内容应沉淀到该项目的 project 文件，不要串项目）".format(active_project)
 
     prompt = REFLECT_PROMPT.format(
         goal=goal,
