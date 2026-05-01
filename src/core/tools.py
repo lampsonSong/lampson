@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any, Callable
 
@@ -14,6 +15,7 @@ from src.tools import session as session_tool
 from src.feishu import client as feishu_client
 from src.core import skills_tools
 
+logger = logging.getLogger(__name__)
 
 ToolRunner = Callable[[dict[str, Any]], str]
 
@@ -38,6 +40,25 @@ _register(skills_tools.SEARCH_PROJECTS_SCHEMA, skills_tools.search_projects)
 _register(session_tool.SESSION_SCHEMA, session_tool.run)
 
 
+# ── 启动时加载 learned_modules ─────────────────────────────────────────────
+
+def _load_learned_modules() -> None:
+    """扫描 ~/.lampson/learned_modules/，注册所有包含 TOOL_SCHEMA 的模块为工具。"""
+    try:
+        from src.tools import learned_modules
+        registered = learned_modules.scan_and_register()
+        if registered:
+            logger.info(f"已加载 {len(registered)} 个 learned_modules 工具: "
+                        f"{[s['function']['name'] for s in registered]}")
+        else:
+            logger.debug("未发现 learned_modules 工具（learned_modules/ 目录为空）")
+    except Exception as e:
+        logger.warning(f"加载 learned_modules 失败: {e}")
+
+
+_load_learned_modules()
+
+
 # ─── 飞书客户端懒加载初始化 ────────────────────────────────────────────────
 
 _feishu_initialized = False
@@ -48,13 +69,12 @@ def _ensure_feishu_client() -> bool:
     global _feishu_initialized
     if _feishu_initialized:
         return True
-    
-    # 读取配置
+
     config_paths = [
         Path("~/.lampson/config.yaml").expanduser(),
         Path("config/default.yaml").expanduser(),
     ]
-    
+
     for config_path in config_paths:
         if config_path.exists():
             try:
@@ -70,7 +90,7 @@ def _ensure_feishu_client() -> bool:
                     return True
             except Exception:
                 pass
-    
+
     return False
 
 
@@ -84,7 +104,6 @@ def dispatch(tool_name: str, arguments_raw: str | dict[str, Any]) -> str:
     if tool_name not in _REGISTRY:
         return f"[错误] 未知工具：{tool_name}"
 
-    # 飞书工具需要先确保客户端已初始化
     if tool_name.startswith("feishu_"):
         _ensure_feishu_client()
 

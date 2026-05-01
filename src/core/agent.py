@@ -826,6 +826,8 @@ class Agent:
             if hints:
                 # skills/projects 变更后刷新 system prompt，后续轮次能感知
                 self.llm.refresh_system_prompt()
+                # learned_modules 变更后刷新工具列表
+                self.refresh_tools()
             return hints
         except Exception as e:
             logger.warning(f"反思过程异常: {e}")
