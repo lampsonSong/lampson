@@ -675,7 +675,7 @@ class SelfAuditScheduler:
             delay = self._next_fire_time()
             if delay <= 0:
                 delay = _POLL_INTERVAL
-            logger.info(f"[self_audit] 下次审计计划: {delay:.0f} 秒后（{self.hour:02d}:{self.minute:02d}）")
+            print(f"[self_audit] 下次审计计划: {delay:.0f} 秒后（{self.hour:02d}:{self.minute:02d}）")
             # 分段等待，方便快速响应 stop 信号
             waited = 0.0
             while waited < delay and not self._stop:
@@ -690,12 +690,12 @@ class SelfAuditScheduler:
             if self._stop:
                 break
 
-            logger.info("[self_audit] 定时审计触发")
+            print("[self_audit] 定时审计触发", flush=True)
             try:
                 report = run_audit()
                 self._deliver_report(report)
             except Exception as e:
-                logger.warning(f"[self_audit] 审计执行失败: {e}")
+                print(f"[self_audit] 审计执行失败: {e}")
 
     def _deliver_report(self, report: AuditReport) -> None:
         """发送审计报告到飞书。"""
@@ -720,16 +720,16 @@ class SelfAuditScheduler:
                 text=f"🕐 Lampson 自我审计报告\n\n{content}",
                 receive_id_type="chat_id",
             )
-            logger.info("[self_audit] 审计报告已发送")
+            print("[self_audit] 审计报告已发送", flush=True)
         except Exception as e:
-            logger.warning(f"[self_audit] 报告推送失败: {e}")
+            print(f"[self_audit] 报告推送失败: {e}")
 
     def start(self) -> None:
         """启动调度线程。"""
         import threading
         self._thread = threading.Thread(target=self._loop, daemon=True, name="SelfAuditScheduler")
         self._thread.start()
-        logger.info(f"[self_audit] 调度器已启动（计划时间: {self.hour:02d}:{self.minute:02d}）")
+        print(f"[self_audit] 调度器已启动（计划时间: {self.hour:02d}:{self.minute:02d}）")
 
     def stop(self) -> None:
         """停止调度线程。"""
