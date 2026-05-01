@@ -4,11 +4,10 @@
 1. 加载配置、初始化 SessionManager
 2. 启动多平台消息网关（PlatformManager）
 3. 启动心跳（HeartbeatManager）
-4. 启动后执行 boot_tasks（重启前指定的待办）
-5. 主线程阻塞（signal 驱动优雅退出）
-6. 退出时保存 session
-
-CLI（src.cli）为独立人机交互入口，不承载常驻监听。
+4. 启动任务调度器（TaskScheduler）：自我审计 + 训练监控
+5. 启动后执行 boot_tasks（重启前指定的待办）
+6. 主线程阻塞（signal 驱动优雅退出）
+7. 退出时保存 session
 """
 
 from __future__ import annotations
@@ -16,6 +15,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import shutil
 import signal
@@ -28,20 +28,110 @@ from pathlib import Path
 from src.core.config import load_config, is_config_complete, LAMPSON_DIR
 from src.core.heartbeat import HeartbeatManager
 from src.core.session_manager import get_session_manager
-from src.core.self_audit import SelfAuditScheduler
+from src.core.self_audit import (
+    run_audit,
+    format_report_detail,
+    DEFAULT_AUDIT_HOUR,
+    DEFAULT_AUDIT_MINUTE,
+)
+from src.core.task_scheduler import TaskScheduler, TaskType, TaskConfig, schedule, start as scheduler_start, shutdown as scheduler_shutdown
+from src.core.tools import load_learned_modules
 
 LOG_DIR = LAMPSON_DIR / "logs"
 _BOOT_TASKS_PATH = LAMPSON_DIR / "boot_tasks.json"
 _DAEMON_PID_PATH = LOG_DIR / "daemon.pid"
 _shutdown = threading.Event()
-_self_audit_scheduler: SelfAuditScheduler | None = None
 _heartbeat_mgr: HeartbeatManager | None = None
+_scheduler: TaskScheduler | None = None
 SAFE_MODE_SCRIPT = Path(__file__).resolve().parent / "safe_mode.py"
 DAEMON_ENTRY = f"{sys.executable} -m src.daemon"
 
 # boot_tasks 限制
 _MAX_TASKS = 20
 _MAX_TOTAL_BYTES = 10 * 1024  # 10KB
+
+_task_scheduler_logger = logging.getLogger("task_scheduler")
+
+
+def _send_feishu(config: dict, text: str) -> None:
+    """发送飞书消息。"""
+    owner_chat_id = config.get("feishu", {}).get("owner_chat_id", "").strip()
+    app_id = config.get("feishu", {}).get("app_id", "").strip()
+    app_secret = config.get("feishu", {}).get("app_secret", "").strip()
+    if not owner_chat_id or not app_id or not app_secret:
+        return
+    try:
+        from src.feishu.client import FeishuClient
+        client = FeishuClient(app_id=app_id, app_secret=app_secret)
+        client.send_message(receive_id=owner_chat_id, text=text, receive_id_type="chat_id")
+    except Exception:
+        pass
+
+
+# ── 任务回调 ────────────────────────────────────────────────────────────────
+
+
+def _self_audit_callback() -> None:
+    """每日自我审计任务。"""
+    config = load_config()
+    try:
+        report = run_audit()
+        content = format_report_detail(report)
+        if len(content) > 4000:
+            content = content[:4000] + "\n\n...（报告过长已截断）"
+        _send_feishu(config, f"🕐 Lampson 自我审计报告\n\n{content}")
+        _task_scheduler_logger.info("[self_audit] 审计完成并已发送")
+    except Exception as e:
+        _task_scheduler_logger.error(f"[self_audit] 执行失败: {e}")
+
+
+def _train_monitor_callback() -> None:
+    """每 30 分钟查询 train39 GPU 4-7 状态并发送飞书。"""
+    config = load_config()
+    try:
+        # 动态加载 learned_modules 中的 train_monitor
+        import importlib.util
+        mod_path = Path.home() / ".lampson/learned_modules/train_monitor.py"
+        spec = importlib.util.spec_from_file_location("train_monitor", str(mod_path))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        result = mod.TOOL_RUNNER({})
+        _send_feishu(config, f"[训练监控]\n{result}")
+        _task_scheduler_logger.info("[train_monitor] 监控完成并已发送")
+    except Exception as e:
+        _task_scheduler_logger.error(f"[train_monitor] 执行失败: {e}")
+        _send_feishu(config, f"[训练监控] 查询失败: {e}")
+
+
+def _register_tasks() -> None:
+    """注册所有定时任务。"""
+    global _scheduler
+    _scheduler = TaskScheduler()
+    scheduler_start()
+
+    # 自我审计：每天固定时间
+    schedule(TaskConfig(
+        task_id="self_audit",
+        task_type=TaskType.CRON,
+        cron_hour=DEFAULT_AUDIT_HOUR,
+        cron_minute=DEFAULT_AUDIT_MINUTE,
+        func=_self_audit_callback,
+        description="每日自我审计（凌晨 4 点）",
+    ))
+
+    # 训练监控：每 30 分钟
+    schedule(TaskConfig(
+        task_id="train_monitor",
+        task_type=TaskType.INTERVAL,
+        interval_seconds=1800,
+        func=_train_monitor_callback,
+        description="train39 GPU 4-7 训练状态监控（每 30 分钟）",
+    ))
+
+    print("[daemon] 任务调度器已启动（自我审计 + 训练监控）", flush=True)
+
+
+# ── 信号与退出 ───────────────────────────────────────────────────────────────
 
 
 def _signal_handler(signum: int, _frame: object | None) -> None:
@@ -168,7 +258,7 @@ def _inject_boot_tasks(session, tasks: list[dict]) -> None:
 
 
 def main() -> None:
-    global _self_audit_scheduler
+    global _heartbeat_mgr
     # 强制 stdout/stderr 行缓冲：launchd 重定向到文件时默认全缓冲，
     # 会导致日志丢失（进程崩溃时缓冲区内容不刷盘）。
     if hasattr(sys.stdout, "reconfigure"):
@@ -216,17 +306,17 @@ def main() -> None:
     print(f"[daemon] Lampson daemon 已启动 (PID={pid})", flush=True)
 
     # ── 启动心跳 ──────────────────────────────────────────────────────────
-    global _heartbeat_mgr
     _heartbeat_mgr = HeartbeatManager(task_id="daemon")
     _heartbeat_mgr.start()
     print("[daemon] 心跳已启动", flush=True)
 
-    # ── 自我审计调度器 ─────────────────────────────────────────────────
-    global _self_audit_scheduler
-    _self_audit_scheduler = SelfAuditScheduler(hour=4, minute=0)
-    _self_audit_scheduler.start()
-    print("[daemon] 自我审计调度器已启动（每天 04:00）", flush=True)
+    # ── 任务调度器（自我审计 + 训练监控）────────────────────────────────
+    _register_tasks()
 
+
+    # ── 加载 learned_modules（延迟，避免循环导入）──────────────────────
+    load_learned_modules()
+    print("[daemon] learned_modules 已加载", flush=True)
     # ── 上线通知 ─────────────────────────────────────────────────────────
     _send_boot_notification(config, pid)
 
@@ -247,10 +337,10 @@ def main() -> None:
         _heartbeat_mgr.stop(user_initiated=True)
         print("[daemon] 心跳已停止", flush=True)
 
-    if _self_audit_scheduler is not None:
-        _self_audit_scheduler.stop()
-        _self_audit_scheduler = None
-        print("[daemon] 自我审计调度器已停止", flush=True)
+    if _scheduler is not None:
+        scheduler_shutdown()
+        _scheduler = None
+        print("[daemon] 任务调度器已停止", flush=True)
 
     try:
         mgr.close_all()
@@ -280,11 +370,11 @@ def _trigger_safe_mode(pm, mgr) -> None:
         except Exception as e:
             print(f"[daemon] 停止心跳出错: {e}", flush=True)
 
-    global _self_audit_scheduler
-    if _self_audit_scheduler is not None:
-        _self_audit_scheduler.stop()
-        _self_audit_scheduler = None
-        print("[daemon] 自我审计调度器已停止", flush=True)
+    global _scheduler
+    if _scheduler is not None:
+        scheduler_shutdown()
+        _scheduler = None
+        print("[daemon] 任务调度器已停止", flush=True)
 
     # 停止所有 adapter
     import asyncio
@@ -326,7 +416,7 @@ def _trigger_safe_mode(pm, mgr) -> None:
 
 
 def _restore_daemon(pm, mgr) -> None:
-    """safe_mode 结束后，重新初始化 adapter 和心跳。"""
+    """safe_mode 结束后，重新初始化 adapter、调度器和心跳。"""
     from src.core.config import load_config
 
     config = load_config()
@@ -363,11 +453,11 @@ def _restore_daemon(pm, mgr) -> None:
     _heartbeat_mgr.start()
     print("[daemon] 心跳已恢复", flush=True)
 
-    # 恢复自我审计调度器
-    global _self_audit_scheduler
-    _self_audit_scheduler = SelfAuditScheduler(hour=4, minute=0)
-    _self_audit_scheduler.start()
-    print("[daemon] 自我审计调度器已恢复", flush=True)
+    # 恢复任务调度器
+    global _scheduler
+    _register_tasks()
+    load_learned_modules()
+    print("[daemon] learned_modules 已加载", flush=True)
 
     # 上线通知
     pid = os.getpid()

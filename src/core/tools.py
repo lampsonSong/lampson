@@ -40,10 +40,14 @@ _register(skills_tools.SEARCH_PROJECTS_SCHEMA, skills_tools.search_projects)
 _register(session_tool.SESSION_SCHEMA, session_tool.run)
 
 
-# ── 启动时加载 learned_modules ─────────────────────────────────────────────
+# ── learned_modules 延迟加载 ──────────────────────────────────────────────
 
-def _load_learned_modules() -> None:
-    """扫描 ~/.lampson/learned_modules/，注册所有包含 TOOL_SCHEMA 的模块为工具。"""
+def load_learned_modules() -> None:
+    """扫描 ~/.lampson/learned_modules/，注册所有包含 TOOL_SCHEMA 的模块为工具。
+
+    必须在 daemon 启动完成后调用，不能在模块初始化时调用，否则会产生循环导入：
+    tools.py → learned_modules.py → tools.py（tools 模块还未初始化完成）。
+    """
     try:
         from src.tools import learned_modules
         registered = learned_modules.scan_and_register()
@@ -54,9 +58,6 @@ def _load_learned_modules() -> None:
             logger.debug("未发现 learned_modules 工具（learned_modules/ 目录为空）")
     except Exception as e:
         logger.warning(f"加载 learned_modules 失败: {e}")
-
-
-_load_learned_modules()
 
 
 # ─── 飞书客户端懒加载初始化 ────────────────────────────────────────────────
@@ -110,7 +111,7 @@ def dispatch(tool_name: str, arguments_raw: str | dict[str, Any]) -> str:
     if isinstance(arguments_raw, str):
         try:
             params = json.loads(arguments_raw)
-        except json.JSONDecodeError as e:
+        except json.DecodeError as e:
             return f"[错误] 工具参数解析失败：{e}"
     else:
         params = arguments_raw
