@@ -28,11 +28,13 @@ from pathlib import Path
 from src.core.config import load_config, is_config_complete, LAMPSON_DIR
 from src.core.heartbeat import HeartbeatManager
 from src.core.session_manager import get_session_manager
+from src.core.self_audit import SelfAuditScheduler
 
 LOG_DIR = LAMPSON_DIR / "logs"
 _BOOT_TASKS_PATH = LAMPSON_DIR / "boot_tasks.json"
 _DAEMON_PID_PATH = LOG_DIR / "daemon.pid"
 _shutdown = threading.Event()
+_self_audit_scheduler: SelfAuditScheduler | None = None
 _heartbeat_mgr: HeartbeatManager | None = None
 SAFE_MODE_SCRIPT = Path(__file__).resolve().parent / "safe_mode.py"
 DAEMON_ENTRY = f"{sys.executable} -m src.daemon"
@@ -166,6 +168,7 @@ def _inject_boot_tasks(session, tasks: list[dict]) -> None:
 
 
 def main() -> None:
+    global _self_audit_scheduler
     # 强制 stdout/stderr 行缓冲：launchd 重定向到文件时默认全缓冲，
     # 会导致日志丢失（进程崩溃时缓冲区内容不刷盘）。
     if hasattr(sys.stdout, "reconfigure"):
@@ -218,6 +221,12 @@ def main() -> None:
     _heartbeat_mgr.start()
     print("[daemon] 心跳已启动", flush=True)
 
+    # ── 自我审计调度器 ─────────────────────────────────────────────────
+    global _self_audit_scheduler
+    _self_audit_scheduler = SelfAuditScheduler(hour=4, minute=0)
+    _self_audit_scheduler.start()
+    print("[daemon] 自我审计调度器已启动（每天 04:00）", flush=True)
+
     # ── 上线通知 ─────────────────────────────────────────────────────────
     _send_boot_notification(config, pid)
 
@@ -237,6 +246,11 @@ def main() -> None:
     if _heartbeat_mgr is not None:
         _heartbeat_mgr.stop(user_initiated=True)
         print("[daemon] 心跳已停止", flush=True)
+
+    if _self_audit_scheduler is not None:
+        _self_audit_scheduler.stop()
+        _self_audit_scheduler = None
+        print("[daemon] 自我审计调度器已停止", flush=True)
 
     try:
         mgr.close_all()
@@ -265,6 +279,12 @@ def _trigger_safe_mode(pm, mgr) -> None:
             print("[daemon] 心跳已停止", flush=True)
         except Exception as e:
             print(f"[daemon] 停止心跳出错: {e}", flush=True)
+
+    global _self_audit_scheduler
+    if _self_audit_scheduler is not None:
+        _self_audit_scheduler.stop()
+        _self_audit_scheduler = None
+        print("[daemon] 自我审计调度器已停止", flush=True)
 
     # 停止所有 adapter
     import asyncio
@@ -342,6 +362,12 @@ def _restore_daemon(pm, mgr) -> None:
     _heartbeat_mgr = HeartbeatManager(task_id="daemon")
     _heartbeat_mgr.start()
     print("[daemon] 心跳已恢复", flush=True)
+
+    # 恢复自我审计调度器
+    global _self_audit_scheduler
+    _self_audit_scheduler = SelfAuditScheduler(hour=4, minute=0)
+    _self_audit_scheduler.start()
+    print("[daemon] 自我审计调度器已恢复", flush=True)
 
     # 上线通知
     pid = os.getpid()

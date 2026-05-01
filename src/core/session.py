@@ -66,6 +66,7 @@ HELP_TEXT = """\
   /update list                   列出自更新分支
   /metrics                       查看最近任务指标统计
   /compaction                    手动触发上下文压缩
+  /self-audit                    立即触发自我审计
   /new                           开始新 session（清空当前对话上下文）
   /exit                          退出
 
@@ -845,6 +846,9 @@ class Session:
         if command == "/compaction":
             return self._handle_compaction()
 
+        if command == "/self-audit":
+            return self._handle_self_audit()
+
         if command == "/help":
             return HandleResult(reply=HELP_TEXT, is_command=True)
 
@@ -915,6 +919,16 @@ class Session:
                 )
         except Exception as e:
             return HandleResult(reply=f"[上下文压缩] 异常: {e}", is_command=True)
+
+    def _handle_self_audit(self) -> HandleResult:
+        """手动触发自我审计。"""
+        try:
+            from src.core.self_audit import run_audit, format_report_detail
+            report = run_audit()
+            detail = format_report_detail(report)
+            return HandleResult(reply=detail, is_command=True)
+        except Exception as e:
+            return HandleResult(reply=f"[自我审计] 失败: {e}", is_command=True)
 
     def _format_config(self) -> str:
         """脱敏后格式化配置。"""
@@ -1072,7 +1086,11 @@ class Session:
 
                 try:
                     base_llm: LLMClient = client_bundle["llm"]
-                    tmp = base_llm.clone_for_inference()
+                    tmp = LLMClient(
+                        api_key=base_llm.client.api_key,
+                        base_url=str(base_llm.client.base_url),
+                        model=base_llm.model,
+                    )
                     tmp_adapter = create_adapter(tmp)
                     tmp.add_user_message(question)
 
