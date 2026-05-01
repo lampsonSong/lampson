@@ -534,30 +534,6 @@ def _get_existing_modules_summary() -> str:
     return "\n".join(lines) if lines else "（无）"
 
 
-def _check_project_path_mismatch(target: str, content: str) -> str | None:
-    """检查 content 中引用的路径是否与 target 项目匹配。
-
-    从已有项目文件中提取项目路径，与 content 中的路径对比。
-    如果 content 包含明显属于其他项目的路径，返回不匹配描述。
-    """
-    import re as _re
-
-    # 从 content 中提取文件路径（如 /Users/xxx/lampson/src/...）
-    path_pattern = _re.compile(r'(?:/Users/\S+?/([a-zA-Z0-9_-]+)/)(?:src|lib|app|pkg)/', _re.ASCII)
-    referenced_projects = set(m.group(1).lower() for m in path_pattern.finditer(content))
-
-    if not referenced_projects:
-        return None  # 没有可识别的路径，不拦截
-
-    # 检查 target 是否在引用的项目中
-    target_lower = target.lower()
-    for ref in referenced_projects:
-        if ref != target_lower:
-            return f"内容引用了 {ref} 的路径，但目标是 {target}"
-
-    return None
-
-
 def _extract_keywords(text: str) -> set[str]:
     """从文本中提取关键词集合（用于去重比较）。"""
     import re as _re
