@@ -200,6 +200,19 @@ def _run_skill_view(params: dict[str, Any]) -> str:
         if str(e.get("path", "")) == str(path.resolve()):
             e["invocation_count"] = new_c
             break
+
+    # 启动 skill 执行审计
+    try:
+        from src.core.skill_audit import start_audit
+        # 解析 body（去掉 frontmatter）
+        body = text
+        fm_match = __import__("re").match(r"^---\s*\n.*?\n---\s*\n", text, __import__("re").DOTALL)
+        if fm_match:
+            body = text[fm_match.end():]
+        start_audit(name, body)
+    except Exception as e:
+        __import__("logging").getLogger(__name__).debug(f"审计启动失败: {e}")
+
     return text
 
 

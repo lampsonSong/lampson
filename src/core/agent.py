@@ -528,6 +528,13 @@ class Agent:
                     result = tool_registry.dispatch(tc.name, tc.raw_arguments)
                     self._fast_path_tool_count += 1
 
+                    # 记录 tool call 供 skill 审计使用
+                    try:
+                        from src.core.skill_audit import record_tool_call
+                        record_tool_call(tc.name, tc.raw_arguments[:200])
+                    except Exception:
+                        pass
+
                     # 写 tool_result trace + 错误日志
                     if self.session_id:
                         error_info = None
@@ -652,8 +659,29 @@ class Agent:
         try:
             result = self._run_tool_loop()
         except AgentInterrupted:
-            # 标记中断摘要已由 Session 读取，后续由 Session 处理队列
+            from src.core.skill_audit import clear_audit
+            clear_audit()
             raise
+
+        # Skill 执行审计：检查是否有遗漏步骤
+        audit_reminder = None
+        try:
+            from src.core.skill_audit import end_audit, record_llm_output
+            if result:
+                record_llm_output(result[:500])
+            audit_reminder = end_audit()
+        except Exception:
+            pass
+
+        # 如果审计发现遗漏步骤，将提醒注入下一轮让 LLM 补上
+        if audit_reminder:
+            self.llm.add_user_message(audit_reminder)
+            try:
+                result = self._run_tool_loop()
+            except AgentInterrupted:
+                from src.core.skill_audit import clear_audit
+                clear_audit()
+                raise
 
         tool_count = getattr(self, "_fast_path_tool_count", 0)
         recent_context = self._get_recent_context(max_turns=5)
