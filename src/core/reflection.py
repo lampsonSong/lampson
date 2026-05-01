@@ -77,10 +77,7 @@ REFLECT_PROMPT = """你是一个知识管理助手。请分析这次任务执行
 - project_update: 在已有项目中发现了新信息（新模块、新配置）或需要修正过时内容。仅当已有 Projects 列表中已有该项目时使用
 - skill_create: 发现了一种可复用的操作方法，当前 skills 里没有覆盖的
 - skill_update: 执行过程中发现某个已有 skill 的步骤不够、有错误，或者用户用了一种新表达方式触发了该 skill
-- module_create: 发现了一段可复用的代码逻辑（如数据转换、日志解析、格式化、自动化脚本等），可作为独立 Python 模块沉淀。内容为完整的 Python 代码，包含：
-  * TOOL_SCHEMA: OpenAI function calling schema（name 必须以 learned_ 开头）
-  * TOOL_RUNNER: 执行函数，签名为 (params: dict) -> str
-  * 禁止 import src 内部模块，只能用标准库和已安装的第三方库
+- module_create: 发现了一段可复用的代码逻辑（如数据转换、日志解析、格式化、自动化脚本等），可作为独立 Python 模块沉淀。内容为完整的、可运行的 Python 代码
 - module_update: 现有模块的代码有 bug、可以优化、或需要新增功能。仅当已有 Modules 列表中有该模块时使用
 - 空数组: 简单查询、闲聊、或信息已经记录过
 
@@ -88,7 +85,7 @@ REFLECT_PROMPT = """你是一个知识管理助手。请分析这次任务执行
 - 不要重复记录已有信息
 - skill 的 content 是方法论（通用步骤），不是具体答案
 - project_update 的 content 是增量信息，不是整个文件重写
-- module 的 content 是完整的、可运行的 Python 代码
+- module 的 content 是完整的、可运行的 Python 代码，禁止 import src 内部模块
 - 新建 skill 的 triggers 至少 1 个
 - 种子模式：如果知识值得记录但内容还不够丰富，可以只写简短描述 + 1 个触发词
 
@@ -98,20 +95,11 @@ REFLECT_PROMPT = """你是一个知识管理助手。请分析这次任务执行
 {{"learnings": [{{"type": "module_create", "target": "log_parser", "reason": "连续手动写 awk 命令解析日志", "content": "# Log Parser\\n\\nTOOL_SCHEMA = {{\\n  'function': {{\\n    'name': 'learned_log_parser',\\n    'description': '解析日志文件，支持过滤级别和关键词',\\n    'parameters': {{\\n      'type': 'object',\\n      'properties': {{\\n        'path': {{'type': 'string', 'description': '日志文件路径'}},\\n        'level': {{'type': 'string', 'description': '日志级别，如 ERROR/WARN/INFO'}},\\n        'keyword': {{'type': 'string', 'description': '过滤关键词'}},\\n        'limit': {{'type': 'integer', 'description': '最多返回行数'}}\\n      }},\\n      'required': ['path']\\n    }}\\n  }}\\n}}\\n\\n\\ndef TOOL_RUNNER(params: dict) -> str:\\n    ...\\n", "triggers": []}}]}}"""
 
 
+# ── 是否需要反思（LLM 判断）─────────────────────────────────────────────────
+
+
+
 # ── 公开接口 ─────────────────────────────────────────────────────────────────
-
-# 用户纠正信号关键词
-_CORRECTION_SIGNALS = (
-    "不对", "错了", "不是这样的", "应该是", "不应该", "不是", "你搞错",
-    "说错了", "理解错了", "搞反了", "反了", "为什么不是", "我想说的是",
-    "我的意思是", "不对吧", "弄错了", "搞混了",
-)
-
-
-def _detect_user_correction(user_input: str) -> bool:
-    """检测用户输入中是否包含纠正信号。"""
-    text = user_input.lower()
-    return any(sig in text for sig in _CORRECTION_SIGNALS)
 
 
 def should_reflect(
@@ -122,8 +110,13 @@ def should_reflect(
     intent: str = "",
     skill_activated: str | None = None,
     user_input: str = "",
+    llm_client: Any | None = None,
+    recent_context: str = "",
 ) -> bool:
-    """判断是否应该触发反思。"""
+    """启发式判断本次任务是否值得反思。
+
+    不额外调用 LLM，由 reflect_and_learn 内部的 LLM 调用自行判断是否沉淀。
+    """
     import time
     global _last_reflect_time
 
@@ -131,15 +124,7 @@ def should_reflect(
     if now - _last_reflect_time < _REFLECT_COOLDOWN:
         return False
 
-    # 用户纠正信号：始终触发反思（最高优先级）
-    if user_input and _detect_user_correction(user_input):
-        return True
-
-    # Skill 被激活时：用户可能在使用或纠正 skill，始终值得反思
-    if skill_activated:
-        return True
-
-    # Fast Path 且没有工具调用 → 跳过（1 个工具也值得反思）
+    # Fast Path 且没有工具调用 → 跳过（闲聊、简单查询）
     if is_fast_path and tool_call_count == 0:
         return False
 
@@ -147,29 +132,23 @@ def should_reflect(
     if intent in ("chat", "info_query"):
         return False
 
-    # plan 为空（说明不是计划模式）→ 用 tool_call_count 判断
-    if plan is None:
-        return tool_call_count >= 3
-
-    # 计划未完成 → 跳过
-    if plan.status != StepStatus.done:
-        # 但如果有步骤失败了并且有步骤成功了，仍然值得反思踩坑
-        done_steps = [s for s in plan.steps if s.status == StepStatus.done]
-        failed_steps = [s for s in plan.steps if s.status == StepStatus.failed]
-        if not (done_steps and failed_steps):
-            return False
-
-    # 计划 3 步以上 → 必须反思
-    if len(plan.steps) >= 3:
+    # Skill 被激活 → 值得反思
+    if skill_activated:
+        _last_reflect_time = now
         return True
 
-    # 有失败步骤且部分成功 → 值得反思（踩坑经验）
-    done_steps = [s for s in plan.steps if s.status == StepStatus.done]
-    failed_steps = [s for s in plan.steps if s.status == StepStatus.failed]
-    if done_steps and failed_steps:
+    # 有工具调用 → 值得反思
+    if tool_call_count >= 1:
+        _last_reflect_time = now
+        return True
+
+    # 计划模式 3 步以上 → 值得反思
+    if plan is not None and len(plan.steps) >= 3:
+        _last_reflect_time = now
         return True
 
     return False
+
 
 
 def reflect_and_learn(
@@ -181,21 +160,18 @@ def reflect_and_learn(
     active_project: str = "",
 ) -> list[dict[str, Any]]:
     """执行反思，返回 learnings 列表。调用方负责后续的沉淀执行。"""
-    import time
-    global _last_reflect_time
-
     existing_skills = _get_existing_skills_summary()
     existing_projects = _get_existing_projects_summary()
     existing_modules = _get_existing_modules_summary()
 
     # 构建反思上下文
     extra_context = ""
-    # 1. 如果有 skill 被激活，补充 skill 全文
+    # 如果有 skill 被激活，补充 skill 全文
     if skill_activated:
         skill_summary = _get_skill_full_content(skill_activated)
         if skill_summary:
             extra_context += "\n## 本轮激活的技能 [{}]\n{}".format(skill_activated, skill_summary)
-    # 2. 补充最近对话上下文（让 LLM 看到用户反馈）
+    # 补充最近对话上下文（让 LLM 看到用户反馈）
     if recent_context and recent_context != "（无对话记录）":
         extra_context += "\n## 最近对话\n{}".format(recent_context)
 
@@ -213,20 +189,17 @@ def reflect_and_learn(
 
     try:
         resp = llm_client.client.chat.completions.create(
-            model=llm_client.model,
+            model=getattr(llm_client, "model", "glm-5"),
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
+            max_tokens=2048,
         )
-        raw = resp.choices[0].message.content or ""
-        data = _extract_json(raw)
-        if data is None:
-            logger.debug("反思结果无法解析 JSON，跳过")
-            return []
-
-        learnings = data.get("learnings", [])
-        _last_reflect_time = time.time()
-        return learnings
-
+        raw = (resp.choices[0].message.content or "").strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1]
+            raw = raw.rsplit("```", 1)[0].strip()
+        result = json.loads(raw)
+        return result.get("learnings", [])
     except Exception as e:
         logger.warning(f"反思 LLM 调用失败: {e}")
         return []
@@ -257,11 +230,13 @@ def execute_learnings(learnings: list[dict[str, Any]]) -> list[str]:
             hint = _create_skill(target, content, reason, triggers)
             if hint:
                 hints.append(hint)
+                _notify_feishu(f"📝 **Skill 新建**\n\n- 名称：{target}\n- 原因：{reason}")
 
         elif ltype == "skill_update":
             hint = _update_skill(target, content, reason, triggers)
             if hint:
                 hints.append(hint)
+                _notify_feishu(f"🔧 **Skill 更新**\n\n- 名称：{target}\n- 原因：{reason}")
 
         elif ltype == "module_create":
             hint = _create_module(target, content, reason)
@@ -279,7 +254,42 @@ def execute_learnings(learnings: list[dict[str, Any]]) -> list[str]:
     return hints
 
 
+# ── 飞书通知 ────────────────────────────────────────────────────────────────
+
+
+def _notify_feishu(message: str) -> None:
+    """发送飞书卡片通知（skill 变更时调用）。静默失败，不阻塞主流程。"""
+    try:
+        config_path = Path.home() / ".lampson" / "config.yaml"
+        if not config_path.exists():
+            return
+        with open(config_path) as f:
+            config = yaml.safe_load(f)
+
+        owner_chat_id = config.get("feishu", {}).get("owner_chat_id", "").strip()
+        app_id = config.get("feishu", {}).get("app_id", "").strip()
+        app_secret = config.get("feishu", {}).get("app_secret", "").strip()
+
+        if not owner_chat_id or not app_id or not app_secret:
+            return
+
+        from src.feishu.client import FeishuClient
+        client = FeishuClient(app_id=app_id, app_secret=app_secret)
+        client.send_card(
+            receive_id=owner_chat_id,
+            card={
+                "config": {"wide_screen_mode": True},
+                "elements": [{"tag": "markdown", "content": message}],
+            },
+            receive_id_type="chat_id",
+        )
+        logger.info("[反思] 飞书通知已发送")
+    except Exception as e:
+        logger.warning(f"[反思] 飞书通知失败: {e}")
+
+
 # ── 沉淀执行 ─────────────────────────────────────────────────────────────────
+
 
 def _create_project(target: str, content: str, reason: str) -> str | None:
     """创建新的项目文件。如果已存在则降级为 update。"""
@@ -290,17 +300,15 @@ def _create_project(target: str, content: str, reason: str) -> str | None:
     project_file = PROJECTS_DIR / f"{target}.md"
 
     if project_file.exists():
-        logger.debug(f"项目 {target} 已存在，降级为 update")
         return _update_project(target, content, reason)
 
-    updated = f"# {target}\n\n{content}"
-    project_file.write_text(updated, encoding="utf-8")
-    logger.info(f"已创建项目信息: {target} ({reason})")
-    return f"已记录项目信息: {target}"
+    project_file.write_text(content + f"\n\n> 创建于 {date.today()}\n", encoding="utf-8")
+    logger.info(f"已创建项目: {target} ({reason})")
+    return f"已创建项目: {target}（{reason}）"
 
 
 def _update_project(target: str, content: str, reason: str) -> str | None:
-    """更新已有项目文件：追加日期分节的增量内容。如果不存在则降级为 create。"""
+    """追加内容到已有项目文件。"""
     if not target or not content:
         return None
 
@@ -308,48 +316,39 @@ def _update_project(target: str, content: str, reason: str) -> str | None:
     project_file = PROJECTS_DIR / f"{target}.md"
 
     if not project_file.exists():
-        logger.debug(f"项目 {target} 不存在，降级为 create")
         return _create_project(target, content, reason)
 
     existing = project_file.read_text(encoding="utf-8")
-    if _content_already_exists(existing, content):
-        logger.debug(f"项目 {target} 已有相同信息，跳过")
+    # 简单追加：如果已有内容里已经包含这段新内容，跳过
+    if content.strip() in existing:
         return None
 
-    updated = existing + f"\n\n## {datetime.now():%Y-%m-%d}\n{content}"
-    project_file.write_text(updated, encoding="utf-8")
-    logger.info(f"已更新项目信息: {target} ({reason})")
-    return f"已更新项目信息: {target}（{reason}）"
+    updated = existing.rstrip() + f"\n\n## 更新 {date.today()}\n" + content.strip()
+    project_file.write_text(updated + "\n", encoding="utf-8")
+    logger.info(f"已更新项目: {target} ({reason})")
+    return f"已更新项目: {target}（{reason}）"
 
 
 def _create_skill(
     target: str, content: str, reason: str, triggers: list[str]
 ) -> str | None:
-    """创建新的 skill 文件。"""
+    """创建新的 skill 目录和 SKILL.md。"""
     if not target or not content:
         return None
 
-    if len(content.strip()) < _MIN_SKILL_CONTENT_LEN:
-        logger.debug(f"Skill {target} 内容太短，跳过创建")
-        return None
-    if len(triggers) < _MIN_TRIGGER_COUNT:
-        logger.debug(f"Skill {target} trigger 不足，跳过创建")
-        return None
-
     skill_dir = SKILLS_DIR / target
-    skill_file = skill_dir / "SKILL.md"
-    if skill_file.exists():
-        return _update_skill(target, content, reason, triggers)
-
     skill_dir.mkdir(parents=True, exist_ok=True)
 
-    frontmatter = yaml.dump(
-        {"name": target, "description": reason, "triggers": triggers},
-        allow_unicode=True,
-        default_flow_style=False,
-    ).strip()
+    # 自动生成触发词
+    if not triggers:
+        triggers = _generate_triggers(target, content)
 
-    skill_content = f"---\n{frontmatter}\n---\n\n{content}"
+    if len(triggers) < _MIN_TRIGGER_COUNT:
+        triggers.append(target.replace("-", " ").replace("_", " "))
+
+    frontmatter = "\n".join(f"- {t}" for t in triggers)
+    skill_content = f"---\ncreated_at: '{date.today()}'\ndescription: {content[:200]}\ntriggers:\n{frontmatter}\n---\n\n{content}"
+    skill_file = skill_dir / "SKILL.md"
     skill_file.write_text(skill_content, encoding="utf-8")
     logger.info(f"已创建技能: {target} ({reason})")
 
@@ -403,300 +402,185 @@ def _create_module(target: str, content: str, reason: str) -> str | None:
     if not target or not content:
         return None
 
-    # 名称合法性
     safe_name = _sanitize_module_name(target)
     if not safe_name:
         logger.warning(f"模块名非法: {target}，跳过")
         return None
 
-    # 安全校验：禁止 import src
+    MODULES_DIR = LAMPSON_DIR / "learned_modules"
+    MODULES_DIR.mkdir(parents=True, exist_ok=True)
+    module_file = MODULES_DIR / f"{safe_name}.py"
+
+    if module_file.exists():
+        return _update_module(safe_name, content, reason)
+
     if _contains_blocked_import(content):
         logger.warning(f"模块 {target} 包含禁止的 import，跳过")
         return None
 
-    try:
-        from src.tools.learned_modules import write_module
-        result = write_module(safe_name, content)
-        if result.startswith("[错误]"):
-            logger.warning(f"模块 {target} 写入失败: {result}")
-            return None
-
-        # 注册为工具
-        from src.tools import learned_modules
-        registered = learned_modules.scan_and_register()
-        tool_names = [s["function"]["name"] for s in registered if safe_name in s["function"]["name"]]
-        tool_hint = f"，已注册为工具 {tool_names[0]}" if tool_names else ""
-
-        logger.info(f"已创建自我学习模块: {safe_name} ({reason})")
-        return f"已创建自我学习模块: {safe_name}（{reason}）{tool_hint}"
-    except Exception as e:
-        logger.warning(f"模块 {target} 创建失败: {e}")
-        return None
+    module_file.write_text(content + "\n", encoding="utf-8")
+    logger.info(f"已创建模块: {safe_name} ({reason})")
+    return f"已创建模块: {safe_name}（{reason}）"
 
 
 def _update_module(target: str, content: str, reason: str) -> str | None:
-    """更新已有的 learned module。"""
-    if not target:
+    """更新已有 learned module。"""
+    if not target or not content:
         return None
 
     safe_name = _sanitize_module_name(target)
     if not safe_name:
         return None
 
-    try:
-        from src.tools import learned_modules
-        from src.core import tools as tool_registry
+    MODULES_DIR = LAMPSON_DIR / "learned_modules"
+    module_file = MODULES_DIR / f"{safe_name}.py"
 
-        # 读取现有内容（用于去重）
-        existing_code = learned_modules.get_module_code(safe_name)
-        if not existing_code:
-            logger.debug(f"模块 {target} 不存在，降级为 create")
-            return _create_module(target, content, reason)
+    if not module_file.exists():
+        return _create_module(safe_name, content, reason)
 
-        if _content_already_exists(existing_code, content):
-            logger.debug(f"模块 {target} 内容相同，跳过更新")
-            return None
-
-        # 安全校验
-        if _contains_blocked_import(content):
-            logger.warning(f"模块 {target} 包含禁止的 import，跳过")
-            return None
-
-        result = learned_modules.write_module(safe_name, content)
-        if result.startswith("[错误]"):
-            logger.warning(f"模块 {target} 更新失败: {result}")
-            return None
-
-        # 重新注册（清除旧工具再注册新工具）
-        # 先移除旧的（同名会被覆盖，tool_registry.register_external 是幂等的）
-        learned_modules.scan_and_register()
-
-        logger.info(f"已更新自我学习模块: {safe_name} ({reason})")
-        return f"已更新自我学习模块: {safe_name}（{reason}）"
-    except Exception as e:
-        logger.warning(f"模块 {target} 更新失败: {e}")
+    if _contains_blocked_import(content):
+        logger.warning(f"模块 {target} 包含禁止的 import，跳过")
         return None
 
-
-def _sanitize_module_name(name: str) -> str | None:
-    """将用户提供的名称转换为合法的 snake_case 模块名。"""
-    import re
-    # 只保留字母数字下划线
-    cleaned = re.sub(r"[^a-zA-Z0-9_]", "_", name.strip())
-    # 必须以字母开头
-    if cleaned and cleaned[0].isdigit():
-        cleaned = "_" + cleaned
-    # 至少一个有效字符
-    if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", cleaned):
-        return None
-    return cleaned
-
-
-def _contains_blocked_import(code: str) -> bool:
-    """检查代码是否包含禁止的 import。"""
-    import re
-    BLOCKED = frozenset({"src", "src.core", "src.tools", "src.feishu",
-                          "src.skills", "src.memory", "src.platforms",
-                          "src.selfupdate", "src.planning"})
-    for line in code.splitlines():
-        stripped = line.strip()
-        m = re.match(r"^from\s+(\S+)", stripped)
-        if m and m.group(1).split(".")[0] in BLOCKED:
-            return True
-        m = re.match(r"^import\s+(\S+)", stripped)
-        if m and m.group(1).split(".")[0] in BLOCKED:
-            return True
-    return False
+    module_file.write_text(content + "\n", encoding="utf-8")
+    logger.info(f"已更新模块: {safe_name} ({reason})")
+    return f"已更新模块: {safe_name}（{reason}）"
 
 
 # ── 辅助函数 ─────────────────────────────────────────────────────────────────
 
-def _get_skill_full_content(skill_name: str) -> str:
-    """读取指定 skill 的完整内容（用于反思上下文）。"""
-    skill_file = SKILLS_DIR / skill_name / "SKILL.md"
-    if not skill_file.exists():
-        return ""
-    try:
-        return skill_file.read_text(encoding="utf-8")[:3000]
-    except OSError:
-        return ""
+
+def _sanitize_module_name(name: str) -> str:
+    """将名称转换为合法的 Python 模块名。"""
+    name = re.sub(r"[^a-zA-Z0-9_]", "_", name)
+    name = re.sub(r"^[^a-zA-Z]+", "", name)
+    return name[:64] or "learned_module"
 
 
-def _get_existing_modules_summary() -> str:
-    """获取已有 learned modules 的摘要列表。"""
-    try:
-        from src.tools import learned_modules
-        modules = learned_modules.list_modules()
-    except Exception:
-        return "（无）"
-
-    if not modules:
-        return "（无）"
-    lines = []
-    for m in modules:
-        tool_flag = " [工具]" if m["registered_as_tool"] == "True" else ""
-        lines.append(f"- {m['name']}{tool_flag}")
-    return "\n".join(lines) if lines else "（无）"
+def _contains_blocked_import(code: str) -> bool:
+    """检查模块代码中是否包含禁止的 import。"""
+    BLOCKED_PREFIXES = ("from src", "import src")
+    for line in code.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        for prefix in BLOCKED_PREFIXES:
+            if stripped.startswith(prefix):
+                return True
+    return False
 
 
-def _extract_keywords(text: str) -> set[str]:
-    """从文本中提取关键词集合（用于去重比较）。"""
-    import re as _re
-    cleaned = _re.sub(r"[#|\-*\n\r]", " ", text)
-    words = {w.strip() for w in cleaned.split() if len(w.strip()) >= 2}
-    return words
+def _generate_triggers(name: str, content: str) -> list[str]:
+    """根据名称和内容生成触发词。"""
+    triggers: list[str] = []
+    # 从名称提取
+    for part in re.split(r"[_\- ]", name):
+        if len(part) >= 2:
+            triggers.append(part.lower())
+    # 取内容前 100 字的关键词
+    words = re.findall(r"[\u4e00-\u9fff]{2,}|[a-zA-Z]{3,}", content[:500])
+    from collections import Counter
+    for word, _ in Counter(words).most_common(5):
+        if word.lower() not in [t.lower() for t in triggers]:
+            triggers.append(word.lower())
+    return triggers[:6]
 
 
 def _content_already_exists(existing: str, new_content: str) -> bool:
-    """去重检查：基于关键词集合相似度判断新内容是否已存在。"""
-    core = new_content.strip()[:100]
-    if not core:
-        return True
-    if core in existing:
-        return True
-    existing_kw = _extract_keywords(existing)
-    new_kw = _extract_keywords(new_content)
-    if not new_kw:
-        return True
-    intersection = existing_kw & new_kw
-    union = existing_kw | new_kw
-    if not union:
-        return True
-    similarity = len(intersection) / len(union)
-    return similarity >= 0.6
+    """检查新内容是否已在现有 skill 中。"""
+    stripped = new_content.strip()
+    # 简单检测：是否完全包含（允许空格差异）
+    normalized_new = re.sub(r"\s+", "", stripped)
+    normalized_existing = re.sub(r"\s+", "", existing)
+    return normalized_new in normalized_existing
 
 
-def _merge_triggers(skill_content: str, new_triggers: list[str]) -> str:
-    """合并新 triggers 到已有的 SKILL.md frontmatter。"""
-    fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", skill_content, re.DOTALL)
-    if not fm_match:
-        return skill_content
+def _merge_triggers(existing: str, new_triggers: list[str]) -> str:
+    """合并 triggers 到 existing skill 内容中。"""
+    # 找到 triggers 部分
+    match = re.search(r"^triggers:\s*\n((?:- .+\n)+)", existing, re.MULTILINE)
+    if not match:
+        return existing
 
-    try:
-        meta = yaml.safe_load(fm_match.group(1)) or {}
-    except yaml.YAMLError:
-        return skill_content
+    existing_triggers = set(re.findall(r"- (.+)", match.group(1)))
+    new_unique = [t for t in new_triggers if t.lower() not in {x.lower() for x in existing_triggers}]
 
-    existing_triggers = meta.get("triggers", [])
-    if isinstance(existing_triggers, str):
-        existing_triggers = [existing_triggers]
+    if not new_unique:
+        return existing  # 无新增
 
-    merged = list(set(existing_triggers + new_triggers))
-    meta["triggers"] = merged
-
-    new_fm = yaml.dump(meta, allow_unicode=True, default_flow_style=False).strip()
-    body = skill_content[fm_match.end():]
-
-    return f"---\n{new_fm}\n---\n\n{body}"
+    added = "\n".join(f"- {t}" for t in new_unique)
+    updated = existing[:match.end()] + added + "\n" + existing[match.end():]
+    return updated
 
 
 def _get_existing_skills_summary() -> str:
-    """获取已有 skills 的摘要列表。"""
-    from src.skills.manager import load_all_skills
-
-    try:
-        skills = load_all_skills()
-    except Exception:
-        return "（无）"
-
-    if not skills:
-        return "（无）"
+    """获取已有 skills 列表摘要。"""
+    if not SKILLS_DIR.exists():
+        return "(无)"
     lines = []
-    for name, skill in skills.items():
-        desc = getattr(skill, 'description', '') or ""
-        lines.append(f"- {name}: {desc}")
-    return "\n".join(lines)
+    for skill_dir in sorted(SKILLS_DIR.iterdir()):
+        if skill_dir.is_dir():
+            skill_file = skill_dir / "SKILL.md"
+            if skill_file.exists():
+                # 提取前两行作为摘要
+                first_lines = skill_file.read_text(encoding="utf-8").split("\n")[:4]
+                desc = " ".join(l.lstrip("-# ") for l in first_lines if l.strip())[:120]
+                lines.append(f"- {skill_dir.name}: {desc}")
+    return "\n".join(lines) if lines else "(无)"
+
+
+def _get_skill_full_content(skill_name: str) -> str:
+    """获取指定 skill 的完整内容。"""
+    skill_file = SKILLS_DIR / skill_name / "SKILL.md"
+    if not skill_file.exists():
+        return ""
+    return skill_file.read_text(encoding="utf-8")
 
 
 def _get_existing_projects_summary() -> str:
-    """获取已有 projects 的摘要列表。"""
+    """获取已有 projects 列表摘要。"""
     if not PROJECTS_DIR.exists():
-        return "（无）"
-    files = list(PROJECTS_DIR.rglob("*.md"))
-    if not files:
-        return "（无）"
+        return "(无)"
     lines = []
-    for f in files:
-        try:
-            content = f.read_text(encoding="utf-8").strip()
-            title = f.stem
-            preview = content[:100].replace("\n", " ")
-            lines.append(f"- {title}: {preview}...")
-        except OSError:
-            pass
-    return "\n".join(lines) if lines else "（无）"
+    for proj_file in sorted(PROJECTS_DIR.glob("*.md")):
+        content = proj_file.read_text(encoding="utf-8")
+        first_line = content.split("\n")[0].lstrip("# ").strip()
+        lines.append(f"- {proj_file.stem}: {first_line}")
+    return "\n".join(lines) if lines else "(无)"
+
+
+def _get_existing_modules_summary() -> str:
+    """获取已有 learned_modules 列表摘要。"""
+    MODULES_DIR = LAMPSON_DIR / "learned_modules"
+    if not MODULES_DIR.exists():
+        return "(无)"
+    lines = []
+    for mod_file in sorted(MODULES_DIR.glob("*.py")):
+        # 提取 docstring 或第一段注释
+        content = mod_file.read_text(encoding="utf-8")
+        desc = content.split('"""')[1].split("\n")[0].strip() if '"""' in content else content.split("\n")[0].lstrip("# ").strip()
+        lines.append(f"- {mod_file.stem}: {desc[:80]}")
+    return "\n".join(lines) if lines else "(无)"
 
 
 def format_execution_summary(plan: Plan) -> str:
-    """从 Plan 对象构建执行摘要文本。"""
-    lines = []
+    """将 Plan 对象格式化为文字摘要。"""
+    if plan is None:
+        return "(无计划，纯 Fast Path)"
+    lines = [f"计划: {plan.goal} (状态: {plan.status.value})"]
     for step in plan.steps:
-        if step.status == StepStatus.skipped:
-            lines.append(f"步骤{step.id}: [已跳过]")
-            continue
-        status = "完成" if step.status == StepStatus.done else "失败"
-        lines.append(f"步骤{step.id} ({status}): {step.action}")
-        if step.args:
-            args_str = ", ".join(f"{k}={v}" for k, v in step.args.items())
-            lines.append(f"  参数: {args_str}")
-        if step.result:
-            result_preview = step.result[:500]
-            lines.append(f"  结果: {result_preview}")
+        icon = "✓" if step.status == StepStatus.done else "✗" if step.status == StepStatus.failed else "○"
+        lines.append(f"  {icon} {step.description}")
     return "\n".join(lines)
 
 
-def format_fast_path_summary(user_input: str, tool_history: list[dict]) -> str:
-    """从 Fast Path 工具调用历史构建执行摘要。"""
-    lines = [f"用户请求: {user_input}"]
-    for i, tc in enumerate(tool_history):
-        name = tc.get("name", "?")
-        args = tc.get("args", {})
-        result = tc.get("result", "")
-        result_preview = result[:500] if result else "(空)"
-        lines.append(f"工具调用{i+1}: {name}({args}) → {result_preview}")
-    return "\n".join(lines)
+# ── Skill 自动合并 ─────────────────────────────────────────────────────────
 
 
-def _extract_json(text: str) -> dict | None:
-    """从文本中提取 JSON。"""
-    cleaned = re.sub(r"<think\b[^>]*>.*?</think\s*>", "", text, flags=re.DOTALL)
-
-    match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", cleaned, re.DOTALL)
-    if match:
-        cleaned = match.group(1).strip()
-
-    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(0))
-        except json.JSONDecodeError:
-            pass
-
+def _auto_consolidate(skill_name: str) -> None:
+    """Skill 创建后，提示可以考虑合并相似技能（懒加载避免循环导入）。"""
     try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        return None
-
-
-# ── 自动合并 ──────────────────────────────────────────────────────────────
-
-def _auto_consolidate(new_skill_name: str) -> None:
-    """新建 skill 后自动用 LLM 分析并合并重复/耦合的 skill。"""
-    global _llm_client
-    if _llm_client is None:
-        logger.debug("自动合并跳过：LLM Client 未注入")
-        return
-
-    from src.skills.manager import load_all_skills, consolidate_skills, execute_consolidation
-
-    skills = load_all_skills()
-    if len(skills) < 2:
-        return
-
-    actions, analysis = consolidate_skills(skills, _llm_client)
-    if not actions:
-        logger.debug(f"自动合并：{analysis}")
-        return
-
-    result = execute_consolidation(actions)
-    logger.info(f"自动合并完成：{result}")
+        from src.core.skills.manager import consolidate_similar_skills
+        consolidate_similar_skills(skill_name)
+    except Exception:
+        pass  # 合并失败不影响主流程

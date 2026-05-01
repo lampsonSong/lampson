@@ -130,8 +130,21 @@ class FeishuAdapter(BasePlatformAdapter):
 
     # ─── 内部发送方法（同步，供 to_thread 调用）────────────────────────────
 
+    @staticmethod
+    def _strip_think_tags(text: str) -> str:
+        """移除模型输出的 think 标签及内容，不发给用户。"""
+        import re
+        # 移除 <think>...</think> 标签及内容
+        text = re.sub(r'<think>[\s\S]*?</think>', '', text)
+        # 移除 <think>...</think> 格式
+        text = re.sub(r'<think>[\s\S]*?</think>', '', text)
+        return text.strip()
+
     def _send_reply(self, chat_id: str, text: str) -> None:
         """发送最终回复，自动判断用卡片还是文本。"""
+        text = self._strip_think_tags(text)
+        if not text:
+            return
         if self._should_use_card(text):
             self._send_reply_as_card(chat_id, text)
         else:

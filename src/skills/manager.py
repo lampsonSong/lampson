@@ -145,10 +145,12 @@ def decide_best_skill(user_input: str, matched_skills: list[Skill], llm_client: 
                 "以下技能都被触发了，请判断哪个最合适：\n" + skill_list + "\n\n"
                 "只回复技能的 name（原文），不要其他内容。如果都不合适，回复 none。"
             )
-            if hasattr(llm_client, "clone_for_inference"):
-                client = llm_client.clone_for_inference()
-            else:
-                client = llm_client
+            from src.core.llm import LLMClient
+            client = LLMClient(
+                api_key=llm_client.client.api_key,
+                base_url=str(llm_client.client.base_url),
+                model=llm_client.model,
+            )
             client.set_system_context()
             client.add_user_message(prompt)
             response = client.chat()
@@ -333,14 +335,15 @@ def consolidate_skills(skills: dict[str, Skill], llm_client: Any) -> tuple[list[
     )
 
     try:
-        # 用 clone_for_inference 创建干净实例，避免污染原有 messages
-        if hasattr(llm_client, "clone_for_inference"):
-            client = llm_client.clone_for_inference()
-            client.set_system_context()
-            client.add_user_message(prompt)
-            response = client.chat()
-        else:
-            raise ValueError("llm_client 不支持 clone_for_inference")
+        from src.core.llm import LLMClient
+        client = LLMClient(
+            api_key=llm_client.client.api_key,
+            base_url=str(llm_client.client.base_url),
+            model=llm_client.model,
+        )
+        client.set_system_context()
+        client.add_user_message(prompt)
+        response = client.chat()
     except Exception as e:
         return [], f"[错误] 调用 LLM 失败：{e}"
 

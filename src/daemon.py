@@ -4,7 +4,7 @@
 1. 加载配置、初始化 SessionManager
 2. 启动多平台消息网关（PlatformManager）
 3. 启动心跳（HeartbeatManager）
-4. 启动任务调度器（TaskScheduler）：自我审计 + 训练监控
+4. 启动任务调度器（TaskScheduler）：自我审计
 5. 启动后执行 boot_tasks（重启前指定的待办）
 6. 主线程阻塞（signal 驱动优雅退出）
 7. 退出时保存 session
@@ -85,24 +85,6 @@ def _self_audit_callback() -> None:
         _task_scheduler_logger.error(f"[self_audit] 执行失败: {e}")
 
 
-def _train_monitor_callback() -> None:
-    """每 30 分钟查询 train39 GPU 4-7 状态并发送飞书。"""
-    config = load_config()
-    try:
-        # 动态加载 learned_modules 中的 train_monitor
-        import importlib.util
-        mod_path = Path.home() / ".lampson/learned_modules/train_monitor.py"
-        spec = importlib.util.spec_from_file_location("train_monitor", str(mod_path))
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        result = mod.TOOL_RUNNER({})
-        _send_feishu(config, f"[训练监控]\n{result}")
-        _task_scheduler_logger.info("[train_monitor] 监控完成并已发送")
-    except Exception as e:
-        _task_scheduler_logger.error(f"[train_monitor] 执行失败: {e}")
-        _send_feishu(config, f"[训练监控] 查询失败: {e}")
-
-
 def _register_tasks() -> None:
     """注册所有定时任务。"""
     global _scheduler
@@ -119,16 +101,7 @@ def _register_tasks() -> None:
         description="每日自我审计（凌晨 4 点）",
     ))
 
-    # 训练监控：每 30 分钟
-    schedule(TaskConfig(
-        task_id="train_monitor",
-        task_type=TaskType.INTERVAL,
-        interval_seconds=1800,
-        func=_train_monitor_callback,
-        description="train39 GPU 4-7 训练状态监控（每 30 分钟）",
-    ))
-
-    print("[daemon] 任务调度器已启动（自我审计 + 训练监控）", flush=True)
+    print("[daemon] 任务调度器已启动（自我审计）", flush=True)
 
 
 # ── 信号与退出 ───────────────────────────────────────────────────────────────
@@ -310,13 +283,13 @@ def main() -> None:
     _heartbeat_mgr.start()
     print("[daemon] 心跳已启动", flush=True)
 
-    # ── 任务调度器（自我审计 + 训练监控）────────────────────────────────
+    # ── 任务调度器（自我审计）──────────────────────────────────────────
     _register_tasks()
-
 
     # ── 加载 learned_modules（延迟，避免循环导入）──────────────────────
     load_learned_modules()
     print("[daemon] learned_modules 已加载", flush=True)
+
     # ── 上线通知 ─────────────────────────────────────────────────────────
     _send_boot_notification(config, pid)
 
@@ -460,7 +433,6 @@ def _restore_daemon(pm, mgr) -> None:
     print("[daemon] learned_modules 已加载", flush=True)
 
     # 上线通知
-    pid = os.getpid()
     from src.feishu.client import FeishuClient
     owner_chat_id = config.get("feishu", {}).get("owner_chat_id", "").strip()
     app_id = config.get("feishu", {}).get("app_id", "").strip()

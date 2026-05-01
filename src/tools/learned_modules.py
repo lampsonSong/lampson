@@ -80,9 +80,12 @@ def scan_and_register() -> list[dict[str, Any]]:
         if schema and runner:
             try:
                 from src.core import tools as tool_registry
-                tool_registry.register_external(schema, runner)
-                registered.append(schema)
-                logger.info(f"已注册 learned_module 工具: {module_name}")
+                ok = tool_registry.register_external(schema, runner)
+                if ok:
+                    registered.append(schema)
+                    logger.info(f"已注册 learned_module 工具: {module_name}")
+                else:
+                    logger.warning(f"learned_module {module_name} schema 校验未通过，已跳过工具注册")
             except Exception as e:
                 logger.warning(f"注册 learned_module {module_name} 工具失败: {e}")
         else:

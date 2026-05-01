@@ -1,7 +1,7 @@
 """自我审计模块：定时扫描 skills、projects、learned_modules，检查过时、错误、冗余。
 
 审计触发：
-    1. 定时：每天凌晨 4 点（可配置），在后台线程运行
+    1. 定时：通过 TaskScheduler（APScheduler）每天凌晨 4 点调度
     2. 手动：用户输入 /self-audit 命令
 
 审计维度：
@@ -16,11 +16,9 @@ from __future__ import annotations
 
 import logging
 import re
-import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 from src.core.config import LAMPSON_DIR, SKILLS_DIR, PROJECTS_DIR, load_config
 
@@ -46,8 +44,6 @@ def _audit_log(msg: str) -> None:
 DEFAULT_AUDIT_HOUR = 4  # 凌晨 4 点
 DEFAULT_AUDIT_MINUTE = 0
 
-# 检查间隔（秒）
-_POLL_INTERVAL = 60
 
 
 # ── 数据模型 ─────────────────────────────────────────────────────────────────
@@ -654,105 +650,3 @@ def format_report_detail(report: AuditReport) -> str:
         lines.append("")
 
     return "\n".join(lines)
-
-
-# ── 定时调度器 ───────────────────────────────────────────────────────────────
-
-class SelfAuditScheduler:
-    """自我审计定时调度器：在独立线程中运行，每天指定时间触发审计。"""
-
-    def __init__(
-        self,
-        hour: int = DEFAULT_AUDIT_HOUR,
-        minute: int = DEFAULT_AUDIT_MINUTE,
-    ) -> None:
-        self.hour = hour
-        self.minute = minute
-        self._stop = False
-        self._thread: Any = None
-
-    def _next_fire_time(self) -> float:
-        """计算距离下一次触发的时间（秒）。"""
-        from datetime import timedelta
-        import calendar
-        now = datetime.now()
-        today_target = now.replace(hour=self.hour, minute=self.minute, second=0, microsecond=0)
-        if now < today_target:
-            future = today_target
-        else:
-            future = today_target + timedelta(days=1)
-        return calendar.timegm(future.utctimetuple()) - calendar.timegm(now.utctimetuple())
-
-    def _wait_until_next(self) -> None:
-        """等待到下一次触发时间。"""
-        while not self._stop:
-            delay = self._next_fire_time()
-            if delay <= 0:
-                delay = _POLL_INTERVAL
-            _audit_log(f"[self_audit] 下次审计计划: {delay:.0f} 秒后（{self.hour:02d}:{self.minute:02d}）")
-            # 分段等待，方便快速响应 stop 信号
-            waited = 0.0
-            while waited < delay and not self._stop:
-                step = min(_POLL_INTERVAL, delay - waited)
-                time.sleep(step)
-                waited += step
-
-    def _loop(self) -> None:
-        """调度线程主循环。"""
-        while not self._stop:
-            self._wait_until_next()
-            if self._stop:
-                break
-
-            _audit_log("[self_audit] 定时审计触发")
-            try:
-                report = run_audit()
-                self._deliver_report(report)
-            except Exception as e:
-                _audit_log(f"[self_audit] 审计执行失败: {e}")
-
-    def _deliver_report(self, report: AuditReport) -> None:
-        """发送审计报告到飞书。"""
-        config = load_config()
-        owner_chat_id = config.get("feishu", {}).get("owner_chat_id", "").strip()
-        app_id = config.get("feishu", {}).get("app_id", "").strip()
-        app_secret = config.get("feishu", {}).get("app_secret", "").strip()
-
-        if not owner_chat_id or not app_id or not app_secret:
-            logger.debug("[self_audit] 未配置飞书，跳过推送")
-            return
-
-        try:
-            from src.feishu.client import FeishuClient
-            client = FeishuClient(app_id=app_id, app_secret=app_secret)
-            content = format_report_detail(report)
-            # 飞书消息有长度限制，超过 4000 字截断
-            if len(content) > 4000:
-                content = content[:4000] + "\n\n...（报告过长已截断）"
-            client.send_message(
-                receive_id=owner_chat_id,
-                text=f"🕐 Lampson 自我审计报告\n\n{content}",
-                receive_id_type="chat_id",
-            )
-            _audit_log("[self_audit] 审计报告已发送")
-        except Exception as e:
-            _audit_log(f"[self_audit] 报告推送失败: {e}")
-
-    def start(self) -> None:
-        """启动调度线程。"""
-        import threading
-        self._thread = threading.Thread(target=self._loop, daemon=True, name="SelfAuditScheduler")
-        self._thread.start()
-        _audit_log(f"[self_audit] 调度器已启动（计划时间: {self.hour:02d}:{self.minute:02d}）")
-
-    def stop(self) -> None:
-        """停止调度线程。"""
-        self._stop = True
-        if self._thread is not None:
-            self._thread.join(timeout=5)
-
-    def trigger_now(self) -> AuditReport:
-        """立即触发一次审计（用于手动调用）。"""
-        report = run_audit()
-        self._deliver_report(report)
-        return report

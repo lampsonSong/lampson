@@ -95,6 +95,27 @@ def _ensure_feishu_client() -> bool:
     return False
 
 
+def validate_tool_schema(schema: dict[str, Any]) -> list[str]:
+    """校验工具 schema 格式，返回错误列表（空列表 = 通过）。
+
+    OpenAI function calling 要求:
+      - type: "function"
+      - function: { name: str, parameters: dict, ... }
+    """
+    errors: list[str] = []
+    if schema.get("type") != "function":
+        errors.append(f"缺少或错误的 type 字段: {schema.get('type')!r}, 期望 'function'")
+    func = schema.get("function")
+    if not isinstance(func, dict):
+        errors.append("缺少 function 字段或类型不是 dict")
+    else:
+        if not func.get("name"):
+            errors.append("缺少 function.name")
+        if "parameters" not in func:
+            errors.append("缺少 function.parameters")
+    return errors
+
+
 def get_all_schemas() -> list[dict[str, Any]]:
     """返回所有工具的 OpenAI function calling schema 列表。"""
     return [schema for schema, _ in _REGISTRY.values()]
@@ -123,6 +144,16 @@ def dispatch(tool_name: str, arguments_raw: str | dict[str, Any]) -> str:
         return f"[错误] 工具 {tool_name} 执行异常：{e}"
 
 
-def register_external(schema: dict[str, Any], runner: ToolRunner) -> None:
-    """注册外部工具（供飞书、自更新等模块动态注册）。"""
+def register_external(schema: dict[str, Any], runner: ToolRunner) -> bool:
+    """注册外部工具（供飞书、自更新等模块动态注册）。
+
+    Returns:
+        True 注册成功，False schema 校验失败被跳过。
+    """
+    errors = validate_tool_schema(schema)
+    if errors:
+        name_hint = schema.get("function", {}).get("name", "<未知>")
+        logger.warning(f"工具 {name_hint} schema 校验失败，跳过注册: {'; '.join(errors)}")
+        return False
     _register(schema, runner)
+    return True

@@ -475,7 +475,9 @@ class Agent:
         while True:
             for round_num in range(self.max_tool_rounds):
                 try:
-                    response = self._chat_with_fallback(tools=self._tools)
+                    # 运行时兜底：过滤掉 schema 格式错误的工具，防止坏 schema 导致 LLM 400
+                    valid_tools = [s for s in self._tools if not tool_registry.validate_tool_schema(s)]
+                    response = self._chat_with_fallback(tools=valid_tools)
                     self._consecutive_llm_failures = 0  # 新增：成功则重置
                 except AgentInterrupted:
                     raise  # 直接上抛，不吞掉
@@ -693,20 +695,6 @@ class Agent:
                 from src.core.skill_audit import clear_audit
                 clear_audit()
                 raise
-
-        tool_count = getattr(self, "_fast_path_tool_count", 0)
-        recent_context = self._get_recent_context(max_turns=5)
-        active_project = self._infer_active_project()
-        reflection_hints = self._maybe_reflect(
-            goal=user_input,
-            is_fast_path=True,
-            tool_call_count=tool_count,
-            skill_activated=None,
-            recent_context=recent_context,
-            active_project=active_project,
-        )
-        if reflection_hints:
-            result += "\n\n" + "\n".join(reflection_hints)
         return result
 
     def _estimate_context_tokens(self) -> int:
@@ -841,60 +829,3 @@ class Agent:
             lines.append(f"{role}: {preview}")
         return "\n".join(lines) if lines else "（无对话记录）"
 
-    def _maybe_reflect(
-        self,
-        goal: str = "",
-        plan: Plan | None = None,
-        is_fast_path: bool = False,
-        tool_call_count: int = 0,
-        intent: str = "",
-        skill_activated: str | None = None,
-        recent_context: str = "",
-        active_project: str = "",
-    ) -> list[str]:
-        """任务完成后触发反思，自动沉淀 skill 或 project 信息。"""
-        from src.core.reflection import (
-            should_reflect,
-            reflect_and_learn,
-            execute_learnings,
-            format_execution_summary,
-        )
-
-        if not should_reflect(
-            plan=plan,
-            is_fast_path=is_fast_path,
-            tool_call_count=tool_call_count,
-            intent=intent,
-            skill_activated=skill_activated,
-            user_input=goal,
-        ):
-            return []
-
-        if plan is not None:
-            exec_summary = format_execution_summary(plan)
-        elif skill_activated:
-            exec_summary = f"Fast Path 任务，激活了技能 [{skill_activated}]，调用了 {tool_call_count} 个工具"
-        else:
-            exec_summary = f"Fast Path 任务，调用了 {tool_call_count} 个工具"
-
-        try:
-            learnings = reflect_and_learn(
-                goal=goal,
-                execution_summary=exec_summary,
-                llm_client=self.llm,
-                skill_activated=skill_activated,
-                recent_context=recent_context,
-                active_project=active_project,
-            )
-            if not learnings:
-                return []
-            hints = execute_learnings(learnings)
-            if hints:
-                # skills/projects 变更后刷新 system prompt，后续轮次能感知
-                self.llm.refresh_system_prompt()
-                # learned_modules 变更后刷新工具列表
-                self.refresh_tools()
-            return hints
-        except Exception as e:
-            logger.warning(f"反思过程异常: {e}")
-            return []

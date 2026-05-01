@@ -14,7 +14,6 @@ from src.core.self_audit import (
     scan_learned_modules,
     run_audit,
     format_report_detail,
-    SelfAuditScheduler,
 )
 
 
@@ -331,20 +330,3 @@ class TestFormatReportDetail:
         assert "ERROR" in text
         assert "WARNING" in text
         assert "INFO" in text
-
-
-# ── SelfAuditScheduler ────────────────────────────────────────────────────────
-
-class TestSelfAuditScheduler:
-    def test_next_fire_time_positive(self):
-        scheduler = SelfAuditScheduler(hour=4, minute=0)
-        delay = scheduler._next_fire_time()
-        assert delay > 0
-        assert delay <= 86400  # 最多一天
-
-    def test_scheduler_start_stop(self):
-        scheduler = SelfAuditScheduler(hour=4, minute=0)
-        scheduler.start()
-        assert scheduler._thread is not None
-        assert scheduler._thread.daemon is True
-        scheduler.stop()

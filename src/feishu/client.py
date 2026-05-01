@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from typing import Any, Optional
 
@@ -14,6 +15,8 @@ import httpx
 
 FEISHU_BASE = "https://open.feishu.cn/open-apis"
 TOKEN_TTL = 7000  # token 有效期（秒），官方 7200，留 200s 余量
+
+_logger = logging.getLogger(__name__)
 
 
 class FeishuClient:
@@ -74,6 +77,10 @@ class FeishuClient:
             headers=self._headers(),
             json=payload,
         )
+        # 无论成功失败都打日志，方便排查 400 等错误
+        _logger.info(f"飞书文本发送 status={resp.status_code} receive_id={receive_id} type={receive_id_type}")
+        if resp.status_code >= 400:
+            _logger.error(f"飞书文本发送失败 status={resp.status_code}: {resp.text[:500]}")
         resp.raise_for_status()
         data = resp.json()
         if data.get("code") != 0:
@@ -97,8 +104,7 @@ class FeishuClient:
         # 飞书 interactive 消息 content 上限约 30KB，超出会 400
         MAX_CONTENT_LEN = 28000
         if len(card_json) > MAX_CONTENT_LEN:
-            import logging as _log
-            _log.getLogger(__name__).warning(f"卡片内容过长 ({len(card_json)} chars)，截断到 {MAX_CONTENT_LEN}")
+            _logger.warning(f"卡片内容过长 ({len(card_json)} chars)，截断到 {MAX_CONTENT_LEN}")
             card_json = card_json[:MAX_CONTENT_LEN]
         payload = {
             "receive_id": receive_id,
@@ -111,9 +117,9 @@ class FeishuClient:
             headers=self._headers(),
             json=payload,
         )
+        _logger.info(f"飞书卡片发送 status={resp.status_code} receive_id={receive_id} type={receive_id_type}")
         if resp.status_code >= 400:
-            import logging as _log
-            _log.getLogger(__name__).error(f"飞书卡片发送 {resp.status_code}: {resp.text[:500]}")
+            _logger.error(f"飞书卡片发送失败 status={resp.status_code}: {resp.text[:500]}")
         resp.raise_for_status()
         data = resp.json()
         if data.get("code") != 0:
@@ -125,15 +131,7 @@ class FeishuClient:
         message_id: str,
         card: dict[str, Any],
     ) -> dict[str, Any]:
-        """更新已发送的卡片消息内容（飞书 PATCH API）。
-
-        Args:
-            message_id: 已发送消息的 ID
-            card: 新的卡片内容字典
-
-        Returns:
-            飞书 API 响应
-        """
+        """更新已发送的卡片消息内容（飞书 PATCH API）。"""
         resp = self._http.patch(
             f"{FEISHU_BASE}/im/v1/messages/{message_id}",
             headers=self._headers(),
@@ -151,16 +149,7 @@ class FeishuClient:
         header: Optional[dict[str, str]] = None,
         elements: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, Any]:
-        """构建一个简单的卡片消息。
-
-        Args:
-            title: 卡片标题
-            header: 头部信息 {"title": "标题", "subtitle": "副标题", "template": "blue|red|yellow|green|purple|orange|grey"}
-            elements: 卡片内容元素列表
-
-        Returns:
-            符合飞书卡片格式的字典
-        """
+        """构建一个简单的卡片消息。"""
         card: dict[str, Any] = {
             "schema": "2.0",
             "body": {"elements": elements or []},
@@ -180,39 +169,18 @@ class FeishuClient:
         rows: list[list[str]],
         header_template: str = "blue",
     ) -> dict[str, Any]:
-        """构建带表格的卡片消息。
-
-        Args:
-            title: 卡片标题
-            columns: 列定义 [{"title": "列名", "width": 百分比}, ...]
-            rows: 行数据 [[cell1, cell2, ...], ...]
-            header_template: 表头背景色
-
-        Returns:
-            符合飞书卡片格式的字典
-        """
-        # 构建表头
-        header_cells = [
-            {"tag": "markdown", "content": f"**{col.get('title', '')}**"}
-            for col in columns
-        ]
-
-        # 构建表格元素
+        """构建带表格的卡片消息。"""
         elements: list[dict[str, Any]] = [
             {
                 "tag": "table",
                 "columns": [{"title": col.get("title", ""), "width": col.get("width", "auto")} for col in columns],
                 "fields": [
-                    {
-                        "value": {"tag": "plain_text", "content": cell},
-                        "is_short": True,
-                    }
+                    {"value": {"tag": "plain_text", "content": cell}, "is_short": True}
                     for row in rows
                     for cell in row
                 ],
             }
         ]
-
         card = self.build_card(title=title, elements=elements)
         card["header"] = {
             "title": {"tag": "plain_text", "content": title},
@@ -226,16 +194,7 @@ class FeishuClient:
         fields: list[dict[str, str]],
         header_template: str = "blue",
     ) -> dict[str, Any]:
-        """构建带表单布局的卡片消息（每行两个字段，适合展示键值对）。
-
-        Args:
-            title: 卡片标题
-            fields: 字段列表 [{"label": "标签", "value": "值"}, ...]
-            header_template: 表头背景色
-
-        Returns:
-            符合飞书卡片格式的字典
-        """
+        """构建带表单布局的卡片消息（每行两个字段，适合展示键值对）。"""
         elements: list[dict[str, Any]] = [
             {
                 "tag": "div",
@@ -265,16 +224,7 @@ class FeishuClient:
         content: str,
         header_template: str = "blue",
     ) -> dict[str, Any]:
-        """构建纯 Markdown 内容的卡片消息。
-
-        Args:
-            title: 卡片标题
-            content: Markdown 格式的内容
-            header_template: 表头背景色
-
-        Returns:
-            符合飞书卡片格式的字典
-        """
+        """构建纯 Markdown 内容的卡片消息。"""
         elements: list[dict[str, Any]] = [
             {"tag": "markdown", "content": content}
         ]

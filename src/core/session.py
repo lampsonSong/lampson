@@ -200,10 +200,6 @@ class Session:
         self._processing: bool = False
         # 处理锁：保证同一时刻只有一个线程在处理消息
         self._processing_lock: threading.Lock = threading.Lock()
-        # 被中断任务的进度摘要
-        self._pending_task_summary: str = ""
-        # 被中断时的 llm.messages 快照
-        self._pending_task_messages_snapshot: list[dict] = []
         # 持久回复回调（飞书渠道由 listener 设置，用于处理循环中发送回复）
         self._reply_callback: Callable[[str], None] | None = None
 
@@ -503,12 +499,12 @@ class Session:
         return HandleResult(reply=reply, compaction_msg=compaction_msg)
 
     def _process_with_interrupt(self, user_input: str) -> HandleResult:
-        """飞书并发渠道：处理消息 + 中断抢占循环。
+        """飞书并发渠道：处理消息 + 中断合并循环。
 
-        在一个线程中串行处理消息，支持被新消息中断后恢复。
+        在一个线程中串行处理消息，支持被新消息中断后合并重新规划。
         循环逻辑：
-        1. 正常处理当前消息 → 成功 → 检查队列/恢复 → 继续
-        2. 被中断 → 保存摘要 → 取新消息 → 合并上下文处理 → 成功后恢复
+        1. 正常处理当前消息 → 成功 → 检查队列 → 继续
+        2. 被中断 → 取新消息 → 合并 A 进度 + B 新消息 → 重新规划
         """
         from src.core.interrupt import AgentInterrupted
 
@@ -548,37 +544,44 @@ class Session:
             try:
                 reply = self.agent.run(user_input_for_llm)
             except AgentInterrupted as e:
-                # 被新消息中断
-                collector.record_interrupt()
                 collector.finish(success=False)
                 self.agent.metrics_collector = None
-                interrupt_summary = e.progress_summary
-                self._pending_task_messages_snapshot = list(self.agent.llm.messages)
-                logger.info("[session] 任务被中断: %s", e.progress_summary[:100])
+
+                # 补全未闭合的 tool_call 序列
+                self.agent._sanitize_tool_messages()
 
                 # 从队列取新消息
                 try:
-                    current_input = self._input_queue.get_nowait()
+                    new_input = self._input_queue.get_nowait()
                 except Exception:
-                    # 队列空（竞态），直接返回
                     return HandleResult(reply="[任务被中断]", compaction_msg="")
 
-                # 保存被中断任务的摘要（用于后续恢复）
-                self._pending_task_summary = interrupt_summary
+                # 检查队列里是否还有更多消息（连续发多条的场景）
+                pending = []
+                while not self._input_queue.empty():
+                    try:
+                        pending.append(self._input_queue.get_nowait())
+                    except Exception:
+                        break
 
-                # 将中断摘要注入 agent messages（作为上下文），新消息独立处理
-                interrupt_context = (
-                    "[任务被中断，以下是已完成的进度]\n\n"
-                    + interrupt_summary
-                    + "\n\n--- 新消息已处理完毕，继续之前的任务 ---\n\n"
-                    + "请根据上述进度，继续完成原来的任务。如果任务已经完成或不需要继续，请告知用户。"
+                # 构建合并输入：A进度 + B新消息，一次重新规划
+                merged = (
+                    "[任务被新消息中断，以下是已完成进度]\n"
+                    + e.progress_summary
+                    + "\n\n--- 用户发来新消息 ---\n"
+                    + new_input
                 )
-                # 注入摘要到 agent messages（作为 context，不作为 user_input）
-                self.agent.llm.messages.append({"role": "user", "content": interrupt_context})
-                # 新消息保持原样，独立处理
-                # current_input 不变，直接 continue 让循环把它作为新的 user_input
+                if pending:
+                    merged += "\n\n--- 还有后续消息 ---\n" + "\n".join(pending)
 
-                continue  # 循环处理新消息
+                merged += (
+                    "\n\n请根据上述进度和新消息，重新规划并执行。"
+                    "如果新消息和原任务相关，合并处理；"
+                    "如果新消息是全新的独立请求，优先处理新消息。"
+                )
+
+                current_input = merged
+                continue  # 带着合并输入进入下一轮循环
 
             except Exception as e:
                 collector.finish(success=False)
@@ -610,46 +613,20 @@ class Session:
             collector.finish(success=True)
             self.agent.metrics_collector = None
 
-            # 检查是否有被中断的任务需要恢复
-            has_pending_resume = bool(self._pending_task_summary)
-
             # 检查队列中是否有新消息
-            has_queued = not self._input_queue.empty()
-
-            if has_pending_resume or has_queued:
-                # 不是最后一条消息 → 通过 callback 发送回复
+            if not self._input_queue.empty():
                 if reply and self._reply_callback:
                     try:
                         self._reply_callback(reply)
                     except Exception:
                         pass
-
-                if has_pending_resume:
-                    current_input = self._build_resume_prompt()
+                try:
+                    current_input = self._input_queue.get_nowait()
                     continue
+                except Exception:
+                    pass
 
-                if has_queued:
-                    try:
-                        current_input = self._input_queue.get_nowait()
-                        continue
-                    except Exception:
-                        pass
-
-            # 队列空，无恢复任务 → 返回最后一条消息的结果
             return HandleResult(reply=reply, compaction_msg=compaction_msg)
-
-    def _build_resume_prompt(self) -> str:
-        """构建恢复被中断任务的提示。"""
-        summary = self._pending_task_summary
-        self._pending_task_summary = ""
-        self._pending_task_messages_snapshot = []
-
-        return (
-            summary
-            + "\n\n--- 新消息已处理完毕，继续之前的任务 ---\n\n"
-            + "请根据上述进度，继续完成原来的任务。"
-            + "如果任务已经完成或不需要继续，请告知用户。"
-        )
 
     # ── 生命周期 ──
 

@@ -243,7 +243,6 @@ lampson 命令（独立进程）
 ### 3.2 暂未实现（Roadmap）
 
 - **后台任务**：轻量版已完成（`src/platforms/background.py`），支持 `/background`、`/tasks`、`/cancel`，不做 TaskQueue/持久化/状态机
-- **主动探索能力**：工具连续失败自动探索根因（设计文档：`docs/self-exploration-design.md`，纯设计零代码）
 - MCP Server 接入（预留接口，Phase 2）
 - `file_edit`（patch 模式）
 - `code_search`（代码搜索）
@@ -826,6 +825,7 @@ vim ~/.lampson/config.yaml
 | session 历史工具 | done | 合并 session_search + session_load（action=search/load）|
 | 语义搜索 search_projects | done | 项目上下文语义检索 |
 | 后台任务 background | done | `/background` `/tasks` `/cancel`，轻量版不做 TaskQueue |
+| 主动探索能力 | done | 写入 MEMORY.md 行为准则（问题解决本能），无独立代码模块 |
 | SkillIndex 索引 | done | 关键词索引 + 增量构建，加速 skill 匹配 |
 | 反思沉淀 Reflection | done | skill/project 自动 create/update，trigger 自动更新 |
 | 多模型 fallback | done | 按供应商分组切换 fallback，不永久切换模型 |
@@ -836,7 +836,7 @@ vim ~/.lampson/config.yaml
 | 任务规划 (Planning) | done | Plan-and-Execute，30个测试全通过 |
 | /model 多模型对比 | done | `/model all` 并发实时流式对比，`/model <name>` 切换（方案B） |
 | 过期消息丢弃 | done | 飞书投递延迟 >60s 的消息自动丢弃 |
-| 新消息抢占中断机制 | done | 飞书并发渠道：新消息入队+中断当前任务+恢复 |
+| 新消息抢占中断机制 | done | 飞书并发渠道：新消息入队+中断当前任务+合并进度重新规划 |
 | LLM 错误分类 | done | 4种自定义异常（RateLimitError / AuthError / ConnectionError / ServerError） |
 | Compaction 两阶段压缩 | done | 阶段一分类归档 + 阶段二 LLM 摘要（条件触发） |
 | 过期消息阈值 60s→300s | done | listener.py MessageDeduplicator TTL 从 60s 改为 300s |
@@ -845,7 +845,7 @@ vim ~/.lampson/config.yaml
 | 结构化错误日志 | done | log_error() 写入 errors.jsonl，含上下文快照，自动轮转（20MB） |
 | Trace Log | done | session_store 中的 trace 写入（system_prompt/llm_call/tool_call/tool_result），大型结果 hash 分离 |
 | LLM 熔断机制 | done | 主模型 60s / fallback 统一 90s；连续 3 次 LLM 失败退出 tool_loop；进度卡片发送熔断 |
-| 中断抢占 | done | 飞书并发：消息队列 + request_interrupt + AgentInterrupted + 线程池化 |
+| 中断抢占 | done | 飞书并发：消息队列 + request_interrupt + AgentInterrupted + 中断合并重新规划 |
 | 反思沉淀 (Reflection) | done | 任务完成后自动反思：skill/project create/update，trigger 自动更新，频率控制 |
 | 进度回调 | done | Compaction 支持 progress_callback，临时 LLM 客户端 timeout 600s |
 | /search 命令 | done | 跨 session 搜索历史消息 |
@@ -1018,7 +1018,6 @@ vim ~/.lampson/config.yaml
 | `docs/interrupt-design.md` | 中断抢占设计文档 |
 | `docs/session-continuity-design.md` | Session 连续性设计文档 |
 | `docs/heartbeat-design.md` | 心跳 + Watchdog 设计文档 |
-| `docs/self-exploration-design.md` | 主动探索能力设计文档（未实现） |
 | `tests/test_metrics.py` | Metrics 单元测试 |
 | `tests/test_error_log.py` | Error Log 单元测试 |
 | `tests/test_trace.py` | Trace Log 单元测试 |
