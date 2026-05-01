@@ -547,7 +547,45 @@ def scan_user_patterns(days: int = 7) -> list[AuditFinding]:
         logger.warning(f"scan_user_patterns: SkillIndex 加载失败: {e}")
         skill_index = None
 
-    # 5. 找出高频且未覆盖的模式
+    # 5. 基本工具能力过滤：判断操作是否属于 agent 基本能力，不需要沉淀为 skill
+    # 每个工具能覆盖的操作类型用正则描述，与工具能力绑定，工具不变则不需要维护
+    from src.core.tools import get_all_schemas
+    _TOOL_PATTERNS: dict[str, str] = {}
+    for schema in get_all_schemas():
+        func = schema.get("function", {})
+        name = func.get("name", "")
+        if not name:
+            continue
+        # 用工具名 + description 自动生成基础 pattern
+        desc = func.get("description", "")
+        # 从 description 提取英文单词和中文关键词
+        auto_tokens = re.findall(r"[a-zA-Z]+", f"{name} {desc}")
+        _TOOL_PATTERNS[name] = "|".join(set(t.lower() for t in auto_tokens if len(t) >= 2))
+
+    # 补充常见中文口语变体（这些是工具能力但 description 里不会出现的词）
+    # 只覆盖明确的单步操作，不覆盖复杂工作流（如"部署到生产环境"）
+    _CAPABILITY_EXTENSIONS: dict[str, str] = {
+        "shell": r"git|push|pull|提交代码|执行一下|运行.*脚本",
+        "file_read": r"看看|查看|读取|读一下|看看日志",
+        "file_write": r"写入|保存|创建文件",
+        "search": r"搜索|查找|找.*文件",
+        "web_search": r"搜一下|查一下|搜索.*网",
+    }
+    for tool_name, ext in _CAPABILITY_EXTENSIONS.items():
+        if tool_name in _TOOL_PATTERNS:
+            _TOOL_PATTERNS[tool_name] = _TOOL_PATTERNS[tool_name] + "|" + ext
+
+    def _is_basic_capability(query: str) -> bool:
+        """判断 query 是否属于 agent 基本工具能力范围。
+
+        用正则匹配：遍历每个工具的能力 pattern，命中任一即视为基本能力。
+        """
+        for tool_name, pattern in _TOOL_PATTERNS.items():
+            if pattern and re.search(pattern, query, re.IGNORECASE):
+                return True
+        return False
+
+    # 6. 找出高频且未覆盖的模式
     for cid, members in clustered.items():
         total_count = sum(c for _, c in members)
         representative = members[0][0]  # 频次最高的作为代表
@@ -563,16 +601,13 @@ def scan_user_patterns(days: int = 7) -> list[AuditFinding]:
         if any(p in representative for p in chat_patterns):
             continue
 
-        # 使用 SkillIndex.search 检查是否已被现有 skill 覆盖
-        # 这与 skill 触发时的检索逻辑一致（关键词匹配 + search_text）
+        # 检查 1：是否已被现有 skill 覆盖
         covered_by = ""
         if skill_index is not None:
             matched = skill_index.search(representative, top_k=1, similarity_threshold=0.3)
             if matched:
-                # 提取匹配 skill 的名称
-                import re as _re
                 for m in matched:
-                    fm = _re.match(r"^---\s*\n(.*?)\n---\s*\n", m, _re.DOTALL)
+                    fm = re.match(r"^---\s*\n(.*?)\n---\s*\n", m, re.DOTALL)
                     if fm:
                         try:
                             import yaml
@@ -584,6 +619,10 @@ def scan_user_patterns(days: int = 7) -> list[AuditFinding]:
 
         if covered_by:
             continue  # 已被现有 skill 覆盖，跳过
+
+        # 检查 2：是否属于 agent 基本工具能力（git push、读文件、查日志等）
+        if _is_basic_capability(representative):
+            continue  # 基本能力不需要沉淀为 skill
 
         examples = [m for m, _ in members[:5]]
         findings.append(AuditFinding(
