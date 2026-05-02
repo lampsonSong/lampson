@@ -114,29 +114,6 @@ class Agent:
         if compaction_config is not None:
             self._compaction_config = compaction_config
 
-    def _inject_skill(self, user_input: str) -> None:
-        """预匹配 skills，单个匹配时直接注入 skill body 到上下文。
-
-        多个匹配时不注入，让 LLM 通过 skill 工具自行选择。
-        无匹配时也不注入。
-        """
-        from src.skills.manager import match_skills
-
-        matched = match_skills(user_input, self.skills)
-        if len(matched) != 1:
-            return
-
-        skill = matched[0]
-        inject = (
-            f"[技能激活: {skill.name}]\n"
-            f"{skill.body[:2000]}"
-            + ("...(已截断)" if len(skill.body) > 2000 else "")
-        )
-        # 记录激活的 skill（供反思使用）
-        self._last_activated_skill = skill.name
-        # 插在 user message 之前
-        self.llm.messages.append({"role": "user", "content": inject})
-
     # ── 中断检查 ───────────────────────────────────────────────────────
 
     def request_interrupt(self) -> None:
@@ -514,6 +491,14 @@ class Agent:
 
                 parsed = self.adapter.parse_response(response)
                 self.last_stop_reason = parsed.finish_reason
+
+                # 中间旁白：LLM 在调用工具前说的文字（如让我先看看配置），发给用户
+                if parsed.tool_calls and parsed.content and parsed.content.strip():
+                    if self.interim_sender:
+                        try:
+                            self.interim_sender(parsed.content.strip())
+                        except Exception:
+                            pass
 
                 if not parsed.tool_calls:
                     logger.info(f"tool_loop round {round_num+1}: finish (no tool_calls), content_len={len(parsed.content or '')}")
