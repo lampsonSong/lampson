@@ -556,11 +556,21 @@ class FeishuAdapter(BasePlatformAdapter):
                 print(f"[feishu] {result.compaction_msg}", flush=True)
 
             print(f"[feishu] 回复: {reply}", flush=True)
-
             self._remove_reaction(message_id, reaction_id or "")
             self._dedup.mark_processed(message_id)
             if reply:
                 self._send_reply(chat_id, reply)
+
+            # 处理完毕后检查：如果 session 仍为空（无 user/assistant 消息），立即清理
+            # 典型场景：daemon 重启后积压的 /resume /compaction 等命令，
+            # 走 _handle_command 不写 JSONL，留下空 session
+            if session.session_id:
+                try:
+                    from src.memory import session_store as ss
+                    if ss.is_session_empty(session.session_id):
+                        self.session_manager.remove_session("feishu", open_id)
+                except Exception:
+                    pass
 
         except Exception as e:
             print(f"[feishu] _handle_dispatch 错误: {e}", flush=True)

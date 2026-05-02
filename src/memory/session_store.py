@@ -303,6 +303,82 @@ def purge_empty_sessions() -> int:
         conn.close()
 
 
+def is_session_empty(session_id: str) -> bool:
+    """检查 session 是否没有 user/assistant 消息（即空 session）。"""
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM messages_index "
+            "WHERE session_id = ? AND role IN ('user', 'assistant')",
+            (session_id,),
+        ).fetchone()
+        return row["cnt"] == 0
+    finally:
+        conn.close()
+
+
+def purge_session(session_id: str) -> bool:
+    """删除单个 session（SQLite + JSONL 全清理），不判断是否为空。
+
+    Returns: 是否成功删除。
+    """
+    conn = _get_db()
+    try:
+        # 检查 session 是否存在
+        row = conn.execute(
+            "SELECT 1 FROM sessions WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        if not row:
+            return False
+
+        # 删 JSONL 文件 + 清路径缓存
+        jsonl = _find_jsonl(session_id)
+        if jsonl and jsonl.exists():
+            jsonl.unlink()
+        _sid_path_cache.pop(session_id, None)
+        _sid_source_cache.pop(session_id, None)
+
+        # Drop FTS5 trigger（批量操作需要）
+        conn.execute("DROP TRIGGER IF EXISTS messages_fts_delete")
+
+        # 删 FTS5 行
+        conn.execute(
+            "DELETE FROM messages_fts WHERE rowid IN ("
+            "SELECT id FROM messages_index WHERE session_id = ?)",
+            (session_id,),
+        )
+        # 删 messages_index（含特殊行）
+        conn.execute(
+            "DELETE FROM messages_index WHERE session_id = ?",
+            (session_id,),
+        )
+        # 重建 trigger
+        conn.execute(
+            "CREATE TRIGGER messages_fts_delete "
+            "AFTER DELETE ON messages_index BEGIN "
+            "INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, old.content); "
+            "END"
+        )
+
+        # 删 segments
+        conn.execute(
+            "DELETE FROM segments WHERE session_id = ?",
+            (session_id,),
+        )
+        # 删 sessions
+        conn.execute(
+            "DELETE FROM sessions WHERE session_id = ?",
+            (session_id,),
+        )
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+
 def _get_db() -> sqlite3.Connection:
     """获取 SQLite 连接（自动建表）。"""
     _ensure_dirs()

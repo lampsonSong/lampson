@@ -197,6 +197,27 @@ class SessionManager:
 
     # ── 生命周期 ───────────────────────────────────────────────────────
 
+    def remove_session(self, channel: str, sender_id: str) -> None:
+        """从内存缓存移除 session 并清理存储（适用于空 session 清理）。
+
+        线程安全。如果 session 不存在或不在缓存中，静默跳过。
+        """
+        from src.memory import session_store as ss
+
+        key = f"{channel}:{sender_id}"
+        with self._lock:
+            session = self._sessions.pop(key, None)
+            if session is None:
+                return
+            sid = session.session_id
+
+        if sid:
+            try:
+                ss.purge_session(sid)
+                print(f"[session_manager] 已清理空 session {sid}", flush=True)
+            except Exception as e:
+                print(f"[session_manager] 清理空 session {sid} 失败: {e}", flush=True)
+
     def close_all(self) -> None:
         """关闭所有 Session（进程退出时调用）。"""
         from src.memory import session_store as ss

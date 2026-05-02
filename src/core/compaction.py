@@ -174,16 +174,42 @@ class Compactor:
             return CompactionResult(success=False, error="空消息列表")
 
         # Step 1: LLM 分类（不涉及写入）
-        _notify_progress(progress_callback, "[1/6] 正在分析对话内容...")
+        # 分两批 classify：先后半（最近的），再前半（更早的），避免单次 prompt 超长
         existing_files = _list_existing_files()
-        try:
-            result = _classify_messages(messages, existing_files, self.llm)
-        except Exception as e:
-            logger.warning(f"Compaction classify 失败: {e}")
-            return CompactionResult(success=False, error=f"分类失败: {e}")
+        mid = len(messages) // 2
+        # 后半 = 索引 [mid:]（最近的对话）
+        later_half = messages[mid:]
+        # 前半 = 索引 [:mid]（更早的对话）
+        earlier_half = messages[:mid]
 
-        decisions = result.get("decisions", [])
-        tool_refs = result.get("tool_refs", {})
+        all_decisions: list[dict[str, Any]] = []
+        all_tool_refs: dict[str, Any] = {}
+
+        # 批次一：classify 后半（最近）
+        _notify_progress(progress_callback, "[1/6] 正在分析最近对话...")
+        if later_half:
+            try:
+                result = _classify_messages(later_half, existing_files, self.llm)
+                all_decisions.extend(result.get("decisions", []))
+                all_tool_refs.update(result.get("tool_refs", {}))
+            except Exception as e:
+                logger.warning(f"Compaction classify 后半失败: {e}")
+
+        # 批次二：classify 前半（更早）
+        _notify_progress(progress_callback, "[1/6] 正在分析早期对话...")
+        if earlier_half:
+            try:
+                result = _classify_messages(earlier_half, existing_files, self.llm)
+                all_decisions.extend(result.get("decisions", []))
+                all_tool_refs.update(result.get("tool_refs", {}))
+            except Exception as e:
+                logger.warning(f"Compaction classify 前半失败: {e}")
+
+        if not all_decisions and not all_tool_refs:
+            return CompactionResult(success=False, error="分类结果为空")
+
+        decisions = all_decisions
+        tool_refs = all_tool_refs
 
         if not decisions and not tool_refs:
             return CompactionResult(success=False, error="分类结果为空")
