@@ -32,10 +32,8 @@ _last_reflect_time: float = 0.0
 
 # Skill 内容最短长度（字符），低于此不创建
 _MIN_SKILL_CONTENT_LEN = 80
-# 新建 skill 至少需要多少个 trigger
-_MIN_TRIGGER_COUNT = 1
 
-# 全局 LLM Client（由 Session 初始化时注入，供 _auto_consolidate 使用）
+# 全局 LLM Client（由 Session 初始化时注入）
 _llm_client: Any = None
 
 
@@ -70,13 +68,12 @@ REFLECT_PROMPT = """你是一个知识管理助手。请分析这次任务执行
   - "target": 项目名、技能名或模块名（模块名用 snake_case）
   - "reason": 一句话说明为什么值得记录
   - "content": 要写入的正文内容
-  - "triggers": 字符串数组（skill_create 和 skill_update 需提供；module 类型填空数组）
 
 判断标准：
 - project_create: 首次发现某个项目，记录基本信息（路径、技术栈、入口、配置）。仅当已有 Projects 列表中无该项目时使用
 - project_update: 在已有项目中发现了新信息（新模块、新配置）或需要修正过时内容。仅当已有 Projects 列表中已有该项目时使用
 - skill_create: 发现了一种可复用的操作方法，当前 skills 里没有覆盖的
-- skill_update: 执行过程中发现某个已有 skill 的步骤不够、有错误，或者用户用了一种新表达方式触发了该 skill
+- skill_update: 执行过程中发现某个已有 skill 的步骤不够、有错误，需要修正或补充
 - module_create: 发现了一段可复用的代码逻辑（如数据转换、日志解析、格式化、自动化脚本等），可作为独立 Python 模块沉淀。内容为完整的、可运行的 Python 代码
 - module_update: 现有模块的代码有 bug、可以优化、或需要新增功能。仅当已有 Modules 列表中有该模块时使用
 - 空数组: 简单查询、闲聊、或信息已经记录过
@@ -86,13 +83,11 @@ REFLECT_PROMPT = """你是一个知识管理助手。请分析这次任务执行
 - skill 的 content 是方法论（通用步骤），不是具体答案
 - project_update 的 content 是增量信息，不是整个文件重写
 - module 的 content 是完整的、可运行的 Python 代码，禁止 import src 内部模块
-- 新建 skill 的 triggers 至少 1 个
-- 种子模式：如果知识值得记录但内容还不够丰富，可以只写简短描述 + 1 个触发词
 
 示例：
 {{"learnings": []}}
-{{"learnings": [{{"type": "project_create", "target": "hermes", "reason": "首次探索了 hermes 项目", "content": "源码路径: ~/.hermes/hermes-agent/\\n入口: hermes_cli.main:main", "triggers": []}}]}}
-{{"learnings": [{{"type": "module_create", "target": "log_parser", "reason": "连续手动写 awk 命令解析日志", "content": "# Log Parser\\n\\nTOOL_SCHEMA = {{\\n  'function': {{\\n    'name': 'learned_log_parser',\\n    'description': '解析日志文件，支持过滤级别和关键词',\\n    'parameters': {{\\n      'type': 'object',\\n      'properties': {{\\n        'path': {{'type': 'string', 'description': '日志文件路径'}},\\n        'level': {{'type': 'string', 'description': '日志级别，如 ERROR/WARN/INFO'}},\\n        'keyword': {{'type': 'string', 'description': '过滤关键词'}},\\n        'limit': {{'type': 'integer', 'description': '最多返回行数'}}\\n      }},\\n      'required': ['path']\\n    }}\\n  }}\\n}}\\n\\n\\ndef TOOL_RUNNER(params: dict) -> str:\\n    ...\\n", "triggers": []}}]}}"""
+{{"learnings": [{{"type": "project_create", "target": "hermes", "reason": "首次探索了 hermes 项目", "content": "源码路径: ~/.hermes/hermes-agent/\\n入口: hermes_cli.main:main"}}]}}
+{{"learnings": [{{"type": "module_create", "target": "log_parser", "reason": "连续手动写 awk 命令解析日志", "content": "# Log Parser\\n\\nTOOL_SCHEMA = {{\\n  'function': {{\\n    'name': 'learned_log_parser',\\n    'description': '解析日志文件，支持过滤级别和关键词',\\n    'parameters': {{\\n      'type': 'object',\\n      'properties': {{\\n        'path': {{'type': 'string', 'description': '日志文件路径'}},\\n        'level': {{'type': 'string', 'description': '日志级别，如 ERROR/WARN/INFO'}},\\n        'keyword': {{'type': 'string', 'description': '过滤关键词'}},\\n        'limit': {{'type': 'integer', 'description': '最多返回行数'}}\\n      }},\\n      'required': ['path']\\n    }}\\n  }}\\n}}\\n\\n\\ndef TOOL_RUNNER(params: dict) -> str:\\n    ...\\n"}}]}}"""
 
 
 # ── 是否需要反思（LLM 判断）─────────────────────────────────────────────────
@@ -214,7 +209,6 @@ def execute_learnings(learnings: list[dict[str, Any]]) -> list[str]:
         target = learning.get("target", "")
         content = learning.get("content", "")
         reason = learning.get("reason", "")
-        triggers = learning.get("triggers", [])
 
         if ltype == "project_create":
             hint = _create_project(target, content, reason)
@@ -227,13 +221,13 @@ def execute_learnings(learnings: list[dict[str, Any]]) -> list[str]:
                 hints.append(hint)
 
         elif ltype == "skill_create":
-            hint = _create_skill(target, content, reason, triggers)
+            hint = _create_skill(target, content, reason)
             if hint:
                 hints.append(hint)
                 _notify_feishu(f"📝 **Skill 新建**\n\n- 名称：{target}\n- 原因：{reason}")
 
         elif ltype == "skill_update":
-            hint = _update_skill(target, content, reason, triggers)
+            hint = _update_skill(target, content, reason)
             if hint:
                 hints.append(hint)
                 _notify_feishu(f"🔧 **Skill 更新**\n\n- 名称：{target}\n- 原因：{reason}")
@@ -330,7 +324,7 @@ def _update_project(target: str, content: str, reason: str) -> str | None:
 
 
 def _create_skill(
-    target: str, content: str, reason: str, triggers: list[str]
+    target: str, content: str, reason: str
 ) -> str | None:
     """创建新的 skill 目录和 SKILL.md。"""
     if not target or not content:
@@ -339,27 +333,18 @@ def _create_skill(
     skill_dir = SKILLS_DIR / target
     skill_dir.mkdir(parents=True, exist_ok=True)
 
-    # 自动生成触发词
-    if not triggers:
-        triggers = _generate_triggers(target, content)
-
-    if len(triggers) < _MIN_TRIGGER_COUNT:
-        triggers.append(target.replace("-", " ").replace("_", " "))
-
-    frontmatter = "\n".join(f"- {t}" for t in triggers)
-    skill_content = f"---\ncreated_at: '{date.today()}'\ndescription: {content[:200]}\ntriggers:\n{frontmatter}\n---\n\n{content}"
+    frontmatter = f"---\ncreated_at: '{date.today()}'\ndescription: {content[:200]}\n---\n\n{content}"
     skill_file = skill_dir / "SKILL.md"
-    skill_file.write_text(skill_content, encoding="utf-8")
+    skill_file.write_text(frontmatter, encoding="utf-8")
     logger.info(f"已创建技能: {target} ({reason})")
 
-    _auto_consolidate(target)
     return f"已创建技能: {target}（以后遇到类似问题会自动使用）"
 
 
 def _update_skill(
-    target: str, content: str, reason: str, triggers: list[str]
+    target: str, content: str, reason: str
 ) -> str | None:
-    """更新已有 skill。支持只追加 triggers（content 可为空）。"""
+    """更新已有 skill。"""
     if not target:
         return None
 
@@ -367,27 +352,19 @@ def _update_skill(
     skill_file = skill_dir / "SKILL.md"
 
     if not skill_file.exists():
-        if content and len(content.strip()) >= _MIN_SKILL_CONTENT_LEN and len(triggers) >= _MIN_TRIGGER_COUNT:
-            return _create_skill(target, content, reason, triggers)
+        if content and len(content.strip()) >= _MIN_SKILL_CONTENT_LEN:
+            return _create_skill(target, content, reason)
         return None
 
     existing = skill_file.read_text(encoding="utf-8")
 
     if content and _content_already_exists(existing, content):
         logger.debug(f"Skill {target} 已有相同信息，跳过更新")
-        if triggers:
-            updated = _merge_triggers(existing, triggers)
-            if updated != existing:
-                skill_file.write_text(updated, encoding="utf-8")
-                return f"已更新技能触发词: {target}"
         return None
 
     updated = existing
     if content:
         updated = existing + f"\n\n## 更新 ({datetime.now():%Y-%m-%d})\n{content}"
-
-    if triggers:
-        updated = _merge_triggers(updated, triggers)
 
     if updated == existing:
         return None
@@ -470,22 +447,6 @@ def _contains_blocked_import(code: str) -> bool:
     return False
 
 
-def _generate_triggers(name: str, content: str) -> list[str]:
-    """根据名称和内容生成触发词。"""
-    triggers: list[str] = []
-    # 从名称提取
-    for part in re.split(r"[_\- ]", name):
-        if len(part) >= 2:
-            triggers.append(part.lower())
-    # 取内容前 100 字的关键词
-    words = re.findall(r"[\u4e00-\u9fff]{2,}|[a-zA-Z]{3,}", content[:500])
-    from collections import Counter
-    for word, _ in Counter(words).most_common(5):
-        if word.lower() not in [t.lower() for t in triggers]:
-            triggers.append(word.lower())
-    return triggers[:6]
-
-
 def _content_already_exists(existing: str, new_content: str) -> bool:
     """检查新内容是否已在现有 skill 中。"""
     stripped = new_content.strip()
@@ -493,24 +454,6 @@ def _content_already_exists(existing: str, new_content: str) -> bool:
     normalized_new = re.sub(r"\s+", "", stripped)
     normalized_existing = re.sub(r"\s+", "", existing)
     return normalized_new in normalized_existing
-
-
-def _merge_triggers(existing: str, new_triggers: list[str]) -> str:
-    """合并 triggers 到 existing skill 内容中。"""
-    # 找到 triggers 部分
-    match = re.search(r"^triggers:\s*\n((?:- .+\n)+)", existing, re.MULTILINE)
-    if not match:
-        return existing
-
-    existing_triggers = set(re.findall(r"- (.+)", match.group(1)))
-    new_unique = [t for t in new_triggers if t.lower() not in {x.lower() for x in existing_triggers}]
-
-    if not new_unique:
-        return existing  # 无新增
-
-    added = "\n".join(f"- {t}" for t in new_unique)
-    updated = existing[:match.end()] + added + "\n" + existing[match.end():]
-    return updated
 
 
 def _get_existing_skills_summary() -> str:
@@ -576,11 +519,3 @@ def format_execution_summary(plan: Plan) -> str:
 
 # ── Skill 自动合并 ─────────────────────────────────────────────────────────
 
-
-def _auto_consolidate(skill_name: str) -> None:
-    """Skill 创建后，提示可以考虑合并相似技能（懒加载避免循环导入）。"""
-    try:
-        from src.core.skills.manager import consolidate_similar_skills
-        consolidate_similar_skills(skill_name)
-    except Exception:
-        pass  # 合并失败不影响主流程

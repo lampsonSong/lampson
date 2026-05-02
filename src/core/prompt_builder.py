@@ -155,11 +155,9 @@ def build_skills_index() -> str:
         if meta:
             name = str(meta.get("name", "") or path.parent.name)
             desc = str(meta.get("description", ""))
-            triggers = meta.get("triggers", [])
         else:
             name = path.parent.name
             desc = ""
-            triggers = []
         lines.append(f"- **{name}**: {desc}")
     text = "\n".join(lines)
     _skills_index_cache = (key, text)

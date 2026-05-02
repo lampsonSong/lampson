@@ -133,7 +133,6 @@ def _parse_skill(path: Path) -> dict[str, Any] | None:
     return {
         "name": name,
         "description": meta.get("description", ""),
-        "triggers": meta.get("triggers", []),
         "body": body,
         "full_content": content,
     }

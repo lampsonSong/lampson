@@ -556,6 +556,13 @@ class Session:
                 except Exception:
                     return HandleResult(reply="[任务被中断]", compaction_msg="")
 
+                # 立刻给用户发确认信号：新消息已收到，正在处理
+                if self._reply_callback:
+                    try:
+                        self._reply_callback("收到新消息，正在处理")
+                    except Exception:
+                        pass
+
                 # 检查队列里是否还有更多消息（连续发多条的场景）
                 pending = []
                 while not self._input_queue.empty():
