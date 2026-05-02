@@ -123,18 +123,19 @@ triggers:
         findings = scan_skills()
         assert any("缺少 frontmatter" in f.message for f in findings)
 
-    def test_missing_triggers(self, temp_lampson_dir):
+
+    def test_missing_skill_name(self, temp_lampson_dir):
         _, skills_dir, _, _ = temp_lampson_dir
-        skill_dir = skills_dir / "no-triggers"
+        skill_dir = skills_dir / "no-name"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text("""---
-name: no-triggers
-description: 无触发词
+description: 缺少 name 字段
 ---
+正文内容
 """, encoding="utf-8")
 
         findings = scan_skills()
-        assert any("triggers" in f.message and f.severity == "warning" for f in findings)
+        assert any("name 字段" in f.message and f.severity == "info" for f in findings)
 
     def test_template_placeholder(self, temp_lampson_dir):
         _, skills_dir, _, _ = temp_lampson_dir
@@ -154,27 +155,6 @@ triggers:
         findings = scan_skills()
         assert any("模板" in f.message and "步骤一" in f.message for f in findings)
 
-    def test_trigger_conflict(self, temp_lampson_dir):
-        _, skills_dir, _, _ = temp_lampson_dir
-        for name in ("skill-a", "skill-b"):
-            d = skills_dir / name
-            d.mkdir()
-            (d / "SKILL.md").write_text(f"""---
-name: {name}
-description: {name}
-triggers:
-  - 冲突词
----
-1. **步骤**: do it
-""", encoding="utf-8")
-
-        findings = scan_skills()
-        assert any("冲突词" in f.message and f.severity == "warning" for f in findings)
-
-    def test_extra_md_file(self, temp_lampson_dir):
-        _, skills_dir, _, _ = temp_lampson_dir
-        skill_dir = skills_dir / "extra-md"
-        skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text("""---
 name: extra-md
 description: 有额外 md

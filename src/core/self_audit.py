@@ -5,7 +5,7 @@
     2. 手动：用户输入 /self-audit 命令
 
 审计维度：
-    - Skills：内容过时、结构异常、步骤缺失、触发词冲突、孤立文件
+    - Skills：frontmatter 缺失、内容过短、孤立文件（触发逻辑已改为 LLM，不再检查 triggers）
     - Projects：路径失效、信息过时、格式异常
     - Learned Modules：语法错误、危险 import、schema 不完整
 
@@ -92,13 +92,17 @@ class AuditReport:
 # ── 扫描器 ───────────────────────────────────────────────────────────────────
 
 def scan_skills() -> list[AuditFinding]:
-    """扫描所有 skills，返回审计发现列表。"""
+    """扫描所有 skills，返回审计发现列表。
+
+    注意：skill 的触发逻辑已改为 LLM 判断，不再检查 triggers 字段。
+    知识性 skill（如 machines、user-data-location）没有编号步骤也正常，
+    不再将"缺少编号步骤"作为警告。
+    """
     findings: list[AuditFinding] = []
 
     if not SKILLS_DIR.exists():
         return findings
 
-    all_skills = {}
     for skill_dir in SKILLS_DIR.iterdir():
         if not skill_dir.is_dir():
             continue
@@ -118,8 +122,6 @@ def scan_skills() -> list[AuditFinding]:
         except OSError:
             continue
 
-        all_skills[skill_dir.name] = content
-
         # 检查 frontmatter
         fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", content, re.DOTALL)
         if not fm_match:
@@ -128,7 +130,7 @@ def scan_skills() -> list[AuditFinding]:
                 category="skill",
                 target=skill_dir.name,
                 message="SKILL.md 缺少 frontmatter（--- ... ---）",
-                suggestion="添加 YAML frontmatter（name、description、triggers）",
+                suggestion="添加 YAML frontmatter（name、description）",
             ))
         else:
             # 解析 frontmatter
@@ -149,14 +151,7 @@ def scan_skills() -> list[AuditFinding]:
                         target=skill_dir.name,
                         message="frontmatter 缺少 description 字段",
                     ))
-                triggers = meta.get("triggers", [])
-                if not triggers or (isinstance(triggers, list) and len(triggers) == 0):
-                    findings.append(AuditFinding(
-                        severity="warning",
-                        category="skill",
-                        target=skill_dir.name,
-                        message="frontmatter 缺少 triggers 字段（skill 无法被触发）",
-                    ))
+                # 注意：不再检查 triggers 字段，触发逻辑已改为 LLM
             except yaml.YAMLError as e:
                 findings.append(AuditFinding(
                     severity="error",
@@ -169,15 +164,8 @@ def scan_skills() -> list[AuditFinding]:
         # 检查正文结构
         body = content[fm_match.end():] if fm_match else content
 
-        # 提取编号步骤
-        step_matches = re.findall(r"^(\d+)\.\s+\*\*(.+?)\*\*", body, re.MULTILINE)
-        if not step_matches:
-            findings.append(AuditFinding(
-                severity="info",
-                category="skill",
-                target=skill_dir.name,
-                message="正文没有找到编号步骤（如 1. **步骤名**），可能不是规范的 skill",
-            ))
+        # 注意：不再检查是否有编号步骤，skill 可能是知识性内容（如 machines），
+        # 没有固定步骤也完全正常。
 
         # 检查内容长度
         if len(body.strip()) < 50:
@@ -210,29 +198,7 @@ def scan_skills() -> list[AuditFinding]:
                     suggestion="合并到 SKILL.md 或删除",
                 ))
 
-    # 检查触发词冲突（不同 skill 有相同触发词）
-    trigger_map: dict[str, list[str]] = {}
-    for skill_name, content in all_skills.items():
-        fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", content, re.DOTALL)
-        if not fm_match:
-            continue
-        try:
-            import yaml
-            meta = yaml.safe_load(fm_match.group(1)) or {}
-            for t in meta.get("triggers", []):
-                trigger_map.setdefault(str(t).lower(), []).append(skill_name)
-        except yaml.YAMLError:
-            continue
-
-    for trigger, names in trigger_map.items():
-        if len(names) > 1:
-            findings.append(AuditFinding(
-                severity="warning",
-                category="skill",
-                target=", ".join(names),
-                message=f"触发词冲突: '{trigger}' 同时被多个 skill 使用",
-                suggestion="保留一个，合并或调整其他 skill 的触发词",
-            ))
+    # 注意：不再检查触发词冲突，触发逻辑已改为 LLM，不再依赖 triggers 字段
 
     return findings
 
@@ -430,13 +396,13 @@ def scan_learned_modules() -> list[AuditFinding]:
 # ── 主审计流程 ───────────────────────────────────────────────────────────────
 
 
-def scan_user_patterns(days: int = 7) -> list[AuditFinding]:
+def scan_user_patterns(days: int = 1) -> list[AuditFinding]:
     """扫描近期 session 日志，检测用户高频重复操作，判断是否需要沉淀为 skill。
 
     检测逻辑：
     1. 统计近期 session 中用户请求的出现频次
-    2. 将语义相似的请求聚合（关键词交集）
-    3. 过滤掉已有 skill 覆盖的操作
+    2. 用 SkillIndex 语义检索判断是否已被现有 skill 覆盖
+    3. 过滤掉基本工具能力
     4. 出现 3 次以上的模式标记为建议沉淀
     """
     import json
@@ -487,56 +453,10 @@ def scan_user_patterns(days: int = 7) -> list[AuditFinding]:
     if not user_messages:
         return findings
 
-    # 2. 精确去重统计
+    # 2. 精确去重统计（不额外做关键词聚类，直接用原始消息匹配）
     msg_counter = Counter(user_messages)
 
-    # 3. 关键词聚合：将语义相似的消息合并
-    # 提取每条消息的关键词集合
-    def extract_keywords(text: str) -> set[str]:
-        stop_words = {"的", "了", "吗", "呢", "吧", "啊", "我", "你", "是", "在",
-                       "有", "不", "也", "都", "就", "要", "会", "可以", "能",
-                       "把", "给", "让", "跟", "和", "对", "这个", "那个",
-                       "一下", "一个", "什么", "怎么", "如何", "帮我"}
-        words = set(re.findall(r"[\w]+", text.lower()))
-        return words - stop_words - {w for w in words if len(w) < 2}
-
-    # 按频次排序，高频优先做聚类中心
-    sorted_msgs = msg_counter.most_common()
-    clustered: dict[int, list[tuple[str, int]]] = {}  # cluster_id -> [(msg, count)]
-    assigned: dict[str, int] = {}  # msg -> cluster_id
-    cluster_id = 0
-
-    for msg, count in sorted_msgs:
-        if msg in assigned:
-            continue
-        kw = extract_keywords(msg)
-        if not kw:
-            continue
-
-        # 检查是否和已有聚类中心相似
-        found_cluster = None
-        for cid, members in clustered.items():
-            center_msg = members[0][0]
-            center_kw = extract_keywords(center_msg)
-            if not center_kw:
-                continue
-            overlap = kw & center_kw
-            union = kw | center_kw
-            similarity = len(overlap) / len(union) if union else 0
-            if similarity >= 0.4:
-                found_cluster = cid
-                break
-
-        if found_cluster is not None:
-            clustered[found_cluster].append((msg, count))
-            assigned[msg] = found_cluster
-        else:
-            clustered[cluster_id] = [(msg, count)]
-            assigned[msg] = cluster_id
-            cluster_id += 1
-
-    # 4. 使用 SkillIndex 检索判断高频操作是否已被现有 skill 覆盖
-    # 复用和 skill 触发相同的检索机制（SkillIndex.search），保持一致性
+    # 3. 使用 SkillIndex 检索判断高频操作是否已被现有 skill 覆盖
     from src.core.indexer import SkillIndex
     from src.core.config import INDEX_DIR
 
@@ -547,8 +467,7 @@ def scan_user_patterns(days: int = 7) -> list[AuditFinding]:
         logger.warning(f"scan_user_patterns: SkillIndex 加载失败: {e}")
         skill_index = None
 
-    # 5. 基本工具能力过滤：判断操作是否属于 agent 基本能力，不需要沉淀为 skill
-    # 每个工具能覆盖的操作类型用正则描述，与工具能力绑定，工具不变则不需要维护
+    # 4. 基本工具能力过滤：判断操作是否属于 agent 基本能力，不需要沉淀为 skill
     from src.core.tools import get_all_schemas
     _TOOL_PATTERNS: dict[str, str] = {}
     for schema in get_all_schemas():
@@ -576,35 +495,35 @@ def scan_user_patterns(days: int = 7) -> list[AuditFinding]:
             _TOOL_PATTERNS[tool_name] = _TOOL_PATTERNS[tool_name] + "|" + ext
 
     def _is_basic_capability(query: str) -> bool:
-        """判断 query 是否属于 agent 基本工具能力范围。
-
-        用正则匹配：遍历每个工具的能力 pattern，命中任一即视为基本能力。
-        """
+        """判断 query 是否属于 agent 基本工具能力范围。"""
         for tool_name, pattern in _TOOL_PATTERNS.items():
             if pattern and re.search(pattern, query, re.IGNORECASE):
                 return True
         return False
 
-    # 6. 找出高频且未覆盖的模式
-    for cid, members in clustered.items():
-        total_count = sum(c for _, c in members)
-        representative = members[0][0]  # 频次最高的作为代表
+    # 5. 找出高频且未覆盖的模式
+    # 先按频次排序，高频优先
+    sorted_msgs = msg_counter.most_common()
 
-        if total_count < 3:
-            continue
+    for msg, count in sorted_msgs:
+        if count < 3:
+            break  # 后续消息频次更低，不需要继续
 
         # 过滤掉纯闲聊/问候
         chat_patterns = {"你好", "咋样", "啥情况", "继续", "你在干啥", "谢谢",
                           "你刚才在做什么", "我上次在让你干啥", "刚刚你在",
                           "刚刚你", "上次我最后让你干的事儿", "我上次",
                           "你在做什么", "你刚才", "你好吗"}
-        if any(p in representative for p in chat_patterns):
+        if any(p in msg for p in chat_patterns):
             continue
 
         # 检查 1：是否已被现有 skill 覆盖
+        # 用 SkillIndex 检索，取 top_k=5，只要有一个 skill 的 description
+        # 能覆盖该操作就跳过
         covered_by = ""
         if skill_index is not None:
-            matched = skill_index.search(representative, top_k=1, similarity_threshold=0.3)
+            # 用更严格的阈值（0.5）确保只有真正相关的 skill 才算覆盖
+            matched = skill_index.search(msg, top_k=5, similarity_threshold=0.5)
             if matched:
                 for m in matched:
                     fm = re.match(r"^---\s*\n(.*?)\n---\s*\n", m, re.DOTALL)
@@ -612,25 +531,61 @@ def scan_user_patterns(days: int = 7) -> list[AuditFinding]:
                         try:
                             import yaml
                             meta = yaml.safe_load(fm.group(1)) or {}
-                            covered_by = meta.get("name", "")
+                            # 用 skill name 判断是否覆盖，而非只靠阈值
+                            skill_name = meta.get("name", "")
+                            skill_desc = meta.get("description", "")
+                            # 如果 skill name 或 description 包含该消息的核心词，认为覆盖
+                            if skill_name and len(skill_name) > 1:
+                                # 检查消息中是否包含 skill name 的关键部分
+                                # 简单策略：检查 skill name 的每个词是否在消息中
+                                name_words = set(re.findall(r"[\w]+", skill_name.lower()))
+                                name_words = {w for w in name_words if len(w) >= 2}
+                                msg_words = set(re.findall(r"[\w]+", msg.lower()))
+                                if name_words and name_words & msg_words:
+                                    covered_by = skill_name
+                                    break
                         except Exception:
                             pass
-                        break
+                    # 如果没有 frontmatter，用正文内容做模糊匹配
+                    # 简单策略：消息长度 <30 且是某个 skill 的子串
+                    if not covered_by and len(msg) < 40:
+                        if msg in m:
+                            covered_by = "(skill匹配)"
+                            break
 
         if covered_by:
             continue  # 已被现有 skill 覆盖，跳过
 
-        # 检查 2：是否属于 agent 基本工具能力（git push、读文件、查日志等）
-        if _is_basic_capability(representative):
+        # 检查 2：是否属于 agent 基本工具能力
+        if _is_basic_capability(msg):
             continue  # 基本能力不需要沉淀为 skill
 
-        examples = [m for m, _ in members[:5]]
+        # 找到所有与该消息语义相同的高频变体
+        # 统计所有与当前消息有共同关键词的消息（用于给出更多样例）
+        related = []
+        msg_words = set(re.findall(r"[\w]+", msg.lower()))
+        msg_words = {w for w in msg_words if len(w) >= 2}
+        for other_msg, other_count in sorted_msgs:
+            if other_msg == msg:
+                continue
+            other_words = set(re.findall(r"[\w]+", other_msg.lower()))
+            other_words = {w for w in other_words if len(w) >= 2}
+            if msg_words and other_words:
+                overlap = msg_words & other_words
+                # 如果有 2 个以上的共同关键词，认为相关
+                if len(overlap) >= 2 and other_count >= 2:
+                    related.append(other_msg)
+
+        suggestions = [msg]
+        if related:
+            suggestions.extend(related[:4])
+
         findings.append(AuditFinding(
             severity="info",
             category="skill",
             target="高频操作模式",
-            message=f"检测到高频操作（{total_count}次）：{representative}",
-            suggestion=f"考虑沉淀为 skill。相关请求：{examples}",
+            message=f"检测到高频操作（{count}次）：{msg}",
+            suggestion=f"考虑沉淀为 skill。相关请求：{suggestions}",
         ))
 
     return findings
