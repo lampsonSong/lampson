@@ -351,6 +351,7 @@ class FeishuAdapter(BasePlatformAdapter):
                 message_id=message_id,
                 text=text,
                 timestamp=time.time(),
+                reaction_id=reaction_id,
             )
 
             # 提交到线程池，避免阻塞 WebSocket 事件循环

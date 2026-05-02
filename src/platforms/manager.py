@@ -59,7 +59,7 @@ class PlatformManager:
             chat_id=msg.chat_id,
             message_id=msg.message_id,
             text=msg.text,
-            reaction_id=None,
+            reaction_id=msg.reaction_id,
         )
 
     async def run(self) -> None:

@@ -26,6 +26,7 @@ class PlatformMessage:
     message_id: str = ""  # 消息 ID（去重用）
     text: str = ""  # 消息文本
     timestamp: float = field(default_factory=time.time)
+    reaction_id: str | None = None  # 表情回复 ID（用于处理完成后删除）
 
 
 class BasePlatformAdapter(ABC):
