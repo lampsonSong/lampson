@@ -22,6 +22,7 @@ import yaml
 
 
 SKILLS_DIR = Path.home() / ".lampson" / "skills"
+BASE_SKILLS_DIR = Path(__file__).resolve().parent.parent.parent / "config" / "default_skills"
 
 # SKILL.md frontmatter 解析正则
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
@@ -64,13 +65,29 @@ def _parse_skill_md(path: Path) -> Skill | None:
 
 
 def load_all_skills() -> dict[str, Skill]:
-    """扫描 SKILLS_DIR，加载并返回所有技能，key 为技能名。"""
-    SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+    """扫描 base skills 和 user skills，加载并返回所有技能。
+
+    加载顺序：先 base（随仓库），再 user（~/.lampson/skills/）。
+    同名 skill 以 user 版本为准（覆盖 base）。
+    """
     skills: dict[str, Skill] = {}
+
+    # 1. 加载 base skills（只读，随仓库版本）
+    if BASE_SKILLS_DIR.exists():
+        for skill_md in sorted(BASE_SKILLS_DIR.glob("*/SKILL.md")):
+            skill = _parse_skill_md(skill_md)
+            if skill:
+                skill._source = "base"
+                skills[skill.name] = skill
+
+    # 2. 加载 user skills（可写，覆盖同名 base）
+    SKILLS_DIR.mkdir(parents=True, exist_ok=True)
     for skill_md in sorted(SKILLS_DIR.glob("*/SKILL.md")):
         skill = _parse_skill_md(skill_md)
         if skill:
+            skill._source = "user"
             skills[skill.name] = skill
+
     return skills
 
 

@@ -1,36 +1,45 @@
 ---
 name: code-writing
-description: 写代码、创建或编辑代码文件
+description: 写代码、创建或编辑代码文件。使用场景：实现功能、创建新文件、修改现有代码、修复 bug。
 triggers:
   - 写代码
-  - 写一个
   - 创建文件
-  - 编写
-  - implement
+  - 编辑代码
   - 实现
-  - 新建
-  - 生成代码
+  - 编码
 ---
 
-## code-writing 技能
+# Code Writing
 
-### 描述
-帮助用户编写、创建和编辑代码文件。
+写代码前必须先加载本 skill，按流程执行。
 
-### 步骤
-1. 理解用户需求，确认编程语言和目标文件路径
-2. 如果文件已存在，先用 file_read 读取现有内容
-3. 生成完整、可运行的代码（不写 TODO 或 placeholder）
-4. 用 file_write 工具将代码写入目标文件
-5. 用 shell 工具验证语法（如 python -m py_compile 或 node --check）
-6. 向用户汇报完成情况，说明文件位置
+## 1. 理清需求
 
-### 代码规范
-- 添加模块级 docstring
-- 使用 type hints（Python）
-- 函数长度尽量不超过 50 行
-- 错误处理要完善
+- 梳理需求，确认理解无误
+- 确认语言和目标文件路径
+- 不确定时先问清楚，不要猜
 
-### 注意事项
-- 写入前确认路径正确，避免覆盖重要文件
-- 危险操作（覆盖已有文件）需先提示用户
+## 2. 编写代码
+
+按优先级派发，前者不可用时才用后者：
+
+1. **Cursor Agent** → `cursor-agent` skill
+2. **Hermes** → `hermes-delegate` skill
+3. **自己写** → 直接编写完整、可运行的代码（不写 TODO 或 placeholder）
+
+## 3. 验证（必须执行，不跳过）
+
+1. **语法检查**：`python -m py_compile` / `node --check` 等
+2. **运行测试**：编写并运行测试用例，覆盖正常路径和边界情况
+3. **端到端验证**：构造真实场景，确认功能可用
+
+## 4. 重启判断
+
+改动文件在 `src/` 下 → 写 boot task → 重启 daemon → 验证。
+
+## 规范
+
+- 模块级 docstring、type hints
+- 函数 ≤ 50 行
+- 错误处理完善
+- 不留 .bak，用 git 管理
