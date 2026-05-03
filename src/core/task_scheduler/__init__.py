@@ -4,6 +4,10 @@
 - DELAYED: 一次性延迟任务
 - INTERVAL: 固定间隔周期任务
 - CRON: Cron 表达式定时任务
+
+支持两种执行方式：
+- prompt: 自然语言提示，触发时注入 agent session
+- func: Python 函数引用（用于内置功能如自我审计）
 """
 
 from src.core.task_scheduler.triggers import TaskType, TaskConfig
@@ -19,6 +23,11 @@ def get_scheduler() -> TaskScheduler:
     if _scheduler is None:
         _scheduler = TaskScheduler()
     return _scheduler
+
+
+def set_session(session) -> None:
+    """设置 agent session 引用。"""
+    get_scheduler().set_session(session)
 
 
 def schedule(config: TaskConfig) -> str:

@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import traceback
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Any, Callable
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -14,9 +13,6 @@ from apscheduler.executors.pool import ThreadPoolExecutor
 from src.core.task_scheduler.triggers import TaskConfig, TaskType
 
 logger = logging.getLogger(__name__)
-
-LAMPSON_DIR = Path.home() / ".lampson"
-DB_PATH = LAMPSON_DIR / "task_scheduler.db"
 
 
 class TaskScheduler:
@@ -34,6 +30,11 @@ class TaskScheduler:
             executors=executors,
             job_defaults=job_defaults,
         )
+        self._session = None  # agent session，prompt 任务需要
+
+    def set_session(self, session) -> None:
+        """设置 agent session 引用，供 prompt 模式任务使用。"""
+        self._session = session
 
     def start(self) -> None:
         """启动调度器。daemon 启动时调用。"""
@@ -47,7 +48,7 @@ class TaskScheduler:
 
     def schedule(self, config: TaskConfig) -> str:
         """注册任务，返回 task_id。如果已存在则替换。"""
-        func = _wrap_callback(config)
+        func = _wrap_callback(config, self._session)
 
         if config.task_type == TaskType.DELAYED:
             run_date = datetime.now() + timedelta(seconds=config.trigger_seconds)
@@ -123,12 +124,22 @@ class TaskScheduler:
         return self._scheduler.get_job(task_id)
 
 
-def _wrap_callback(config: TaskConfig) -> Callable:
+def _wrap_callback(config: TaskConfig, session) -> Callable:
     """包装任务函数，加入回调和错误处理。"""
 
     def wrapped(**kwargs):
         try:
-            result = config.func(**kwargs)
+            if config.prompt:
+                # prompt 模式：注入 session 让 agent 执行
+                if session is None:
+                    logger.error(f"[task_scheduler] 任务 {config.task_id} 需要session但未设置")
+                    return "[错误] session 未设置"
+                logger.info(f"[task_scheduler] 触发 prompt 任务: {config.task_id}")
+                result = session.handle_input(config.prompt)
+            else:
+                # func 模式：直接调用 Python 函数
+                result = config.func(**kwargs)
+
             if config.on_done:
                 try:
                     config.on_done(result)
@@ -146,5 +157,5 @@ def _wrap_callback(config: TaskConfig) -> Callable:
                 except Exception as callback_err:
                     logger.warning(f"[task_scheduler] on_error 回调失败: {callback_err}")
 
-    wrapped.__name__ = config.func.__name__
+    wrapped.__name__ = config.func.__name__ if config.func else config.task_id
     return wrapped

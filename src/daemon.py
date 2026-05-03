@@ -85,10 +85,13 @@ def _self_audit_callback() -> None:
         _task_scheduler_logger.error(f"[self_audit] 执行失败: {e}")
 
 
-def _register_tasks() -> None:
+def _register_tasks(session=None) -> None:
     """注册所有定时任务。"""
     global _scheduler
     _scheduler = TaskScheduler()
+    if session is not None:
+        from src.core.task_scheduler import set_session
+        set_session(session)
     scheduler_start()
 
     # 自我审计：每天固定时间
@@ -152,6 +155,17 @@ def _send_boot_notification(config: dict, pid: int) -> None:
                     print(f"[daemon] 上线通知发送失败: {e}", flush=True)
     except Exception as e:
         print(f"[daemon] 上线通知异常: {e}", flush=True)
+
+
+def _notify_boot_tasks_running(config: dict, tasks: list[dict]) -> None:
+    """boot_tasks 执行前发飞书提示。"""
+    lines = [f"⚡ 正在执行 {len(tasks)} 条启动待办任务："]
+    for i, t in enumerate(tasks, 1):
+        desc = t.get("task", str(t))
+        if len(desc) > 80:
+            desc = desc[:77] + "..."
+        lines.append(f"{i}. {desc}")
+    _send_feishu(config, "\n".join(lines))
 
 
 def _write_boot_task(task: dict) -> None:
@@ -284,7 +298,7 @@ def main() -> None:
     print("[daemon] 心跳已启动", flush=True)
 
     # ── 任务调度器（自我审计）──────────────────────────────────────────
-    _register_tasks()
+    _register_tasks(session)
 
     # ── 加载 learned_modules（延迟，避免循环导入）──────────────────────
     load_learned_modules()
@@ -297,6 +311,8 @@ def main() -> None:
     tasks = _load_and_clear_boot_tasks()
     if tasks:
         print(f"[daemon] 发现 {len(tasks)} 条 boot_tasks，开始执行", flush=True)
+        # 飞书提示用户有 boot task 正在执行
+        _notify_boot_tasks_running(config, tasks)
         _inject_boot_tasks(session, tasks)
 
     # ── 主事件循环 ────────────────────────────────────────────────────────
@@ -428,7 +444,7 @@ def _restore_daemon(pm, mgr) -> None:
 
     # 恢复任务调度器
     global _scheduler
-    _register_tasks()
+    _register_tasks(session)
     load_learned_modules()
     print("[daemon] learned_modules 已加载", flush=True)
 

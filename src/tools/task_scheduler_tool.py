@@ -5,12 +5,12 @@
 - cron: Cron 表达式（hour/minute/day_of_week）
 - delayed: 一次性延迟（秒）
 
-任务函数来源：
-1. learned_module: 引用 ~/.lampson/learned_modules/ 下的模块，调用指定函数
-2. shell: 执行 shell 命令（简单任务）
+支持两种执行方式（二选一）：
+- prompt: 自然语言提示，触发时注入 agent session 由 LLM 执行
+- module: 引用 learned_modules 下的 Python 模块
 
 示例：
-  schedule(task_type="interval", interval_seconds=1800, module="training_reporter", func_name="run")
+  schedule(task_type="interval", interval_seconds=1800, prompt="检查ASR训练进度并发飞书报告")
   schedule(task_type="cron", cron_hour=4, cron_minute=0, module="self_audit", func_name="run")
   cancel(task_id="training_reporter")
   list_tasks()
@@ -30,7 +30,7 @@ SCHEDULE_SCHEMA: dict[str, Any] = {
         "name": "task_schedule",
         "description": (
             "动态注册定时任务。支持 interval（固定间隔）、cron（定时）、delayed（一次性延迟）。"
-            "任务函数来源：learned_modules 下的模块（指定 module + func_name）。"
+            "执行方式：用 prompt（自然语言，推荐）指定任务内容，或用 module 引用 learned_modules。"
             "注册后立即生效，无需重启。"
         ),
         "parameters": {
@@ -49,6 +49,22 @@ SCHEDULE_SCHEMA: dict[str, Any] = {
                     "type": "string",
                     "enum": ["interval", "cron", "delayed"],
                     "description": "触发类型（schedule 时必填）",
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "自然语言任务描述。触发时注入 agent session 由 LLM 用工具执行。推荐用于大多数场景。",
+                },
+                "module": {
+                    "type": "string",
+                    "description": "learned_modules 下的模块名（如 'self_audit'）。与 prompt 二选一。",
+                },
+                "func_name": {
+                    "type": "string",
+                    "description": "模块中要调用的函数名（默认 'run'）",
+                },
+                "func_args": {
+                    "type": "object",
+                    "description": "传给函数的额外参数（可选）",
                 },
                 "interval_seconds": {
                     "type": "integer",
@@ -69,18 +85,6 @@ SCHEDULE_SCHEMA: dict[str, Any] = {
                 "delay_seconds": {
                     "type": "integer",
                     "description": "delayed 模式的延迟秒数",
-                },
-                "module": {
-                    "type": "string",
-                    "description": "learned_modules 下的模块名（如 'training_reporter'）",
-                },
-                "func_name": {
-                    "type": "string",
-                    "description": "模块中要调用的函数名（默认 'run'）",
-                },
-                "func_args": {
-                    "type": "object",
-                    "description": "传给函数的额外参数（可选）",
                 },
                 "description": {
                     "type": "string",
@@ -145,6 +149,7 @@ def run_schedule(params: dict[str, Any]) -> str:
 
     task_id = params.get("task_id", "").strip()
     task_type_str = params.get("task_type", "").strip()
+    prompt = params.get("prompt", "").strip()
     module_name = params.get("module", "").strip()
     func_name = params.get("func_name", "run").strip()
     func_args = params.get("func_args", {})
@@ -154,8 +159,6 @@ def run_schedule(params: dict[str, Any]) -> str:
         return "[错误] task_id 不能为空"
     if not task_type_str:
         return "[错误] task_type 不能为空（interval/cron/delayed）"
-    if not module_name:
-        return "[错误] module 不能为空，需要指定 learned_module 名称"
 
     # 解析任务类型
     try:
@@ -163,20 +166,30 @@ def run_schedule(params: dict[str, Any]) -> str:
     except ValueError:
         return f"[错误] 不支持的 task_type: {task_type_str}"
 
-    # 解析函数
-    func, err = _resolve_runner(module_name, func_name)
-    if err:
-        return f"[错误] {err}"
-
     # 构建 config
     config_kwargs: dict[str, Any] = {
         "task_id": task_id,
         "task_type": task_type,
-        "func": func,
         "func_args": func_args,
-        "description": description or f"{module_name}.{func_name}",
+        "description": description,
     }
 
+    # 确定执行方式：prompt 或 module（二选一）
+    if prompt:
+        config_kwargs["prompt"] = prompt
+        if not description:
+            config_kwargs["description"] = prompt[:80]
+    elif module_name:
+        func, err = _resolve_runner(module_name, func_name)
+        if err:
+            return f"[错误] {err}"
+        config_kwargs["func"] = func
+        if not description:
+            config_kwargs["description"] = f"{module_name}.{func_name}"
+    else:
+        return "[错误] 需要指定 prompt（自然语言任务描述）或 module（learned_module 名称），二选一"
+
+    # 解析触发参数
     if task_type == TaskType.INTERVAL:
         interval = params.get("interval_seconds")
         if not interval or interval <= 0:
