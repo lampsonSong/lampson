@@ -13,6 +13,8 @@ from src.tools import search as search_tool
 from src.tools import web as web_tool
 from src.tools import session as session_tool
 from src.tools import task_scheduler_tool
+from src.tools import desktop as desktop_tool
+from src.tools import vision as vision_tool
 from src.feishu import client as feishu_client
 from src.core import skills_tools
 
@@ -44,6 +46,13 @@ _register(session_tool.SESSION_SCHEMA, session_tool.run)
 _register(task_scheduler_tool.SCHEDULE_SCHEMA, task_scheduler_tool.run_dispatch)
 _register(task_scheduler_tool.LIST_TASKS_SCHEMA, task_scheduler_tool.run_list_tool)
 _register(task_scheduler_tool.CANCEL_TASK_SCHEMA, task_scheduler_tool.run_cancel_tool)
+
+# 桌面控制工具
+for _name, _runner in desktop_tool.SCHEMAS.items():
+    _register(desktop_tool.SCHEMAS[_name], lambda p, n=_name: desktop_tool.run(n, p))
+
+# 视觉分析工具
+_register(vision_tool.SCHEMA, vision_tool.run)
 
 
 # ── learned_modules 延迟加载 ──────────────────────────────────────────────

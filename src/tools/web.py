@@ -1,14 +1,15 @@
-"""网络搜索工具：通过 DuckDuckGo HTML 接口搜索，无需 API Key。"""
+"""网络搜索工具：通过 Bing 国内版搜索，稳定可达。"""
 
 from __future__ import annotations
 
 from typing import Any
+import re
 
 import httpx
 from bs4 import BeautifulSoup
 
 
-DDG_URL = "https://html.duckduckgo.com/html/"
+BING_URL = "https://cn.bing.com/search"
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -28,9 +29,9 @@ def web_search(query: str, max_results: int = MAX_RESULTS) -> str:
 
     try:
         with httpx.Client(timeout=TIMEOUT, follow_redirects=True) as client:
-            response = client.post(
-                DDG_URL,
-                data={"q": query, "kl": "cn-zh"},
+            response = client.get(
+                BING_URL,
+                params={"q": query, "count": max_results * 2},
                 headers=HEADERS,
             )
             response.raise_for_status()
@@ -42,16 +43,24 @@ def web_search(query: str, max_results: int = MAX_RESULTS) -> str:
     soup = BeautifulSoup(response.text, "html.parser")
     results = []
 
-    for result in soup.select(".result")[:max_results]:
-        title_tag = result.select_one(".result__title a")
-        snippet_tag = result.select_one(".result__snippet")
-
-        if not title_tag:
+    for result in soup.select("li.b_algo")[:max_results]:
+        h2 = result.find("h2")
+        if not h2:
             continue
 
-        title = title_tag.get_text(strip=True)
-        url = title_tag.get("href", "")
-        snippet = snippet_tag.get_text(strip=True) if snippet_tag else ""
+        title = h2.get_text(strip=True)
+        link_tag = h2.find("a")
+        url = link_tag.get("href", "") if link_tag else ""
+
+        # 摘要：优先 p 标签，其次 b_caption div
+        snippet = ""
+        snippet_p = result.find("p")
+        if snippet_p:
+            snippet = snippet_p.get_text(strip=True)
+        else:
+            cap_div = result.find("div", class_=re.compile(r"b_caption"))
+            if cap_div:
+                snippet = cap_div.get_text(strip=True)
 
         results.append(f"**{title}**\n{url}\n{snippet}")
 
