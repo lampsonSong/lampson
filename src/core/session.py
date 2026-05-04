@@ -1357,11 +1357,13 @@ def _build_compaction_config(
 
     Args:
         config: 顶层配置字典（含 compaction 段）。
-        model_context_window: 模型自身的 context_window（未使用，保留接口兼容）。
+        model_context_window: 模型自身的 context_window，优先于配置文件中的值。
     """
     c = config.get("compaction", {})
+    # 优先使用模型实际的 context_window，而非配置文件中的固定值
+    cw = model_context_window or c.get("context_window", 131_072)
     return CompactionConfig(
-        context_window=int(c.get("context_window", 131_072)),
+        context_window=int(cw),
         trigger_threshold=float(c.get("trigger_threshold", 0.8)),
         end_threshold_percent=c.get("end_threshold_percent", 80.0),
         max_archive_per_compaction=c.get("max_archive_per_compaction", 20),

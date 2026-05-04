@@ -5,6 +5,7 @@ llm:
   api_key: ""                                        # 智谱 API Key（必填）
   base_url: "https://open.bigmodel.cn/api/paas/v4/" # LLM API 地址
   model: "glm-5.1"                               # 模型名称
+  context_window: 131072                           # 模型 context window（token 数），各模型不同，需按实际填写
 
 feishu:
   app_id: ""      # 飞书应用 App ID（可选）
@@ -39,7 +40,6 @@ compaction:
   enabled: true                    # 是否启用自动压缩
   trigger_threshold: 0.8           # 触发阈值（占 context_window 的百分比）
   end_threshold: 0.3               # 压缩目标（占 context_window 的百分比）
-  context_window: 131072           # LLM context window 大小（token 数），GLM-5.1=128K
   max_iterations: 3                # 最大压缩迭代次数
   enable_archive: true             # 是否归档有价值内容到文件
 
