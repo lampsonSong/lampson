@@ -205,14 +205,27 @@ class Compactor:
             except Exception as e:
                 logger.warning(f"Compaction classify 前半失败: {e}")
 
+        # Fallback: classify 全部失败时，保留最近 N 轮对话
         if not all_decisions and not all_tool_refs:
-            return CompactionResult(success=False, error="分类结果为空")
+            logger.warning("Compaction classify 全部失败，回退到保留最近 N 轮策略")
+            _notify_progress(progress_callback, "[回退] classify 失败，仅保留最近 N 轮对话")
+            recent_msgs, _ = _split_recent_turns(messages, self.config.keep_recent_n)
+            _log_compaction(
+                original_count=len(messages),
+                decisions=[],
+                tool_refs={},
+                archive_targets=[],
+                config=self.config,
+            )
+            return CompactionResult(
+                success=True,
+                messages_kept=recent_msgs,
+                archived_count=0,
+                archive_details="fallback: classify failed, kept recent turns",
+            )
 
         decisions = all_decisions
         tool_refs = all_tool_refs
-
-        if not decisions and not tool_refs:
-            return CompactionResult(success=False, error="分类结果为空")
 
         # 提取 archive 目标列表
         archive_targets = [
@@ -361,12 +374,18 @@ class Compactor:
 
 # ── Step 1: Classify ─────────────────────────────────────────────────────────
 
+MAX_CLASSIFY_BATCH = 30  # 每批最多分类的消息数
+
 def _classify_messages(
     messages: list[dict[str, Any]],
     existing_files: dict[str, str],
     llm: Any,
 ) -> dict[str, Any]:
     """Step 1：LLM 分类，不做写入。"""
+    # 限制批量大小，避免 prompt 过长导致超时
+    if len(messages) > MAX_CLASSIFY_BATCH:
+        logger.info(f"classify batch 截断: {len(messages)} -> {MAX_CLASSIFY_BATCH}")
+        messages = messages[:MAX_CLASSIFY_BATCH]
     prompt = _build_classify_prompt(messages, existing_files)
 
     # 调用 LLM（通过 llm.messages 接口）
@@ -419,9 +438,9 @@ def _build_classify_prompt(messages: list[dict[str, Any]], existing_files: dict[
         # tool 角色用 tool_call id
         if role == "tool":
             tool_call_id = msg.get("tool_call_id", msg.get("id", "unknown"))
-            lines.append(f"[{tool_call_id}] tool_result: {content[:300]}{ref_note}")
+            lines.append(f"[{tool_call_id}] tool_result: {content[:150]}{ref_note}")
         else:
-            truncated = content[:300] + ("..." if len(content) > 300 else "")
+            truncated = content[:150] + ("..." if len(content) > 150 else "")
             lines.append(f"[{msg_id}] {role}: {truncated}{ref_note}")
 
     return "\n".join(lines)

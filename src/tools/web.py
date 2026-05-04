@@ -1,15 +1,17 @@
-"""网络搜索工具：通过 Bing 国内版搜索，稳定可达。"""
+"""网络搜索工具：DuckDuckGo HTML，走代理优先。"""
 
 from __future__ import annotations
 
-from typing import Any
 import re
+from typing import Any
+from urllib.parse import unquote, urlparse, parse_qs
 
 import httpx
 from bs4 import BeautifulSoup
 
 
-BING_URL = "https://cn.bing.com/search"
+DDG_URL = "https://html.duckduckgo.com/html/"
+PROXY_URL = "http://127.0.0.1:17890"  # 飞毯VPN Clash 代理
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -22,47 +24,71 @@ MAX_RESULTS = 5
 TIMEOUT = 15
 
 
+def _clean_ddg_url(raw_url: str) -> str:
+    """从 DuckDuckGo 跳转链接中提取真实 URL。"""
+    if not raw_url:
+        return ""
+    if raw_url.startswith("//"):
+        raw_url = "https:" + raw_url
+    if "uddg=" in raw_url:
+        parsed = parse_qs(urlparse(raw_url).query)
+        if "uddg" in parsed:
+            return unquote(parsed["uddg"][0])
+    return raw_url
+
+
+def _parse_ddg(html: str, max_results: int) -> list[str]:
+    """解析 DuckDuckGo HTML 搜索结果。"""
+    soup = BeautifulSoup(html, "html.parser")
+    results = []
+    for result in soup.select(".result")[:max_results]:
+        title_el = result.select_one(".result__title a, .result__a")
+        if not title_el:
+            continue
+        title = title_el.get_text(strip=True)
+        raw_url = title_el.get("href", "")
+        url = _clean_ddg_url(raw_url)
+        snippet_el = result.select_one(".result__snippet")
+        snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+        if title:
+            results.append(f"**{title}**\n{url}\n{snippet}")
+    return results
+
+
+def _ddg_search(query: str, max_results: int, proxy: str | None = None) -> list[str]:
+    """执行一次 DDG 搜索。"""
+    kwargs = dict(timeout=TIMEOUT, follow_redirects=True)
+    if proxy:
+        kwargs["proxy"] = proxy
+    with httpx.Client(**kwargs) as client:
+        response = client.post(
+            DDG_URL,
+            data={"q": query, "kl": "cn-zh"},
+            headers=HEADERS,
+        )
+        response.raise_for_status()
+        return _parse_ddg(response.text, max_results)
+
+
 def web_search(query: str, max_results: int = MAX_RESULTS) -> str:
-    """搜索网页，返回格式化的结果摘要。"""
+    """搜索网页：代理优先 → 直连 fallback。"""
     if not query.strip():
         return "[错误] 搜索词不能为空"
 
-    try:
-        with httpx.Client(timeout=TIMEOUT, follow_redirects=True) as client:
-            response = client.get(
-                BING_URL,
-                params={"q": query, "count": max_results * 2},
-                headers=HEADERS,
-            )
-            response.raise_for_status()
-    except httpx.TimeoutException:
-        return "[超时] 搜索请求超时，请稍后重试。"
-    except httpx.HTTPError as e:
-        return f"[错误] 搜索请求失败：{e}"
-
-    soup = BeautifulSoup(response.text, "html.parser")
     results = []
 
-    for result in soup.select("li.b_algo")[:max_results]:
-        h2 = result.find("h2")
-        if not h2:
-            continue
+    # 1. 走代理（国内直连 DDG 不稳定）
+    try:
+        results = _ddg_search(query, max_results, proxy=PROXY_URL)
+    except (httpx.TimeoutException, httpx.HTTPError, Exception):
+        pass
 
-        title = h2.get_text(strip=True)
-        link_tag = h2.find("a")
-        url = link_tag.get("href", "") if link_tag else ""
-
-        # 摘要：优先 p 标签，其次 b_caption div
-        snippet = ""
-        snippet_p = result.find("p")
-        if snippet_p:
-            snippet = snippet_p.get_text(strip=True)
-        else:
-            cap_div = result.find("div", class_=re.compile(r"b_caption"))
-            if cap_div:
-                snippet = cap_div.get_text(strip=True)
-
-        results.append(f"**{title}**\n{url}\n{snippet}")
+    # 2. 直连 fallback
+    if not results:
+        try:
+            results = _ddg_search(query, max_results)
+        except (httpx.TimeoutException, httpx.HTTPError, Exception) as e:
+            return f"[错误] 搜索失败（代理和直连均不可用）：{e}"
 
     if not results:
         return f"[无结果] 未找到关于「{query}」的搜索结果。"

@@ -48,6 +48,7 @@ class Agent:
         self.project_index: Any = None
         self.retrieval_config: dict[str, Any] = {}
         self.last_total_tokens: int = 0
+        self.last_prompt_tokens: int = 0
         self.last_stop_reason: str | None = None
         self._fast_path_tool_count: int = 0
 
@@ -484,6 +485,7 @@ class Agent:
 
                 if response.usage:
                     self.last_total_tokens = response.usage.total_tokens
+                    self.last_prompt_tokens = getattr(response.usage, 'prompt_tokens', 0) or self.last_prompt_tokens
 
                 self.llm.messages.append(
                     response.choices[0].message.model_dump(exclude_none=True)
@@ -683,7 +685,13 @@ class Agent:
         return result
 
     def _estimate_context_tokens(self) -> int:
-        """估算当前 messages 的 token 总数（粗略：UTF-8 字节数 / 4）。"""
+        """估算当前 messages 的 token 总数。
+
+        优先使用 LLM 返回的 prompt_tokens（精确值），
+        仅在从未调用过 LLM 时 fallback 到 bytes/4 估算。
+        """
+        if self.last_prompt_tokens > 0:
+            return self.last_prompt_tokens
         try:
             serialized = json.dumps(self.llm.messages, ensure_ascii=False)
             return len(serialized.encode("utf-8")) // 4

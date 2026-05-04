@@ -10,11 +10,7 @@ from typing import Any, Callable
 from src.tools import shell as shell_tool
 from src.tools import fileops as fileops_tool
 from src.tools import search as search_tool
-from src.tools import web as web_tool
 from src.tools import session as session_tool
-from src.tools import task_scheduler_tool
-from src.tools import desktop as desktop_tool
-from src.tools import vision as vision_tool
 from src.feishu import client as feishu_client
 from src.core import skills_tools
 
@@ -30,11 +26,21 @@ def _register(schema: dict[str, Any], runner: ToolRunner) -> None:
     _REGISTRY[name] = (schema, runner)
 
 
+def _try_import(module_path: str, attr: str = ""):
+    """尝试 import 模块，失败时 warn 并返回 None。可选提取子属性。"""
+    try:
+        mod = __import__(module_path, fromlist=[attr] if attr else [""])
+        return getattr(mod, attr) if attr else mod
+    except ImportError as e:
+        logger.warning(f"可选工具模块 {module_path} 导入失败（缺少依赖: {e}），已跳过")
+        return None
+
+
+# ── 核心工具（缺了就起不来） ─────────────────────────────────────────────
 _register(shell_tool.SCHEMA, shell_tool.run)
 _register(search_tool.SEARCH_SCHEMA, search_tool.run)
 _register(fileops_tool.FILE_READ_SCHEMA, fileops_tool.run_file_read)
 _register(fileops_tool.FILE_WRITE_SCHEMA, fileops_tool.run_file_write)
-_register(web_tool.SCHEMA, web_tool.run)
 _register(feishu_client.FEISHU_SEND_SCHEMA, feishu_client.tool_feishu_send)
 _register(feishu_client.FEISHU_READ_SCHEMA, feishu_client.tool_feishu_read)
 _register(skills_tools.PROJECT_CONTEXT_SCHEMA, skills_tools.project_context)
@@ -42,17 +48,25 @@ _register(skills_tools.SKILL_SCHEMA, skills_tools.skill)
 _register(skills_tools.SEARCH_PROJECTS_SCHEMA, skills_tools.search_projects)
 _register(session_tool.SESSION_SCHEMA, session_tool.run)
 
-# 定时任务管理工具（3 个 schema 共用同一模块）
-_register(task_scheduler_tool.SCHEDULE_SCHEMA, task_scheduler_tool.run_dispatch)
-_register(task_scheduler_tool.LIST_TASKS_SCHEMA, task_scheduler_tool.run_list_tool)
-_register(task_scheduler_tool.CANCEL_TASK_SCHEMA, task_scheduler_tool.run_cancel_tool)
+# ── 可选工具（缺依赖只跳过，不阻止 daemon 启动） ──────────────────────────
+_web = _try_import("src.tools.web")
+if _web:
+    _register(_web.SCHEMA, _web.run)
 
-# 桌面控制工具
-for _name, _runner in desktop_tool.SCHEMAS.items():
-    _register(desktop_tool.SCHEMAS[_name], lambda p, n=_name: desktop_tool.run(n, p))
+_ts = _try_import("src.tools.task_scheduler_tool")
+if _ts:
+    _register(_ts.SCHEDULE_SCHEMA, _ts.run_dispatch)
+    _register(_ts.LIST_TASKS_SCHEMA, _ts.run_list_tool)
+    _register(_ts.CANCEL_TASK_SCHEMA, _ts.run_cancel_tool)
 
-# 视觉分析工具
-_register(vision_tool.SCHEMA, vision_tool.run)
+_desktop = _try_import("src.tools.desktop")
+if _desktop:
+    for _name in _desktop.SCHEMAS:
+        _register(_desktop.SCHEMAS[_name], lambda p, n=_name: _desktop.run(n, p))
+
+_vision = _try_import("src.tools.vision")
+if _vision:
+    _register(_vision.SCHEMA, _vision.run)
 
 
 # ── learned_modules 延迟加载 ──────────────────────────────────────────────
