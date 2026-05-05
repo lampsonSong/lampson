@@ -245,7 +245,7 @@ def _inject_boot_tasks(session, tasks: list[dict]) -> None:
 
 
 def main() -> None:
-    global _heartbeat_mgr
+    global _heartbeat_mgr, _scheduler
     # 强制 stdout/stderr 行缓冲：launchd 重定向到文件时默认全缓冲，
     # 会导致日志丢失（进程崩溃时缓冲区内容不刷盘）。
     if hasattr(sys.stdout, "reconfigure"):
@@ -437,7 +437,7 @@ def _restore_daemon(pm, mgr) -> None:
             print(f"[daemon] 恢复飞书 adapter 失败: {e}", flush=True)
 
     # 恢复心跳
-    global _heartbeat_mgr
+    global _heartbeat_mgr, _scheduler
     _heartbeat_mgr = HeartbeatManager(task_id="daemon")
     _heartbeat_mgr.start()
     print("[daemon] 心跳已恢复", flush=True)

@@ -241,9 +241,11 @@ class FeishuAdapter(BasePlatformAdapter):
         from src.feishu.client import FeishuClient
 
         card = self._make_progress_card(lines, finished=finished)
+        print(f"[feishu] _send_progress_card: lines={len(lines)}, finished={finished}", flush=True)
         try:
             client = FeishuClient(self.app_id, self.app_secret)
             data = client.send_card(receive_id=chat_id, card=card, receive_id_type="chat_id")
+            print(f"[feishu] progress card sent ok", flush=True)
             return data.get("data", {}).get("message_id")
         except Exception as e:
             resp_body = getattr(getattr(e, "response", None), "text", "N/A")
@@ -431,6 +433,7 @@ class FeishuAdapter(BasePlatformAdapter):
                 while True:
                     try:
                         event = _progress_queue.get(timeout=0.5)
+                        print(f"[feishu] progress_worker received: type={event.get('type') if isinstance(event, dict) else 'non-dict'}", flush=True)
                     except queue.Empty:
                         if _progress_done.is_set():
                             if progress_lines and _card_fail_count < _MAX_CARD_FAILS:
@@ -505,6 +508,7 @@ class FeishuAdapter(BasePlatformAdapter):
             _worker.start()
 
             def _progress_cb(event: dict) -> None:
+                print(f"[feishu] _progress_cb: event_type={event.get('type')}", flush=True)
                 _progress_queue.put(event)
 
             session.set_message_context(message_id=message_id, chat_id=chat_id)

@@ -27,7 +27,7 @@ class TestCompactionConfig:
         assert cfg.trigger_threshold == 0.8
         assert cfg.context_window == 131072
         assert cfg.max_archive_per_compaction == 20
-        assert cfg.keep_recent_n == 3
+        assert cfg.keep_recent_n == 8
         assert cfg.summary_trigger_ratio == 0.5
 
     def test_should_trigger(self):
