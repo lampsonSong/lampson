@@ -462,8 +462,8 @@ class Agent:
                     raise  # 直接上抛，不吞掉
                 except LLMContextTooLongError as e:
                     logger.warning(f"Prompt 超长: {e}")
-                    # 尝试自动压缩
-                    cr = self.maybe_compact(
+                    # 已超长，直接 force_compact，不走 maybe_compact 的 should_trigger 检查
+                    cr = self.force_compact(
                         session_store=_session_store,
                         session_id=self.session_id or "",
                         progress_callback=self.progress_callback,
