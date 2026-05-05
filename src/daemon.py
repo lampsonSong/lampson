@@ -227,8 +227,38 @@ def _load_and_clear_boot_tasks() -> list[dict] | None:
     return tasks
 
 
-def _inject_boot_tasks(session, tasks: list[dict]) -> None:
+
+def _get_boot_tasks_session(mgr, config: dict):
+    """获取用于执行 boot_tasks 的 session。
+
+    优先使用飞书 owner session（保证 resume 等上下文在飞书渠道可见），
+    如果未配置 user_open_id 则 fallback 到 CLI session。
+    """
+    owner_open_id = config.get("feishu", {}).get("user_open_id", "").strip()
+    if owner_open_id:
+        session = mgr.get_or_create("feishu", owner_open_id)
+        print(f"[daemon] boot_tasks 将在飞书 session 上执行 (owner_open_id={owner_open_id})", flush=True)
+        return session
+
+    print("[daemon] 未配置 feishu.user_open_id，boot_tasks 将在 CLI session 上执行", flush=True)
+    return mgr.get_or_create("cli", "default")
+
+
+def _inject_boot_tasks(session, tasks: list[dict], config: dict | None = None) -> None:
     """将 boot_tasks 注入 session 并主动执行一轮 agent。"""
+    # 飞书 session 需要 partial_sender 才能把回复发出去
+    if config and session.channel == "feishu":
+        owner_chat_id = config.get("feishu", {}).get("owner_chat_id", "").strip()
+        app_id = config.get("feishu", {}).get("app_id", "").strip()
+        app_secret = config.get("feishu", {}).get("app_secret", "").strip()
+        if owner_chat_id and app_id and app_secret:
+            from src.feishu.client import FeishuClient
+            client = FeishuClient(app_id=app_id, app_secret=app_secret)
+            session.partial_sender = lambda t: client.send_message(
+                receive_id=owner_chat_id, text=t, receive_id_type="chat_id"
+            )
+            session._reply_callback = session.partial_sender
+
     lines = ["[系统] 你刚完成重启，有以下待办任务需要执行："]
     for i, t in enumerate(tasks, 1):
         desc = t.get("task", str(t))
@@ -313,7 +343,8 @@ def main() -> None:
         print(f"[daemon] 发现 {len(tasks)} 条 boot_tasks，开始执行", flush=True)
         # 飞书提示用户有 boot task 正在执行
         _notify_boot_tasks_running(config, tasks)
-        _inject_boot_tasks(session, tasks)
+        boot_session = _get_boot_tasks_session(mgr, config)
+        _inject_boot_tasks(boot_session, tasks, config=config)
 
     # ── 主事件循环 ────────────────────────────────────────────────────────
     try:
