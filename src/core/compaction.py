@@ -762,8 +762,6 @@ def apply_compaction(
     Returns:
         CompactionResult（触发了压缩）或 None（不需要压缩）。
     """
-    _MAX_COMPACTION_RETRIES = 3
-
     if not force and not config.should_trigger(estimated_tokens, stop_reason):
         return None
 
@@ -775,80 +773,32 @@ def apply_compaction(
     threshold_tokens = int(config.context_window * config.trigger_threshold)
     system_msg = agent_llm.messages[0] if agent_llm.messages else {}
 
-    result: CompactionResult | None = None
+    # 单次压缩，不依赖 bytes/4 估算判断成功与否
+    # bytes/4 在 context overflow 后 last_prompt_tokens=0 时严重不准
+    # 压缩是否足够，由 _run_tool_loop 重新调用 LLM 来验证（靠实际错误判断）
+    compactor = Compactor(llm=agent_llm, config=config)
+    result = compactor.compact(
+        messages,
+        session_store=session_store,
+        session_id=session_id,
+        progress_callback=progress_callback,
+    )
 
-    for attempt in range(_MAX_COMPACTION_RETRIES):
-        # 每轮递增 keep_recent_n，逐步丢弃更多历史
-        adjusted_config = CompactionConfig(
-            context_window=config.context_window,
-            trigger_threshold=config.trigger_threshold,
-            end_threshold_percent=config.end_threshold_percent,
-            max_archive_per_compaction=config.max_archive_per_compaction,
-            compaction_log_max_bytes=config.compaction_log_max_bytes,
-            keep_recent_n=config.keep_recent_n + attempt * 2,
-            summary_trigger_ratio=config.summary_trigger_ratio,
-        )
+    if not result.success or not result.messages_kept:
+        return result
 
-        compactor = Compactor(llm=agent_llm, config=adjusted_config)
-        result = compactor.compact(
-            messages,
-            session_store=session_store,
-            session_id=session_id,
-            progress_callback=progress_callback,
-        )
+    # 更新 agent messages（压缩结果）
+    agent_llm.messages = [system_msg] + result.messages_kept
 
-        if not result.success or not result.messages_kept:
-            break
-
-        new_messages = [system_msg] + result.messages_kept
-        new_estimated = _estimate_messages_tokens(new_messages)
-
-        if new_estimated < threshold_tokens:
-            logger.info(
-                f"Compaction 第 {attempt + 1} 轮成功，"
-                f"token {new_estimated} < {threshold_tokens}"
+    # Fallback 安全网：如果压缩后消息已很少但 token 估算仍超阈值，
+    # 说明 system prompt 本身可能过长，此时返回 success 让外层继续试 LLM call
+    if len(result.messages_kept) <= 3:
+        new_estimated = _estimate_messages_tokens(agent_llm.messages)
+        if new_estimated >= threshold_tokens:
+            logger.warning(
+                f"Compaction 后消息已很少（{len(result.messages_kept)} 条）"
+                f"但 token 估算仍超（{new_estimated} >= {threshold_tokens}），"
+                f"system prompt 可能过长，仍返回成功由外层验证"
             )
-            agent_llm.messages = new_messages
-            return result
-
-        # 仍超限，用压缩后的消息继续下一轮
-        logger.warning(
-            f"Compaction 第 {attempt + 1} 轮后 token 仍超限 "
-            f"({new_estimated} >= {threshold_tokens})，继续压缩"
-        )
-        _notify_progress(progress_callback, f"[压缩] 第 {attempt + 1} 轮后仍超限，尝试更激进压缩...")
-        messages = result.messages_kept
-
-    # 循环压缩全部失败 → fallback：只保留 system prompt + 最近 1 轮
-    _notify_progress(progress_callback, "[压缩] 多轮压缩仍超限，fallback 到只保留最近对话")
-    logger.warning("Compaction 多轮压缩仍超限，fallback 到只保留最近 1 轮对话")
-
-    user_indices = [i for i, m in enumerate(messages) if m.get("role") == "user"]
-    if user_indices:
-        split_idx = user_indices[-1]
-        fallback_kept = messages[split_idx:]
-    else:
-        fallback_kept = messages[-3:] if len(messages) > 3 else messages
-
-    new_messages = [system_msg] + fallback_kept
-    new_estimated = _estimate_messages_tokens(new_messages)
-
-    if new_estimated >= threshold_tokens:
-        # 连最近 1 轮都超限——说明 system prompt 本身就太长了
-        logger.error(
-            f"Compaction fallback 后仍超限 ({new_estimated} >= {threshold_tokens})，"
-            f"system prompt 本身可能过长"
-        )
-        if result is not None:
-            return result
-        return CompactionResult(
-            success=False,
-            error=f"压缩后仍超限 ({new_estimated} tokens)，system prompt 可能过长",
-        )
-
-    agent_llm.messages = new_messages
-
-    if result is None:
-        result = CompactionResult(success=True, messages_kept=fallback_kept, archived_count=0)
 
     return result

@@ -462,18 +462,28 @@ class Agent:
                     raise  # 直接上抛，不吞掉
                 except LLMContextTooLongError as e:
                     logger.warning(f"Prompt 超长: {e}")
-                    # 已超长，直接 force_compact，不走 maybe_compact 的 should_trigger 检查
-                    cr = self.force_compact(
-                        session_store=_session_store,
-                        session_id=self.session_id or "",
-                        progress_callback=self.progress_callback,
-                    )
-                    if cr is not None and cr.success:
-                        logger.info(f"自动压缩成功，归档 {cr.archived_count} 条，继续重试")
+                    # 自动压缩最多重试 3 次，每次压完直接试 LLM call，靠实际错误判断是否成功
+                    # 不依赖 bytes/4 估算（context overflow 后 last_prompt_tokens=0，估算不准确）
+                    compacted = False
+                    for attempt in range(3):
+                        if attempt > 0:
+                            logger.info(f"自动压缩第 {attempt} 次重试...")
+                        cr = self.force_compact(
+                            session_store=_session_store,
+                            session_id=self.session_id or "",
+                            progress_callback=self.progress_callback,
+                        )
+                        if cr is None or not cr.success:
+                            break
+                        # 压完直接 continue，让外层循环重新 try LLM call
+                        # 如果还超，LLMContextTooLongError 会再次被捕获，进入下一轮压缩
+                        compacted = True
+                        logger.info(f"自动压缩成功（第 {attempt + 1} 次），继续重试 LLM")
                         self._on_model_switch("已自动压缩上下文，继续执行")
-                        continue  # 继续重试
-                    else:
-                        return "[上下文过长，自动压缩失败，请使用 /compaction 手动压缩后重试]"
+                        break
+                    if compacted:
+                        continue  # 重新进入 for round_num，重新 try _chat_with_fallback
+                    return "[上下文过长，自动压缩已达上限，请使用 /compaction 手动压缩后重试]"
                 except LLMError as e:
                     self._consecutive_llm_failures += 1
                     if self._consecutive_llm_failures >= 3:
@@ -625,6 +635,7 @@ class Agent:
 
     def _on_tool_progress(self, round_num: int, tool_name: str, args: str, result: str) -> None:
         """每个工具调用完成后实时通知 listener 更新进度卡片。"""
+        print(f"[agent] _on_tool_progress: tool={tool_name}, callback={'set' if self.progress_callback else 'None'}", flush=True)
         if not self.progress_callback:
             return
         try:
