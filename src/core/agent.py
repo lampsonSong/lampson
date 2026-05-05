@@ -634,22 +634,34 @@ class Agent:
             })
 
     def _on_tool_progress(self, round_num: int, tool_name: str, args: str, result: str) -> None:
-        """每个工具调用完成后实时通知 listener 更新进度卡片。"""
-        print(f"[agent] _on_tool_progress: tool={tool_name}, callback={'set' if self.progress_callback else 'None'}", flush=True)
-        if not self.progress_callback:
-            return
-        try:
-            args_preview = args[:80] + ("..." if len(args) > 80 else "")
-            result_preview = result[:120] + ("..." if len(result) > 120 else "")
-            self.progress_callback({
-                "type": "tool_progress",
-                "round": round_num,
-                "tool": tool_name,
-                "args_preview": args_preview,
-                "result_preview": result_preview,
-            })
-        except Exception:
-            pass
+        """每个工具调用完成后实时通知 listener 更新进度卡片。
+
+        优先使用 progress_callback（卡片模式），fallback 到 interim_sender（文本模式）。
+        fallback 场景：新消息中断后 progress_callback 被清空，但 _process_with_interrupt
+        循环仍在跑，此时通过 interim_sender 保证进度不丢失。
+        """
+        if self.progress_callback:
+            try:
+                args_preview = args[:80] + ("..." if len(args) > 80 else "")
+                result_preview = result[:120] + ("..." if len(result) > 120 else "")
+                self.progress_callback({
+                    "type": "tool_progress",
+                    "round": round_num,
+                    "tool": tool_name,
+                    "args_preview": args_preview,
+                    "result_preview": result_preview,
+                })
+                return
+            except Exception:
+                pass
+        # Fallback：progress_callback 不可用时，通过 interim_sender 发文本进度
+        if self.interim_sender:
+            try:
+                args_preview = args[:60] + ("..." if len(args) > 60 else "")
+                result_preview = result[:80] + ("..." if len(result) > 80 else "")
+                self.interim_sender(f">{tool_name}({args_preview})\n  {result_preview}")
+            except Exception:
+                pass
 
     def _on_model_switch(self, message: str) -> None:
         """模型切换时通知 listener 实时展示状态。"""

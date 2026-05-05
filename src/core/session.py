@@ -563,6 +563,13 @@ class Session:
                     except Exception:
                         pass
 
+                # 确保进度回调可用：中断后 _process_with_interrupt 循环继续，
+                # 但 listener 的 progress_callback 可能已被清空。
+                # 用 interim_sender 作为 fallback 进度通道。
+                if not self.agent.progress_callback and not self.agent.interim_sender:
+                    if self.partial_sender:
+                        self.agent.interim_sender = self.partial_sender
+
                 # 检查队列里是否还有更多消息（连续发多条的场景）
                 pending = []
                 while not self._input_queue.empty():

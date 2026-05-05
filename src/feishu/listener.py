@@ -476,16 +476,37 @@ class FeishuListener:
             def _progress_cb(event: dict) -> None:
                 _progress_queue.put(event)
 
+            # 保存旧回调，入队场景下恢复
+            _old_progress_cb = session.agent.progress_callback
+            _old_interim_sender = session.agent.interim_sender
+
             session.set_message_context(message_id=message_id, chat_id=chat_id)
             session.agent.progress_callback = _progress_cb
             session.agent.interim_sender = lambda t: self._send_reply(chat_id, t)
+
+            result = None
             try:
                 result = session.handle_input(text)
             finally:
                 _progress_done.set()
                 _worker.join(timeout=3.0)
-                session.agent.progress_callback = None
-                session.agent.interim_sender = None
+                # 入队场景：恢复旧回调，不清空（让 _process_with_interrupt 继续用）
+                is_queued = (
+                    result is not None
+                    and not result.reply
+                    and not result.is_new
+                    and not result.is_exit
+                    and not result.is_command
+                    and not result.is_safe_mode
+                )
+                if is_queued:
+                    # 恢复旧回调：progress 用旧的（虽然旧 worker 可能已退出，
+                    # 但 _on_tool_progress 会 fallback 到 interim_sender）
+                    session.agent.progress_callback = _old_progress_cb
+                    session.agent.interim_sender = _old_interim_sender
+                else:
+                    session.agent.progress_callback = None
+                    session.agent.interim_sender = None
 
             # 入队场景：消息已入队，不回复
             if not result.reply and not result.is_new and not result.is_exit and not result.is_command and not result.is_safe_mode:
