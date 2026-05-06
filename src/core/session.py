@@ -379,10 +379,6 @@ class Session:
         pidx.load_or_build()
 
         session = cls(agent=agent, config=config, skills=skills)
-        # 创建 session（JSONL 写入需要 session_id）
-        si = session_store.create_session(source="cli")
-        session.session_id = si.session_id
-        agent.session_id = si.session_id
         session._current_segment = 0
         session.skill_index = sidx
         session.project_index = pidx
@@ -740,19 +736,19 @@ class Session:
         except Exception:
             pass
 
-    def load_session(self, session_id: str = "", limit: int = 50) -> str:
+    def load_session(self, session_id: str = "", limit: int | None = None) -> str:
         """加载指定或最近 session 的对话历史到当前 llm.messages。
 
         Args:
             session_id: 要加载的 session ID。为空则加载最近的。
-            limit: 最多加载最近 N 条消息。
+            limit: 最多加载最近 N 条消息。None 表示加载全部。
 
         Returns:
             加载结果摘要。
         """
         if not session_id:
             # 找最近一个已结束的 session
-            sessions = session_store.list_recent_sessions(limit=1)
+            sessions = session_store.list_recent_sessions(limit=1, ended_only=True)
             if not sessions:
                 return "没有找到历史 session。"
             session_id = sessions[0]["session_id"]
@@ -787,7 +783,8 @@ class Session:
             llm.messages[:0] = inject_msgs
 
         loaded_count = len(inject_msgs)
-        return f"已加载 session {session_id} 的最近 {loaded_count} 条消息。"
+        suffix = f"（共 {loaded_count} 条，限制 {limit} 条）" if limit else f"（共 {loaded_count} 条）"
+        return f"已加载 session {session_id} 的对话历史{suffix}"
 
     def start_feishu_listener(self, safe_mode_callback=None, shutdown_callback=None) -> None:
         """启动飞书长连接监听（daemon thread，不阻塞 REPL）。"""

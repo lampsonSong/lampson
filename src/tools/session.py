@@ -123,7 +123,7 @@ def _run_load(params: dict) -> str:
 
     # Fallback：没有 session 引用时，只查询不注入
     if not session_id:
-        sessions = session_store.list_recent_sessions(limit=1)
+        sessions = session_store.list_recent_sessions(limit=1, ended_only=True)
         if not sessions:
             return "没有找到历史 session。"
         session_id = sessions[0]["session_id"]

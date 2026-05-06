@@ -480,6 +480,10 @@ class FeishuListener:
             _old_progress_cb = session.agent.progress_callback
             _old_interim_sender = session.agent.interim_sender
 
+            # 确保全局 session 引用指向当前处理的 session（load_session 依赖此引用）
+            from src.tools import session as session_tool
+            session_tool.set_current_session(session)
+
             session.set_message_context(message_id=message_id, chat_id=chat_id)
             session.agent.progress_callback = _progress_cb
             session.agent.interim_sender = lambda t: self._send_reply(chat_id, t)

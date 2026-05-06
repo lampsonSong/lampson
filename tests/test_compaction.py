@@ -180,7 +180,7 @@ class TestCompactor:
             result = compactor.compact(messages)
 
         assert result.success is True  # fallback 策略成功保留最近 N 轮
-        assert result.archive_details == "fallback: classify failed, kept recent turns"
+        assert "fallback: classify failed" in result.archive_details
 
 
 # ── apply_compaction 集成测试 ─────────────────────────────────────────────────

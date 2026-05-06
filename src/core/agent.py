@@ -465,6 +465,7 @@ class Agent:
                     # 自动压缩最多重试 3 次，每次压完直接试 LLM call，靠实际错误判断是否成功
                     # 不依赖 bytes/4 估算（context overflow 后 last_prompt_tokens=0，估算不准确）
                     compacted = False
+                    msg_count_before = len(self.llm.messages)
                     for attempt in range(3):
                         if attempt > 0:
                             logger.info(f"自动压缩第 {attempt} 次重试...")
@@ -475,6 +476,17 @@ class Agent:
                         )
                         if cr is None or not cr.success:
                             break
+                        # 检查压缩是否有效：消息数必须减少 20% 以上
+                        msg_count_after = len(self.llm.messages)
+                        reduction = 1 - msg_count_after / max(msg_count_before, 1)
+                        if reduction < 0.2 and attempt > 0:
+                            logger.warning(
+                                f"压缩无效（消息数 {msg_count_before} → {msg_count_after}，"
+                                f"仅减少 {reduction:.0%}），停止重试"
+                            )
+                            compacted = True  # 让它试一次 LLM call
+                            break
+                        msg_count_before = msg_count_after
                         # 压完直接 continue，让外层循环重新 try LLM call
                         # 如果还超，LLMContextTooLongError 会再次被捕获，进入下一轮压缩
                         compacted = True

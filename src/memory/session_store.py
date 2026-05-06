@@ -510,41 +510,40 @@ def get_session(session_id: str) -> SessionInfo | None:
 def list_recent_sessions(
     limit: int = 5,
     source: str | None = None,
+    ended_only: bool = False,
 ) -> list[dict]:
     """列出最近的 session（包含未正常关闭的）。
 
     Args:
         limit: 最多返回几个 session。
         source: 按 source 过滤，为 None 则不过滤。
+        ended_only: 仅返回已结束的 session（ended_at IS NOT NULL）。
 
     Returns:
         列表，每项包含 session_id、started_at、ended_at、message_count。
     """
     conn = _get_db()
     try:
+        where_clauses = []
+        params: list[Any] = []
         if source:
-            rows = conn.execute(
-                """
-                SELECT s.session_id, s.started_at, s.ended_at,
-                       (SELECT COUNT(*) FROM messages_index m WHERE m.session_id = s.session_id AND m.role IS NOT NULL) AS msg_count
-                FROM sessions s
-                WHERE s.source = ?
-                ORDER BY s.started_at DESC
-                LIMIT ?
-                """,
-                (source, limit),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """
-                SELECT s.session_id, s.started_at, s.ended_at,
-                       (SELECT COUNT(*) FROM messages_index m WHERE m.session_id = s.session_id AND m.role IS NOT NULL) AS msg_count
-                FROM sessions s
-                ORDER BY s.started_at DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
+            where_clauses.append("s.source = ?")
+            params.append(source)
+        if ended_only:
+            where_clauses.append("s.ended_at IS NOT NULL")
+        where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+        rows = conn.execute(
+            f"""
+            SELECT s.session_id, s.started_at, s.ended_at,
+                   (SELECT COUNT(*) FROM messages_index m WHERE m.session_id = s.session_id AND m.role IS NOT NULL) AS msg_count
+            FROM sessions s
+            {where_sql}
+            ORDER BY s.started_at DESC
+            LIMIT ?
+            """,
+            params + [limit],
+        ).fetchall()
 
         result = []
         for row in rows:

@@ -123,6 +123,7 @@ class SessionManager:
         session = Session.from_config(self._config, channel=channel)
         if session_id:
             session.session_id = session_id
+            session.agent.session_id = session_id
         else:
             print("[session_manager] 警告: session_id 为空，SQLite 索引将不可用", flush=True)
         session._session_manager = self

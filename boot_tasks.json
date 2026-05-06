@@ -1,7 +1,7 @@
 [
   {
-    "task": "验证 compaction 修复：\n1. 检查 src/core/agent.py 中 _run_tool_loop 的 LLMContextTooLongError 处理是否为「force_compact 后直接 continue，让实际 LLM call 验证」\n2. 检查 src/core/compaction.py 中 apply_compaction 是否移除了内部3轮循环和不可靠的 bytes/4 估算检查\n3. 如果验证通过，发飞书卡片告知哥哥修复已生效\n4. 如果发现问题，自行修复或报告",
-    "created_at": "2026-05-05T12:15:00Z",
-    "session_id": "1158-6e70"
+    "task": "验证 resume 功能修复：\n1. 用 /resume <id> 加载一个有超过 50 条消息的 session\n2. 确认加载了全部消息而非截断 50 条\n3. 确认返回文案正确（显示「共 N 条」而非「最近 50 条」）\n4. 发飞书卡片告知哥哥验证结果",
+    "created_at": "2026-05-07T01:00:00Z",
+    "session_id": "resume-fix"
   }
 ]

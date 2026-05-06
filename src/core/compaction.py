@@ -222,11 +222,24 @@ class Compactor:
             except Exception as e:
                 logger.warning(f"Compaction classify 前半失败: {e}")
 
-        # Fallback: classify 全部失败时，保留最近 N 轮对话
+        # Fallback: classify 全部失败时，逐步缩减保留轮数
         if not all_decisions and not all_tool_refs:
             logger.warning("Compaction classify 全部失败，回退到保留最近 N 轮策略")
-            _notify_progress(progress_callback, "[回退] classify 失败，仅保留最近 N 轮对话")
-            recent_msgs, _ = _split_recent_turns(messages, self.config.keep_recent_n)
+            _notify_progress(progress_callback, "[回退] classify 失败，逐步缩减保留轮数")
+            # 从 keep_recent_n 开始递减，直到 token 估算低于阈值的一半
+            threshold_half = int(self.config.context_window * self.config.trigger_threshold * 0.5)
+            recent_msgs = []
+            for keep_n in range(self.config.keep_recent_n, 0, -1):
+                recent_msgs, _ = _split_recent_turns(messages, keep_n)
+                est = _estimate_messages_tokens(recent_msgs)
+                if est <= threshold_half:
+                    logger.info(f"Fallback 保留 {keep_n} 轮（估算 {est} tokens <= {threshold_half}）")
+                    break
+                logger.info(f"Fallback keep_n={keep_n} 仍超（{est} > {threshold_half}），继续缩减")
+            else:
+                # 1 轮都超，只保留最后一条 user + assistant
+                recent_msgs = messages[-2:] if len(messages) >= 2 else messages[-1:]
+                logger.warning(f"Fallback 缩减到极简：保留最后 {len(recent_msgs)} 条")
             _log_compaction(
                 original_count=len(messages),
                 decisions=[],
@@ -238,7 +251,7 @@ class Compactor:
                 success=True,
                 messages_kept=recent_msgs,
                 archived_count=0,
-                archive_details="fallback: classify failed, kept recent turns",
+                archive_details=f"fallback: classify failed, kept {len(recent_msgs)} messages",
             )
 
         decisions = all_decisions
@@ -449,6 +462,8 @@ class Compactor:
 # ── Step 1: Classify ─────────────────────────────────────────────────────────
 
 MAX_CLASSIFY_BATCH = 30  # 每批最多分类的消息数
+MAX_CLASSIFY_BUDGET_TOKENS = 55_000  # classify prompt token 预算上限（约 context_window 的 42%）
+
 
 def _classify_messages(
     messages: list[dict[str, Any]],
@@ -462,23 +477,54 @@ def _classify_messages(
         prefer_tail: True 时截断取尾部（最新消息），False 时取头部（最旧消息）。
             对最近对话应传 True，对早期对话应传 False。
     """
-    # 限制批量大小，避免 prompt 过长导致超时
-    if len(messages) > MAX_CLASSIFY_BATCH:
-        if prefer_tail:
-            # 【修复】对最近对话取最新的 N 条，而非最旧的
-            messages = messages[-MAX_CLASSIFY_BATCH:]
-            logger.info(f"classify batch 截断（尾部）: {len(messages)} -> {MAX_CLASSIFY_BATCH}")
+    # 动态缩减 batch：从 MAX_CLASSIFY_BATCH 开始，逐步减半直到 prompt 在预算内
+    batch_size = min(len(messages), MAX_CLASSIFY_BATCH)
+    selected = messages
+    estimated = 0
+
+    while batch_size >= 1:
+        if len(messages) > batch_size:
+            if prefer_tail:
+                selected = messages[-batch_size:]
+            else:
+                selected = messages[:batch_size]
         else:
-            messages = messages[:MAX_CLASSIFY_BATCH]
-            logger.info(f"classify batch 截断（头部）: {len(messages)} -> {MAX_CLASSIFY_BATCH}")
+            selected = list(messages)
 
-    prompt = _build_classify_prompt(messages, existing_files)
+        if not selected:
+            raise RuntimeError("classify: 无可用消息")
 
-    # 调用 LLM（通过 llm.messages 接口）
+        prompt = _build_classify_prompt(selected, existing_files)
+        full_prompt = _CLASSIFY_SYSTEM + "\n" + prompt
+        estimated = _estimate_text_tokens(full_prompt)
+
+        if estimated <= MAX_CLASSIFY_BUDGET_TOKENS:
+            break
+
+        # prompt 超预算，缩减 batch
+        old_size = batch_size
+        batch_size = batch_size // 2
+        if batch_size < 1:
+            # 已经是最小 batch，prompt 还是超预算
+            raise RuntimeError(
+                f"classify prompt 即使只取 1 条仍超预算 "
+                f"({estimated} > {MAX_CLASSIFY_BUDGET_TOKENS})，跳过 classify"
+            )
+        logger.info(
+            f"classify prompt 估算 {estimated} tokens 超预算 "
+            f"({MAX_CLASSIFY_BUDGET_TOKENS})，缩减 batch {old_size} → {batch_size}"
+        )
+
+    if len(selected) < len(messages):
+        direction = "尾部" if prefer_tail else "头部"
+        logger.info(f"classify batch 截断（{direction}）: {len(messages)} → {len(selected)}")
+
+    # 调用 LLM
     temp_client = _make_temp_client(llm)
     temp_client.messages = []
     temp_client.messages = [{"role": "system", "content": _CLASSIFY_SYSTEM}]
     temp_client.add_user_message(prompt)
+
     try:
         response = temp_client.chat()
     except Exception as e:
@@ -820,6 +866,14 @@ def _estimate_messages_tokens(messages: list[dict[str, Any]]) -> int:
         return 0
 
 
+def _estimate_text_tokens(text: str) -> int:
+    """估算纯文本的 token 数（粗略：UTF-8 字节数 / 4）。"""
+    try:
+        return len(text.encode("utf-8")) // 4
+    except Exception:
+        return 0
+
+
 def apply_compaction(
     agent_llm: Any,
     config: CompactionConfig,
@@ -873,17 +927,45 @@ def apply_compaction(
     if not result.success or not result.messages_kept:
         return result
 
-    # 更新 agent messages（压缩结果）
-    agent_llm.messages = [system_msg] + result.messages_kept
+    # 紧急截断：如果压缩后仍然超阈值，强制只保留最近 2 轮 + task context
+    new_messages = [system_msg] + result.messages_kept
+    new_estimated = _estimate_messages_tokens(new_messages)
+    if new_estimated >= threshold_tokens and len(result.messages_kept) > 4:
+        logger.warning(
+            f"Compaction 后仍超阈值（{new_estimated} >= {threshold_tokens}），"
+            f"启动紧急截断：只保留最近 2 轮对话"
+        )
+        _notify_progress(progress_callback, "[紧急] 压缩不够，紧急截断到最近对话")
+        # 提取 task context（如果有）
+        task_context_msgs = [
+            m for m in result.messages_kept if m.get("is_task_context")
+        ]
+        # 保留最近 2 轮（从最后一条 user 往前数）
+        recent, _ = _split_recent_turns(result.messages_kept, 2)
+        # 组合：task_context + 最近 2 轮
+        emergency_kept = task_context_msgs + [
+            m for m in recent if not m.get("is_task_context")
+        ]
+        result = CompactionResult(
+            success=True,
+            summary=result.summary,
+            messages_kept=emergency_kept,
+            archived_count=result.archived_count,
+            archive_details=result.archive_details + "\n  [紧急截断] 只保留最近 2 轮",
+            archive_targets=result.archive_targets,
+        )
+        new_messages = [system_msg] + result.messages_kept
 
-    # Fallback 安全网：如果压缩后消息已很少但 token 估算仍超阈值，
-    # 说明 system prompt 本身可能过长，此时返回 success 让外层继续试 LLM call
+    # 更新 agent messages（压缩结果）
+    agent_llm.messages = new_messages
+
+    # Fallback 安全网：如果紧急截断后仍然超阈值，说明 system prompt 本身过长
     if len(result.messages_kept) <= 3:
-        new_estimated = _estimate_messages_tokens(agent_llm.messages)
-        if new_estimated >= threshold_tokens:
+        final_estimated = _estimate_messages_tokens(agent_llm.messages)
+        if final_estimated >= threshold_tokens:
             logger.warning(
                 f"Compaction 后消息已很少（{len(result.messages_kept)} 条）"
-                f"但 token 估算仍超（{new_estimated} >= {threshold_tokens}），"
+                f"但 token 估算仍超（{final_estimated} >= {threshold_tokens}），"
                 f"system prompt 可能过长，仍返回成功由外层验证"
             )
 
