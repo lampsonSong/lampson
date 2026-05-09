@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Any
 
 import yaml
 
+logger = logging.getLogger(__name__)
 
 LAMPSON_DIR = Path.home() / ".lampson"
 CONFIG_PATH = LAMPSON_DIR / "config.yaml"
@@ -17,6 +19,10 @@ SKILLS_DIR = LAMPSON_DIR / "memory" / "skills"
 INDEX_DIR = LAMPSON_DIR / "index"
 PROJECTS_DIR = LAMPSON_DIR / "memory" / "projects"
 INFO_DIR = LAMPSON_DIR / "memory" / "info"
+
+# 旧路径（迁移前）
+_OLD_SKILLS_DIR = LAMPSON_DIR / "skills"
+_OLD_PROJECTS_DIR = LAMPSON_DIR / "projects"
 
 _DEFAULT_RETRIEVAL: dict[str, Any] = {
     "skill_top_k": 3,
@@ -73,10 +79,58 @@ def ensure_dirs() -> None:
     _migrate_old_dirs()
 
 
+def _fix_config_paths() -> None:
+    """修正 config.yaml 中指向旧路径的配置项。
+
+    迁移到 memory/ 子目录后，config.yaml 中用户显式配置的 skills_path / projects_path
+    可能仍指向旧路径，导致索引扫描到空目录。此处自动更新为新路径。
+    """
+    if not CONFIG_PATH.exists():
+        return
+    try:
+        with CONFIG_PATH.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except Exception:
+        return
+    if not isinstance(data, dict):
+        return
+
+    changed = False
+    path_fixes = {
+        "skills_path": str(SKILLS_DIR),
+        "projects_path": str(PROJECTS_DIR),
+        "info_path": str(INFO_DIR),
+        "memory_path": str(MEMORY_DIR),
+    }
+    for key, new_value in path_fixes.items():
+        old_value = data.get(key)
+        if isinstance(old_value, str) and old_value.strip():
+            expanded = Path(old_value.strip()).expanduser()
+            # 如果配置的路径既不是新路径，也不是旧路径的实际位置，跳过
+            # 只修正指向旧路径（~/.lampson/skills 等不含 memory/）的情况
+            new_path = Path(new_value).expanduser()
+            if expanded.resolve() != new_path.resolve():
+                # 检查是否是旧路径（不含 memory/ 子目录）
+                if "memory" not in expanded.parts:
+                    data[key] = new_value
+                    changed = True
+                    logger.info("Fixed config %s: %s -> %s", key, old_value, new_value)
+
+    if changed:
+        try:
+            with CONFIG_PATH.open("w", encoding="utf-8") as f:
+                yaml.dump(data, f, allow_unicode=True, default_flow_style=False)
+            logger.info("Updated config.yaml with corrected paths")
+        except Exception as ex:
+            logger.warning("Failed to update config.yaml paths: %s", ex)
+
+
 def _migrate_old_dirs() -> None:
     import shutil
     migrated = LAMPSON_DIR / ".memory_migrated"
     if migrated.exists():
+        # 即使已迁移，仍需检查 config.yaml 路径是否过时
+        _fix_config_paths()
         return
     old_skills = LAMPSON_DIR / "skills"
     old_projects = LAMPSON_DIR / "projects"
@@ -101,6 +155,8 @@ def _migrate_old_dirs() -> None:
             old_projects.rmdir()
     if moved:
         migrated.write_text("v1", encoding="utf-8")
+    # 迁移完成后修正 config.yaml 中的旧路径
+    _fix_config_paths()
 
 def get_skills_management_config(config: dict[str, Any]) -> dict[str, int]:
     """合并 skills_management 段，供 SkillIndex 清理逻辑使用。"""
