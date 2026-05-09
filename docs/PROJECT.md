@@ -24,7 +24,7 @@
 launchd ──→ daemon.py
               ├── 飞书 WebSocket 监听（daemon thread）
               ├── SessionManager（按 channel+sender_id 隔离）
-              └── signal.pause()
+              └── asyncio.run(pm.run())
 
 lampson 命令 ──→ cli.py（独立 REPL，不连 daemon）
 ```
