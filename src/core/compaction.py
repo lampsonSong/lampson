@@ -42,8 +42,8 @@ def _notify_progress(cb: Callable[[str], None] | None, msg: str) -> None:
 # ── 目录常量 ──────────────────────────────────────────────────────────────────
 
 LAMPSON_DIR = Path.home() / ".lampson"
-SKILLS_DIR = LAMPSON_DIR / "skills"
-PROJECTS_DIR = LAMPSON_DIR / "projects"
+SKILLS_DIR = LAMPSON_DIR / "memory" / "skills"
+PROJECTS_DIR = LAMPSON_DIR / "memory" / "projects"
 COMPACTION_LOG = LAMPSON_DIR / ".compaction_log.jsonl"
 
 # ── 配置 ──────────────────────────────────────────────────────────────────────

@@ -10,6 +10,8 @@
 - func: Python 函数引用（用于内置功能如自我审计）
 """
 
+from __future__ import annotations
+
 from src.core.task_scheduler.triggers import TaskType, TaskConfig
 from src.core.task_scheduler.scheduler import TaskScheduler
 

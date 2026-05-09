@@ -21,7 +21,7 @@ from typing import Any
 import yaml
 
 
-SKILLS_DIR = Path.home() / ".lampson" / "skills"
+SKILLS_DIR = Path.home() / ".lampson" / "memory" / "skills"
 BASE_SKILLS_DIR = Path(__file__).resolve().parent.parent.parent / "config" / "default_skills"
 
 # SKILL.md frontmatter 解析正则

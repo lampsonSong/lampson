@@ -9,12 +9,14 @@ from typing import Any
 import yaml
 
 LAMPSON_DIR = Path.home() / ".lampson"
-SKILLS_DIR = LAMPSON_DIR / "skills"
-PROJECTS_DIR = LAMPSON_DIR / "projects"
+SKILLS_DIR = LAMPSON_DIR / "memory" / "skills"
+PROJECTS_DIR = LAMPSON_DIR / "memory" / "projects"
+INFO_DIR = LAMPSON_DIR / "memory" / "info"
 
 # Session 在启动时通过 set_retrieval_indices 注入，供 skill search/search_projects 使用
 _active_skill_index: Any = None
 _active_project_index: Any = None
+_active_info_index: Any = None
 
 
 # ── 统一 Skill Schema ────────────────────────────────────────────────────────
@@ -100,14 +102,33 @@ PROJECT_CONTEXT_SCHEMA = {
     }
 }
 
+INFO_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "info",
+        "description": "加载知识性信息文件的内容，例如项目规范、API 文档、使用说明等。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "文件名（不含 .md），例如 'api-reference'、'deployment-guide'"
+                }
+            },
+            "required": ["name"]
+        }
+    }
+}
+
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
 
-def set_retrieval_indices(skill_index: Any, project_index: Any) -> None:
-    """由 Session 在索引构建后调用，供 skill search/search_projects 使用。"""
-    global _active_skill_index, _active_project_index
+def set_retrieval_indices(skill_index: Any, project_index: Any, info_index: Any = None) -> None:
+    """由 Session 在索引构建后调用，供 skill search/search_projects/info 使用。"""
+    global _active_skill_index, _active_project_index, _active_info_index
     _active_skill_index = skill_index
     _active_project_index = project_index
+    _active_info_index = info_index
 
 
 
@@ -257,6 +278,15 @@ def skill(params: dict[str, Any]) -> str:
         return _run_skill_search(params)
     else:
         return "[错误] action 参数必须为 'view' 或 'search'"
+
+
+def info(params: dict[str, Any]) -> str:
+    """加载 info 知识文件内容。"""
+    name = params.get("name", "").strip()
+    if not name:
+        return "[错误] info 需要 name 参数，例如：info(name=\"api-reference\")"
+    from src.core.prompt_builder import load_info as _load_info
+    return _load_info(name)
 
 
 def search_projects(params: dict[str, Any]) -> str:

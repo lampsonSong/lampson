@@ -24,8 +24,9 @@ import yaml
 LAMPSON_DIR = Path.home() / ".lampson"
 MEMORY_PATH = LAMPSON_DIR / "MEMORY.md"
 USER_PATH = LAMPSON_DIR / "USER.md"
-SKILLS_DIR = LAMPSON_DIR / "skills"
-PROJECTS_DIR = LAMPSON_DIR / "projects"
+SKILLS_DIR = LAMPSON_DIR / "memory" / "skills"
+PROJECTS_DIR = LAMPSON_DIR / "memory" / "projects"
+INFO_DIR = LAMPSON_DIR / "memory" / "info"
 
 # 配置文件默认模板路径（仓库内）
 _CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "config"
@@ -48,7 +49,7 @@ MEMORY_GUIDANCE = (
 
 SKILLS_GUIDANCE = (
     "完成复杂任务（5+ 工具调用）、修复疑难错误或发现重要工作流后，\n"
-    "考虑将工作流记录到 ~/.lampson/skills/ 目录下以便复用。\n"
+    "考虑将工作流记录到 ~/.lampson/memory/skills/ 目录下以便复用。\n"
     "如果发现某个 skill 过时或错误，及时更新它。\n"
     "不维护的 skills 迟早会成为负担。"
 )
@@ -273,6 +274,90 @@ def load_project_context(name: str) -> str:
     return f"[项目 '{name}' not found]\n\nAvailable projects: {avail_str}"
 
 
+# ── Info Index ────────────────────────────────────────────────────────────────
+
+_info_index_cache: tuple[frozenset[tuple[str, float]], str] | None = None
+
+
+def _info_mtime_fingerprint() -> frozenset[tuple[str, float]]:
+    if not INFO_DIR.exists():
+        return frozenset()
+    items: list[tuple[str, float]] = []
+    for p in INFO_DIR.glob("*.md"):
+        try:
+            items.append((str(p.resolve()), p.stat().st_mtime))
+        except OSError:
+            items.append((str(p), 0.0))
+    return frozenset(items)
+
+
+def build_info_index() -> str:
+    """扫描 info/*.md，生成信息索引。"""
+    global _info_index_cache
+    if not INFO_DIR.exists():
+        _info_index_cache = (frozenset(), "")
+        return ""
+
+    key_before = _info_mtime_fingerprint()
+    if _info_index_cache is not None and _info_index_cache[0] == key_before:
+        return _info_index_cache[1]
+
+    lines = [
+        "## Info（按需加载）",
+        "以下是你已记录的知识性信息，可通过 info(name=\"文件名\") 加载。",
+        "",
+    ]
+    for p in sorted(INFO_DIR.glob("*.md")):
+        try:
+            raw = p.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        meta, body = _parse_frontmatter(raw)
+        desc = meta.get("description", "")
+        name = meta.get("name", p.stem)
+        if desc:
+            lines.append(f"- **{name}**: {desc}")
+        else:
+            first_line = body.split("\n")[0].lstrip("# ").strip()
+            lines.append(f"- **{name}**: {first_line[:80]}")
+
+    text = "\n".join(lines)
+    _info_index_cache = (key_before, text)
+    return text
+
+
+def load_info(name: str) -> str:
+    """加载指定 info 文件内容。"""
+    if not name:
+        return 'info 需要 name 参数，例如：info(name="some-info")'
+
+    if not INFO_DIR.exists():
+        return f"[info 目录不存在：{INFO_DIR}]"
+
+    path = INFO_DIR / f"{name}.md"
+    if not path.is_file():
+        candidates = list(INFO_DIR.glob(f"*{name}*.md"))
+        if len(candidates) == 1:
+            path = candidates[0]
+        elif len(candidates) > 1:
+            names = ", ".join(f.stem for f in candidates)
+            return f"[名称 '{name}' 不唯一，请更具体：{names}]"
+
+    if not path.is_file():
+        available = [f.stem for f in INFO_DIR.glob("*.md")]
+        avail_str = ", ".join(available) if available else "(none)"
+        return f"[info '{name}' not found]\n\nAvailable: {avail_str}"
+
+    try:
+        content = path.read_text(encoding="utf-8").strip()
+        if not content:
+            return f"[info '{name}' 内容为空]"
+        meta, body = _parse_frontmatter(content)
+        return body.strip() if body.strip() else content
+    except OSError as e:
+        return f"[读取失败：{e}]"
+
+
 # ── Identity & User 加载 ─────────────────────────────────────────────────────
 
 def _read_config_template(path: Path) -> str:
@@ -373,6 +458,11 @@ class PromptBuilder:
         project_index = build_project_index()
         if project_index:
             layers.append(project_index)
+
+        # L3.5: Info index
+        info_index = build_info_index()
+        if info_index:
+            layers.append(info_index)
 
         # L4: Model guidance
         layers.extend(build_model_guidance(self.model))

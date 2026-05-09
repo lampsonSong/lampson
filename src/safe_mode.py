@@ -32,7 +32,7 @@ DAEMON_LOG = LAMPSON_DIR / "logs" / "daemon.log"
 DAEMON_ERR_LOG = LAMPSON_DIR / "logs" / "daemon.err.log"
 
 # 需要恢复的关键目录（排除 venv/logs 等）
-CRITICAL_DIRS = ["skills", "memory"]
+CRITICAL_DIRS = ["memory"]
 
 # ─── 配置读取 ────────────────────────────────────────────────────────────────
 

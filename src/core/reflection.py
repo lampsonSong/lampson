@@ -23,8 +23,8 @@ from src.planning.steps import Plan, StepStatus
 logger = logging.getLogger(__name__)
 
 LAMPSON_DIR = Path.home() / ".lampson"
-SKILLS_DIR = LAMPSON_DIR / "skills"
-PROJECTS_DIR = LAMPSON_DIR / "projects"
+SKILLS_DIR = LAMPSON_DIR / "memory" / "skills"
+PROJECTS_DIR = LAMPSON_DIR / "memory" / "projects"
 
 # 反思冷却时间（秒）：距上次反思不足此间隔则跳过
 _REFLECT_COOLDOWN = 300  # 5 分钟
@@ -513,7 +513,7 @@ def format_execution_summary(plan: Plan) -> str:
     lines = [f"计划: {plan.goal} (状态: {plan.status.value})"]
     for step in plan.steps:
         icon = "✓" if step.status == StepStatus.done else "✗" if step.status == StepStatus.failed else "○"
-        lines.append(f"  {icon} {step.description}")
+        lines.append(f"  {icon} {step.action}")
     return "\n".join(lines)
 
 

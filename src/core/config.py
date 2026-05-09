@@ -13,9 +13,10 @@ import yaml
 LAMPSON_DIR = Path.home() / ".lampson"
 CONFIG_PATH = LAMPSON_DIR / "config.yaml"
 MEMORY_DIR = LAMPSON_DIR / "memory"
-SKILLS_DIR = LAMPSON_DIR / "skills"
+SKILLS_DIR = LAMPSON_DIR / "memory" / "skills"
 INDEX_DIR = LAMPSON_DIR / "index"
-PROJECTS_DIR = LAMPSON_DIR / "projects"
+PROJECTS_DIR = LAMPSON_DIR / "memory" / "projects"
+INFO_DIR = LAMPSON_DIR / "memory" / "info"
 
 _DEFAULT_RETRIEVAL: dict[str, Any] = {
     "skill_top_k": 3,
@@ -49,6 +50,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "memory_path": str(MEMORY_DIR),
     "skills_path": str(SKILLS_DIR),
     "projects_path": str(PROJECTS_DIR),
+    "info_path": str(INFO_DIR),
     "retrieval": dict(_DEFAULT_RETRIEVAL),
     "skills_management": dict(_DEFAULT_SKILLS_MANAGEMENT),
 }
@@ -62,10 +64,43 @@ def ensure_dirs() -> None:
     LAMPSON_DIR.mkdir(exist_ok=True)
     MEMORY_DIR.mkdir(exist_ok=True)
     (MEMORY_DIR / "sessions").mkdir(exist_ok=True)
-    SKILLS_DIR.mkdir(exist_ok=True)
-    PROJECTS_DIR.mkdir(exist_ok=True)
+    (MEMORY_DIR / "sessions" / "tool_bodies").mkdir(exist_ok=True)
+    SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+    PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+    INFO_DIR.mkdir(exist_ok=True)
     INDEX_DIR.mkdir(exist_ok=True)
 
+    _migrate_old_dirs()
+
+
+def _migrate_old_dirs() -> None:
+    import shutil
+    migrated = LAMPSON_DIR / ".memory_migrated"
+    if migrated.exists():
+        return
+    old_skills = LAMPSON_DIR / "skills"
+    old_projects = LAMPSON_DIR / "projects"
+    moved = False
+    if old_skills.is_dir() and any(old_skills.iterdir()):
+        SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+        for item in old_skills.iterdir():
+            dest = SKILLS_DIR / item.name
+            if not dest.exists():
+                shutil.move(str(item), str(dest))
+                moved = True
+        if not any(old_skills.iterdir()):
+            old_skills.rmdir()
+    if old_projects.is_dir() and any(old_projects.iterdir()):
+        PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+        for item in old_projects.iterdir():
+            dest = PROJECTS_DIR / item.name
+            if not dest.exists():
+                shutil.move(str(item), str(dest))
+                moved = True
+        if not any(old_projects.iterdir()):
+            old_projects.rmdir()
+    if moved:
+        migrated.write_text("v1", encoding="utf-8")
 
 def get_skills_management_config(config: dict[str, Any]) -> dict[str, int]:
     """合并 skills_management 段，供 SkillIndex 清理逻辑使用。"""

@@ -46,6 +46,7 @@ _register(feishu_client.FEISHU_READ_SCHEMA, feishu_client.tool_feishu_read)
 _register(skills_tools.PROJECT_CONTEXT_SCHEMA, skills_tools.project_context)
 _register(skills_tools.SKILL_SCHEMA, skills_tools.skill)
 _register(skills_tools.SEARCH_PROJECTS_SCHEMA, skills_tools.search_projects)
+_register(skills_tools.INFO_SCHEMA, skills_tools.info)
 _register(session_tool.SESSION_SCHEMA, session_tool.run)
 
 # ── 可选工具（缺依赖只跳过，不阻止 daemon 启动） ──────────────────────────
