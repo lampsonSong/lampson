@@ -44,12 +44,12 @@ SESSION_SCHEMA = {
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "search 模式返回条数（默认 5）；load 模式加载消息条数（默认 50）",
-                    "default": 5,
+                    "description": "search 模式返回条数（默认 30）；load 模式加载消息条数（默认 50）",
+                    "default": 30,
                 },
                 "date_from": {
                     "type": "string",
-                    "description": "search 模式搜索起始日期，格式 YYYY-MM-DD",
+                    "description": "search 模式搜索起始日期，格式 YYYY-MM-DD。不指定则默认近30天",
                 },
                 "date_to": {
                     "type": "string",
@@ -68,6 +68,10 @@ SESSION_SCHEMA = {
 
 # ── 内部实现 ─────────────────────────────────────────────────────────────────
 
+_DEFAULT_SEARCH_LIMIT = 30
+_DEFAULT_DAYS_BACK = 30
+
+
 def _format_ts(ts: int) -> str:
     """将毫秒时间戳格式化为可读字符串。"""
     from datetime import datetime
@@ -84,9 +88,15 @@ def _run_search(params: dict) -> str:
     if not query:
         return "[错误] search 模式需要 query 参数"
 
-    limit = params.get("limit", 5)
+    limit = params.get("limit", _DEFAULT_SEARCH_LIMIT)
     date_from = params.get("date_from")
     date_to = params.get("date_to")
+
+    # 如果用户没指定 date_from，默认搜索近30天
+    if not date_from:
+        from datetime import date, timedelta
+        date_from = (date.today() - timedelta(days=_DEFAULT_DAYS_BACK)).strftime("%Y-%m-%d")
+
     role = params.get("role")
 
     try:

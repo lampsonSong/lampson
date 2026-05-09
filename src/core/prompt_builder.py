@@ -27,6 +27,11 @@ USER_PATH = LAMPSON_DIR / "USER.md"
 SKILLS_DIR = LAMPSON_DIR / "skills"
 PROJECTS_DIR = LAMPSON_DIR / "projects"
 
+# 配置文件默认模板路径（仓库内）
+_CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "config"
+_DEFAULT_IDENTITY_PATH = _CONFIG_DIR / "default_identity.md"
+_DEFAULT_USER_PATH = _CONFIG_DIR / "default_user.md"
+
 # ── Tool Guidance 常量 ────────────────────────────────────────────────────────
 
 MEMORY_GUIDANCE = (
@@ -268,21 +273,29 @@ def load_project_context(name: str) -> str:
     return f"[项目 '{name}' not found]\n\nAvailable projects: {avail_str}"
 
 
-# ── Identity 加载 ─────────────────────────────────────────────────────────────
+# ── Identity & User 加载 ─────────────────────────────────────────────────────
 
-DEFAULT_IDENTITY = (
-    "你是 Lampson，一个运行在终端的 CLI 智能助手。你可以：\n"
-    "- 通过工具执行 shell 命令\n"
-    "- 读写本地文件\n"
-    "- 搜索网页\n"
-    "- 发送和接收飞书消息\n\n"
-    "在回复时请简洁、直接，优先使用工具完成任务。如果不确定用户意图，先确认再行动。\n"
-    "危险操作（删除文件、修改系统配置等）执行前必须让用户确认。"
-)
+def _read_config_template(path: Path) -> str:
+    """读取配置模板文件，失败返回空字符串。"""
+    try:
+        content = path.read_text(encoding="utf-8").strip()
+        return content
+    except OSError:
+        return ""
+
+
+def _ensure_user_file() -> None:
+    """首次运行时将 default_user.md 模板复制为 ~/.lampson/USER.md。"""
+    if USER_PATH.exists():
+        return
+    template = _read_config_template(_DEFAULT_USER_PATH)
+    if template:
+        USER_PATH.parent.mkdir(parents=True, exist_ok=True)
+        USER_PATH.write_text(template, encoding="utf-8")
 
 
 def load_identity() -> str:
-    """加载 ~/.lampson/MEMORY.md，不存在则用 DEFAULT_IDENTITY。"""
+    """加载 ~/.lampson/MEMORY.md，不存在则用 config/default_identity.md。"""
     if MEMORY_PATH.exists():
         try:
             content = MEMORY_PATH.read_text(encoding="utf-8").strip()
@@ -290,11 +303,14 @@ def load_identity() -> str:
                 return content
         except OSError:
             pass
-    return DEFAULT_IDENTITY
+    # 兜底：读仓库配置模板
+    fallback = _read_config_template(_DEFAULT_IDENTITY_PATH)
+    return fallback or "你是 Lampson，一个 CLI 智能助手。"
 
 
 def load_user() -> str:
-    """加载 ~/.lampson/USER.md，返回用户画像内容（限 500 字符以内）。"""
+    """加载 ~/.lampson/USER.md，不存在则从模板复制后读取（限 500 字符以内）。"""
+    _ensure_user_file()
     if not USER_PATH.exists():
         return ""
     try:
