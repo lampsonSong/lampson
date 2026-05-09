@@ -228,3 +228,30 @@ class TestInitAndGetClient:
                 get_client()
         finally:
             mod._client = old
+
+
+class TestFeishuClientUpdateMessage:
+    """测试 update_message 方法。"""
+
+    def test_update_message_success(self):
+        """测试更新卡片消息成功。"""
+        client = _mock_client()
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {"code": 0}
+        client._http.patch.return_value = mock_resp
+
+        result = client.update_message(message_id="msg_1", card={"body": {}})
+        assert result["code"] == 0
+        client._http.patch.assert_called_once()
+
+    def test_get_messages_error_code(self):
+        """测试 get_messages 返回 code!=0 时抛异常。"""
+        client = _mock_client()
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {"code": 99999, "msg": "error"}
+        client._http.get.return_value = mock_resp
+
+        with pytest.raises(RuntimeError, match="飞书读取消息失败"):
+            client.get_messages(container_id="oc_123")
