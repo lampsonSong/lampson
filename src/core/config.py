@@ -314,10 +314,12 @@ def save_config(config: dict[str, Any]) -> None:
 
 
 def is_config_complete(config: dict[str, Any]) -> bool:
-    """检查必填项是否已填写。base_url 必须有值，api_key 可为空。"""
+    """检查必填项是否已填写。用户必须至少配置过 api_key（说明走过 setup wizard）。"""
+    if not CONFIG_PATH.exists():
+        return False
     try:
-        return bool(config["llm"]["base_url"])
-    except (KeyError, TypeError):
+        return bool(config.get("llm", {}).get("api_key", "").strip())
+    except (KeyError, TypeError, AttributeError):
         return False
 
 
