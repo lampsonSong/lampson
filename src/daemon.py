@@ -15,7 +15,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import logging
 import os
 import shutil
 import signal
@@ -33,6 +32,7 @@ from src.core.self_audit import (
     format_report_detail,
     DEFAULT_AUDIT_HOUR,
     DEFAULT_AUDIT_MINUTE,
+    _audit_log,
 )
 from src.core.task_scheduler import TaskScheduler, TaskType, TaskConfig, schedule, start as scheduler_start, shutdown as scheduler_shutdown
 from src.core.tools import load_learned_modules
@@ -50,7 +50,6 @@ DAEMON_ENTRY = f"{sys.executable} -m src.daemon"
 _MAX_TASKS = 20
 _MAX_TOTAL_BYTES = 10 * 1024  # 10KB
 
-_task_scheduler_logger = logging.getLogger("task_scheduler")
 
 
 def _send_feishu(config: dict, text: str) -> None:
@@ -79,10 +78,11 @@ def _self_audit_callback() -> None:
         content = format_report_detail(report)
         if len(content) > 4000:
             content = content[:4000] + "\n\n...（报告过长已截断）"
+        _audit_log(f"[self_audit] 审计完成，开始发送报告")
         _send_feishu(config, f"🕐 Lampson 自我审计报告\n\n{content}")
-        _task_scheduler_logger.info("[self_audit] 审计完成并已发送")
+        print("[self_audit] 审计完成并已发送", flush=True)
     except Exception as e:
-        _task_scheduler_logger.error(f"[self_audit] 执行失败: {e}")
+        print(f"[self_audit] 执行失败: {e}", flush=True)
 
 
 def _register_tasks(session=None) -> None:
