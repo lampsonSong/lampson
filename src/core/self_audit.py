@@ -251,6 +251,9 @@ def scan_projects() -> list[AuditFinding]:
         # 检查路径是否有效（项目信息里如果有路径的话）
         path_pattern = re.findall(r"[-路径路径Path path:]+[:：]\s*([^\s\n]+)", content)
         for path_str in path_pattern:
+            # 跳过 URL（http/https 协议或协议相对 URL）
+            if path_str.startswith(('http://', 'https://', '//')):
+                continue
             if path_str.startswith("/") or path_str.startswith("~"):
                 p = Path(path_str).expanduser()
                 if not p.exists():
