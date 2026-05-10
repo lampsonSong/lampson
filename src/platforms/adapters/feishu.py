@@ -91,6 +91,9 @@ class FeishuAdapter(BasePlatformAdapter):
         handler = (
             lark.EventDispatcherHandler.builder("", "")
             .register_p2_im_message_receive_v1(self._handle_message)
+            .register_p2_im_chat_access_event_bot_p2p_chat_entered_v1(
+                lambda data: None
+            )
             .build()
         )
         self._ws_client = lark.ws.Client(

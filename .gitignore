@@ -7,5 +7,4 @@ dist/
 build/
 .lampson/
 .env
-tests/
 *.bak
