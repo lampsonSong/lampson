@@ -2,6 +2,21 @@
 
 > 目标：Lamix 在 Windows 上完整运行，核心功能与 macOS 一致。
 
+## 实施进度
+
+| 阶段 | 状态 | 提交 |
+|------|------|------|
+| Phase 0: 环境准备 | ⏳ 待做（需要 Windows 机器） | - |
+| Phase 1: ProcessManager 抽象 + watchdog 改造 | ✅ 已完成 | 5ae2c78 |
+| Phase 2: Desktop 工具 Windows UI 查询 | ✅ 已完成 | dcf9dd2 |
+| Phase 3: Shell/Search 工具 + 编码修复 | ✅ 已完成 | dcf9dd2 |
+| Phase 4: 安装脚本 | ✅ 已完成 | 待提交 |
+| Phase 5: 端到端测试 | ⏳ 待做（需要 Windows 机器） | - |
+
+> Phase 1-4 的代码均在 macOS 上编写并通过语法检查和单元测试（474 passed）。
+> Phase 0 和 Phase 5 需要在实际 Windows 环境中验证。
+
+
 ## 1. 平台差异分析
 
 ### 1.1 不可直接移植的部分
