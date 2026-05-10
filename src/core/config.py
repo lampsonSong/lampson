@@ -313,6 +313,28 @@ def save_config(config: dict[str, Any]) -> None:
         yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
 
 
+def _install_feishu_skills() -> None:
+    """如果 config/default_skills_feishu/ 存在，将其中的 skills 复制到用户的 skills 目录。"""
+    import shutil
+    feishu_skills_src = Path(__file__).resolve().parent.parent / "config" / "default_skills_feishu"
+    if not feishu_skills_src.exists():
+        return
+    installed = []
+    for skill_dir in feishu_skills_src.iterdir():
+        if not skill_dir.is_dir():
+            continue
+        skill_md = skill_dir / "SKILL.md"
+        if not skill_md.exists():
+            continue
+        target = SKILLS_DIR / skill_dir.name
+        if target.exists():
+            continue  # 已存在则不覆盖
+        shutil.copytree(skill_dir, target)
+        installed.append(skill_dir.name)
+    if installed:
+        print(f"已自动安装飞书 skills：{', '.join(installed)}")
+
+
 def is_config_complete(config: dict[str, Any]) -> bool:
     """检查必填项是否已填写。用户必须至少配置过 api_key（说明走过 setup wizard）。"""
     if not CONFIG_PATH.exists():
