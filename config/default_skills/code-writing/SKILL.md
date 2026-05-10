@@ -23,9 +23,8 @@ triggers:
 
 按优先级派发，前者不可用时才用后者：
 
-1. **Cursor Agent** → `cursor-agent` skill
-2. **Hermes** → `hermes-delegate` skill
-3. **自己写** → 直接编写完整、可运行的代码（不写 TODO 或 placeholder）
+1. **Claude Code** → `claude-code` skill（推荐）
+2. **自己写** → 直接编写完整、可运行的代码（不写 TODO 或 placeholder）
 
 ## 3. 验证（必须执行，不跳过）
 
