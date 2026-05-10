@@ -36,7 +36,7 @@ triggers:
 
 ### Phase 3 — 修复
 
-确认根因后修复 bug。根据修复内容判断需要加载哪个 skill（如 code-writing）。
+确认根因后修复 bug。根据修复内容判断需要加载哪个 skill。
 
 ## 深度诊断（疑难问题）
 
@@ -71,7 +71,7 @@ triggers:
 
 ### Phase 5 — 修复
 
-确认根因后修复 bug。根据修复内容判断需要加载哪个 skill（如 code-writing）。
+确认根因后修复 bug。根据修复内容判断需要加载哪个 skill。
 
 ## 收尾（两种路径都要做）
 
