@@ -64,6 +64,7 @@ pip install -e .
 **第二步：安装 Git**
 
 1. 访问 https://git-scm.com/download/win 下载安装，默认选项即可
+2. 安装时确保勾选 "Add to PATH"（默认已勾选）。装完后打开 CMD 输入 `git --version` 验证
 
 **第三步：安装 ripgrep**
 
