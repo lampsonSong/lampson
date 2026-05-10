@@ -18,6 +18,10 @@ dependencies = [
     "APScheduler>=3.10.0",
 ]
 
+[project.optional-dependencies]
+desktop = ["pyautogui>=0.9.54", "Pillow>=10.0.0"]
+all = ["lamix[desktop]"]
+
 [project.scripts]
 lamix-cli = "src.cli:main"
 

@@ -171,9 +171,6 @@ def close_orphan_sessions() -> int:
                 f"已关闭 {total_closed} 个孤儿 session"
                 + (f"（含 {len(jsonl_orphans)} 个 JSONL 兜底）" if jsonl_orphans else "")
             )
-            print(
-                f"[session_store] 已关闭 {total_closed} 个孤儿 session", flush=True
-            )
         return total_closed
     finally:
         conn.close()
