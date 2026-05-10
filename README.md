@@ -95,11 +95,13 @@ cd lamix
 pip install -e .
 ```
 
-安装完成后，如果提示 ，说明 Python 的 Scripts 目录不在 PATH 中：
+安装完成后，如果提示 `lamix` 命令未找到，说明 Python 的 Scripts 目录不在 PATH 中。运行以下命令查看路径：
 
+```cmd
+python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
+```
 
-
-将输出的路径加入系统 PATH（此电脑 → 属性 → 高级系统设置 → 环境变量 → 用户变量  → 新建），然后重新打开 CMD 窗口即可。
+将输出的路径加入系统 PATH（此电脑 → 属性 → 高级系统设置 → 环境变量 → 用户变量 `Path` → 新建），然后重新打开 CMD 窗口即可。
 
 **（可选）注册开机自启**
 
@@ -119,12 +121,18 @@ lamix cli
 
 # 单条查询
 lamix cli "帮我查一下今天天气"
-
-# 查看配置
-lamix config
 ```
 
 首次运行会进入配置向导，引导填写 LLM API Key 和飞书凭证。
+
+### 常用命令
+
+```bash
+lamix model           # 重新配置 LLM 模型（供应商/模型/API Key）
+lamix update          # 从 GitHub 拉取最新代码并重启 daemon
+lamix config          # 查看当前配置
+lamix -V              # 查看版本号
+```
 
 ### Windows（一键安装）
 
@@ -212,7 +220,7 @@ python scripts/install_windows.py --uninstall
 ```
 lamix/
 ├── src/
-│   ├── cli.py                 # CLI 入口
+│   ├── cli.py                 # 命令分发器（cli/gateway/model/update/config）
 │   ├── daemon.py              # Daemon 主进程
 │   ├── watchdog.py            # 进程守护
 │   ├── core/
