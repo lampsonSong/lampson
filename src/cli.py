@@ -52,7 +52,7 @@ def _parse_args() -> tuple[str | None, bool]:
     import argparse
 
     parser = argparse.ArgumentParser(
-        prog="lamix",
+        prog="lamix-cli",
         description="Lamix CLI 智能助手",
         add_help=True,
     )

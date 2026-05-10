@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.scripts]
-lamix = "src.cli:main"
+lamix-cli = "src.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
