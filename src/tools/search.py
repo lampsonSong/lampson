@@ -7,12 +7,36 @@ import shutil
 import subprocess
 from typing import Any
 
+def _find_rg() -> str | None:
+    """查找 ripgrep 可执行文件路径（跨平台）。"""
+    import sys
+
+    # 1. PATH 查找（最优先）
+    path = shutil.which("rg")
+    if path:
+        return path
+
+    # 2. 平台特定常见路径
+    if sys.platform == "win32":
+        common_dirs = [
+            os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WinGet\Links"),
+            os.path.expandvars(r"%ProgramFiles%\ripgrep"),
+            os.path.expanduser("~\\scoop\\shims"),
+        ]
+        for d in common_dirs:
+            candidate = os.path.join(d, "rg.exe")
+            if os.path.isfile(candidate):
+                return candidate
+    else:
+        for p in ["/opt/homebrew/bin/rg", "/usr/local/bin/rg", "/usr/bin/rg"]:
+            if os.path.isfile(p):
+                return p
+
+    return None
+
+
 # rg 路径解析：优先 PATH 查找，兜底常见安装位置（launchd 不继承 shell PATH）
-_RG_PATH: str | None = shutil.which("rg") or (
-    "/opt/homebrew/bin/rg" if os.path.isfile("/opt/homebrew/bin/rg")
-    else "/usr/local/bin/rg" if os.path.isfile("/usr/local/bin/rg")
-    else None
-)
+_RG_PATH: str | None = _find_rg()
 
 # ReDoS 简单防护：嵌套量词
 _REDOS_RE = re.compile(r"(\([^)]*[+*][^)]*\))[+*]")
@@ -89,6 +113,13 @@ def _check_rg() -> str | None:
 
 
 def _rg_missing_msg() -> str:
+    import sys
+    if sys.platform == "win32":
+        return (
+            "[错误] ripgrep (rg) 未安装。"
+            "请运行 winget install BurntSushi.ripgrep 或从 "
+            "https://github.com/BurntSushi/ripgrep/releases 下载。"
+        )
     return (
         "[错误] ripgrep (rg) 未安装，无法使用搜索功能。"
         "请运行 brew install ripgrep 安装。"

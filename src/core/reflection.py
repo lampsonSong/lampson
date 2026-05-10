@@ -257,7 +257,7 @@ def _notify_feishu(message: str) -> None:
         config_path = Path.home() / ".lamix" / "config.yaml"
         if not config_path.exists():
             return
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             config = yaml.safe_load(f)
 
         owner_chat_id = config.get("feishu", {}).get("owner_chat_id", "").strip()

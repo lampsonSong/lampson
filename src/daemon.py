@@ -274,14 +274,47 @@ def _inject_boot_tasks(session, tasks: list[dict], config: dict | None = None) -
         print(f"[daemon] boot_tasks 执行失败: {e}", flush=True)
 
 
+def _patch_websockets_ssl() -> None:
+    """Monkey-patch websockets.connect 使用 certifi CA 证书。
+
+    launchd 环境下 Python 默认 SSL context 可能缺少中间 CA（尤其有 VPN/代理时），
+    导致飞书 WebSocket 长连接 SSL 握手失败。用 certifi 的 CA bundle 更可靠。
+    """
+    try:
+        import ssl
+        import certifi
+        import websockets
+
+        _original_connect = websockets.connect
+
+        async def _patched_connect(*args, **kwargs):
+            if "ssl" not in kwargs:
+                ctx = ssl.create_default_context(cafile=certifi.where())
+                kwargs["ssl"] = ctx
+            return await _original_connect(*args, **kwargs)
+
+        # 保留原始签名属性，避免 websockets 内部检查报错
+        _patched_connect.__wrapped__ = _original_connect  # type: ignore[attr-defined]
+        websockets.connect = _patched_connect
+        print("[daemon] websockets SSL patch 已应用 (certifi CA)", flush=True)
+    except ImportError:
+        print("[daemon] certifi 未安装，跳过 websockets SSL patch", flush=True)
+    except Exception as e:
+        print(f"[daemon] websockets SSL patch 失败: {e}", flush=True)
+
+
 def main() -> None:
     global _heartbeat_mgr, _scheduler
-    # 强制 stdout/stderr 行缓冲：launchd 重定向到文件时默认全缓冲，
+    # 强制 stdout/stderr 行缓冲：文件重定向时默认全缓冲，
     # 会导致日志丢失（进程崩溃时缓冲区内容不刷盘）。
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(line_buffering=True)
+
+    # 修复 macOS launchd 环境下飞书 WebSocket SSL 证书验证失败
+    if sys.platform == "darwin":
+        _patch_websockets_ssl()
 
     parser = argparse.ArgumentParser(
         prog="python -m src.daemon",
@@ -419,8 +452,8 @@ def _trigger_safe_mode(pm, mgr) -> None:
             proc = subprocess.Popen(
                 [sys.executable, str(SAFE_MODE_SCRIPT)],
                 cwd=str(LAMIX_DIR.parent / "lamix"),
-                stdout=open(LOG_DIR / "safe_mode.log", "a"),
-                stderr=open(LOG_DIR / "safe_mode.err.log", "a"),
+                stdout=open(LOG_DIR / "safe_mode.log", "a", encoding="utf-8"),
+                stderr=open(LOG_DIR / "safe_mode.err.log", "a", encoding="utf-8"),
             )
             print(f"[daemon] safe_mode 进程已启动 (PID={proc.pid})", flush=True)
             proc.wait()
@@ -474,7 +507,6 @@ def _restore_daemon(pm, mgr) -> None:
     print("[daemon] 心跳已恢复", flush=True)
 
     # 恢复任务调度器
-    global _scheduler
     _register_tasks(session)
     load_learned_modules()
     print("[daemon] learned_modules 已加载", flush=True)

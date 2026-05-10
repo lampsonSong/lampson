@@ -380,8 +380,8 @@ def restart_daemon() -> None:
         subprocess.Popen(
             DAEMON_ENTRY.split(),
             cwd=str(LAMIX_ROOT),
-            stdout=open(DAEMON_LOG, "a"),
-            stderr=open(DAEMON_ERR_LOG, "a"),
+            stdout=open(DAEMON_LOG, "a", encoding="utf-8"),
+            stderr=open(DAEMON_ERR_LOG, "a", encoding="utf-8"),
         )
         print("[safe_mode] Daemon 已启动", flush=True)
     except Exception as e:

@@ -110,7 +110,7 @@ def _ensure_feishu_client() -> bool:
         if config_path.exists():
             try:
                 import yaml
-                with open(config_path) as f:
+                with open(config_path, encoding="utf-8") as f:
                     config = yaml.safe_load(f)
                 feishu_cfg = config.get("feishu", {})
                 app_id = feishu_cfg.get("app_id", "").strip()

@@ -121,10 +121,11 @@ def hotkey(*keys: str) -> str:
 
 def query_ui_element(app_name: str, element_role: str = "",
                      element_title: str = "") -> str:
-    """查询 macOS UI 元素。
+    """查询应用中的 UI 元素（跨平台）。
 
-    通过 osascript AppleScript 查询指定应用的 UI 元素。
-    适用于 Firefox、Chrome、Safari 等支持 Accessibility 的应用。
+    macOS: 通过 osascript AppleScript 查询。
+    Windows: 通过 PowerShell UI Automation 查询。
+    Linux: 不支持。
 
     Args:
         app_name: 应用名称（如 'Firefox', 'Google Chrome', 'Safari', 'Finder'）
@@ -134,7 +135,18 @@ def query_ui_element(app_name: str, element_role: str = "",
     Returns:
         匹配元素的描述和位置信息
     """
-    # 构建 AppleScript 查询
+    import sys
+    if sys.platform == "darwin":
+        return _query_ui_macos(app_name, element_role, element_title)
+    elif sys.platform == "win32":
+        return _query_ui_windows(app_name, element_role, element_title)
+    else:
+        return "[不支持] UI 元素查询仅在 macOS 和 Windows 上可用"
+
+
+def _query_ui_macos(app_name: str, element_role: str = "",
+                    element_title: str = "") -> str:
+    """macOS: 通过 osascript AppleScript 查询 UI 元素。"""
     role_filter = f'role = "{element_role}"' if element_role else 'true'
     title_filter = f'name contains "{element_title}" or description contains "{element_title}"' if element_title else 'true'
 
@@ -179,11 +191,52 @@ end tell
         return f"[错误] {e}"
 
 
+def _query_ui_windows(app_name: str, element_role: str = "",
+                      element_title: str = "") -> str:
+    """Windows: 通过 PowerShell UI Automation 查询 UI 元素。"""
+    script = f'''
+Add-Type -AssemblyName UIAutomationClient
+$apps = Get-Process -Name "{app_name}" -ErrorAction SilentlyContinue
+if (-not $apps) {{ return "未找到进程: {app_name}" }}
+$app = $apps[0]
+$root = [System.Windows.Automation.AutomationElement]::RootElement
+$cond = New-Object System.Windows.Automation.PropertyCondition(
+    [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $app.Id)
+$elements = $root.FindAll([System.Windows.Automation.TreeScope]::Children, $cond)
+$result = @()
+foreach ($elem in $elements) {{
+    $rect = $elem.Current.BoundingRectangle
+    $result += "$($elem.Current.ControlType.ProgrammaticName) | $($elem.Current.Name) | $($elem.Current.HelpText) | pos:($($rect.X),$($rect.Y)) size:($($rect.Width),$($rect.Height))"
+}}
+return $result -join "`n"
+'''
+    try:
+        result = subprocess.run(
+            ["powershell", "-Command", script],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return f"[错误] PowerShell 执行失败：{result.stderr.strip()}"
+        lines = [l.strip() for l in result.stdout.strip().split("\n") if l.strip()]
+        if not lines:
+            return f"[无结果] 在 {app_name} 中未找到匹配的元素"
+        header = f"在 {app_name} 找到 {len(lines)} 个元素：\n"
+        return header + "\n".join(f"  {i+1}. {l}" for i, l in enumerate(lines[:20]))
+    except subprocess.TimeoutExpired:
+        return "[错误] PowerShell 执行超时"
+    except Exception as e:
+        return f"[错误] {e}"
+
+
 def get_screen_info() -> str:
     """获取屏幕分辨率信息。"""
+    import sys
     size = pyautogui.size()
-    return (f"屏幕分辨率：{size.width} x {size.height} "
-            f"（Retina 逻辑分辨率，实际像素为 2x）")
+    if sys.platform == "darwin":
+        return (f"屏幕分辨率：{size.width} x {size.height} "
+                f"（Retina 逻辑分辨率，实际像素为 2x）")
+    else:
+        return f"屏幕分辨率：{size.width} x {size.height}"
 
 
 # ─── 工具注册 ─────────────────────────────────────────────────────────────
@@ -293,7 +346,7 @@ SCHEMAS = {
         "type": "function",
         "function": {
             "name": "desktop_query_ui",
-            "description": "查询 macOS 应用中的 UI 元素（需要应用开启 Accessibility 权限）。返回匹配元素的角色、名称、位置和大小。",
+            "description": "查询应用中的 UI 元素（需要应用开启 Accessibility 权限）。返回匹配元素的角色、名称、位置和大小。macOS 和 Windows 均支持。",
             "parameters": {
                 "type": "object",
                 "properties": {

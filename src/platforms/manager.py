@@ -83,8 +83,8 @@ class PlatformManager:
         for sig in (signal.SIGTERM, signal.SIGINT):
             try:
                 loop.add_signal_handler(sig, self._on_shutdown, sig)
-            except (ValueError, OSError):
-                pass  # macOS 部分场景不支持
+            except (ValueError, OSError, NotImplementedError):
+                pass  # Windows/macOS 部分场景不支持
 
         print("[manager] 所有平台 adapter 已启动", flush=True)
 
