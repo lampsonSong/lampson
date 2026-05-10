@@ -785,7 +785,27 @@ class Session:
 
         loaded_count = len(inject_msgs)
         suffix = f"（共 {loaded_count} 条，限制 {limit} 条）" if limit else f"（共 {loaded_count} 条）"
-        return f"已加载 session {session_id} 的对话历史{suffix}"
+
+        # 构建内容预览：显示最后几条消息的实际内容
+        PREVIEW_MAX_CHARS = 3000
+        preview_lines = []
+        total_chars = 0
+        for msg in inject_msgs[-10:]:  # 最多显示最后 10 条
+            role = msg['role']
+            content = msg.get('content', '')
+            if isinstance(content, str):
+                text = content[:200] + ('...' if len(content) > 200 else '')
+            else:
+                text = str(content)[:200]
+            label = '用户' if role == 'user' else 'Lamix'
+            preview_lines.append(f'[{label}] {text}')
+            total_chars += len(text)
+            if total_chars > PREVIEW_MAX_CHARS:
+                preview_lines.append('...（更多内容已省略）')
+                break
+
+        preview = '\n'.join(preview_lines)
+        return f"已加载 session {session_id} 的对话历史{suffix}\n\n--- 加载内容预览 ---\n{preview}"
 
     def start_feishu_listener(self, safe_mode_callback=None, shutdown_callback=None) -> None:
         """启动飞书长连接监听（daemon thread，不阻塞 REPL）。"""

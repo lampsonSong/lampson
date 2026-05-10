@@ -142,7 +142,27 @@ def _run_load(params: dict) -> str:
     if not messages:
         return f"Session {session_id} 没有消息记录。"
 
-    return f"找到 session {session_id}，共 {len(messages)} 条消息。但无法注入到当前对话（缺少 Session 引用）。"
+    # 构建内容预览
+    preview_lines = []
+    total_chars = 0
+    for msg in messages[-10:]:
+        role = msg.get('role', '')
+        if role not in ('user', 'assistant'):
+            continue
+        content = msg.get('content', '')
+        if isinstance(content, str):
+            text = content[:200] + ('...' if len(content) > 200 else '')
+        else:
+            text = str(content)[:200]
+        label = '用户' if role == 'user' else 'Lamix'
+        preview_lines.append(f'[{label}] {text}')
+        total_chars += len(text)
+        if total_chars > 3000:
+            preview_lines.append('...（更多内容已省略）')
+            break
+
+    preview = '\n'.join(preview_lines)
+    return f"找到 session {session_id}，共 {len(messages)} 条消息。但无法注入到当前对话（缺少 Session 引用）。\n\n--- 内容预览 ---\n{preview}"
 
 
 # ── 统一入口 ─────────────────────────────────────────────────────────────────
