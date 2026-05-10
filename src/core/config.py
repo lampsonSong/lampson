@@ -92,29 +92,35 @@ PROVIDER_PRESETS = {
 }
 
 
+import sys as _sys
+
+# Windows CMD 默认不支持 ANSI 转义码，跳过颜色
+_SUPPORTS_COLOR = _sys.platform != "win32"
+
+
 def _bold(text: str) -> str:
     """返回加粗文本（ANSI 转义码）。"""
-    return f"\033[1m{text}\033[0m"
+    return f"\033[1m{text}\033[0m" if _SUPPORTS_COLOR else text
 
 
 def _cyan(text: str) -> str:
     """返回青色文本（ANSI 转义码）。"""
-    return f"\033[36m{text}\033[0m"
+    return f"\033[36m{text}\033[0m" if _SUPPORTS_COLOR else text
 
 
 def _green(text: str) -> str:
     """返回绿色文本（ANSI 转义码）。"""
-    return f"\033[32m{text}\033[0m"
+    return f"\033[32m{text}\033[0m" if _SUPPORTS_COLOR else text
 
 
 def _red(text: str) -> str:
     """返回红色文本（ANSI 转义码）。"""
-    return f"\033[31m{text}\033[0m"
+    return f"\033[31m{text}\033[0m" if _SUPPORTS_COLOR else text
 
 
 def _yellow(text: str) -> str:
     """返回黄色文本（ANSI 转义码）。"""
-    return f"\033[33m{text}\033[0m"
+    return f"\033[33m{text}\033[0m" if _SUPPORTS_COLOR else text
 
 
 def ensure_dirs() -> None:
