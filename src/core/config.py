@@ -691,9 +691,7 @@ def run_setup_wizard(*, title: str | None = None) -> dict[str, Any]:
         if app_secret:
             config["feishu"]["app_secret"] = app_secret
 
-        chat_ids_raw = input("要监听的飞书会话 ID（chat_id，多个用逗号分隔，回车跳过）: ").strip()
-        if chat_ids_raw:
-            config["feishu"]["chat_ids"] = [c.strip() for c in chat_ids_raw.split(",") if c.strip()]
+# chat_ids 不再需要用户手动配置，listener 自动接收所有会话消息
 
         # 7. 保存配置
         save_config(config)
