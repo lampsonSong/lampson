@@ -56,6 +56,8 @@ class AuditFinding:
     target: str            # 文件/目录名
     message: str           # 发现描述
     suggestion: str = ""   # 修复建议
+    fixed: bool = False    # 是否已自动修复
+    fix_detail: str = ""   # 修复了什么
 
 
 @dataclass
@@ -91,12 +93,17 @@ class AuditReport:
 
 # ── 扫描器 ───────────────────────────────────────────────────────────────────
 
-def scan_skills() -> list[AuditFinding]:
+def scan_skills(auto_fix: bool = False) -> list[AuditFinding]:
     """扫描所有 skills，返回审计发现列表。
 
     注意：skill 的触发逻辑已改为 LLM 判断，不再检查 triggers 字段。
     知识性 skill（如 machines、user-data-location）没有编号步骤也正常，
     不再将"缺少编号步骤"作为警告。
+
+    auto_fix=True 时，对可安全修复的问题执行自动修复：
+    - 空目录（无 SKILL.md 且无其他文件）→ 删除
+    - 额外 .md 文件 → 合并到 SKILL.md 末尾后删除
+    - 缺少 frontmatter → 自动生成
     """
     findings: list[AuditFinding] = []
 
@@ -108,13 +115,29 @@ def scan_skills() -> list[AuditFinding]:
             continue
         skill_md = skill_dir / "SKILL.md"
         if not skill_md.exists():
-            findings.append(AuditFinding(
-                severity="warning",
-                category="skill",
-                target=skill_dir.name,
-                message="存在目录但没有 SKILL.md 文件",
-                suggestion="删除目录，或创建 SKILL.md",
-            ))
+            # 检查目录是否为空（没有任何其他文件）
+            other_files = list(skill_dir.iterdir())
+            if not other_files and auto_fix:
+                # 空目录，直接删除
+                import shutil
+                shutil.rmtree(skill_dir)
+                findings.append(AuditFinding(
+                    severity="warning",
+                    category="skill",
+                    target=skill_dir.name,
+                    message="存在目录但没有 SKILL.md 文件",
+                    suggestion="删除目录，或创建 SKILL.md",
+                    fixed=True,
+                    fix_detail="已删除空目录",
+                ))
+            else:
+                findings.append(AuditFinding(
+                    severity="warning",
+                    category="skill",
+                    target=skill_dir.name,
+                    message="存在目录但没有 SKILL.md 文件",
+                    suggestion="删除目录，或创建 SKILL.md",
+                ))
             continue
 
         try:
@@ -125,13 +148,45 @@ def scan_skills() -> list[AuditFinding]:
         # 检查 frontmatter
         fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", content, re.DOTALL)
         if not fm_match:
-            findings.append(AuditFinding(
-                severity="warning",
-                category="skill",
-                target=skill_dir.name,
-                message="SKILL.md 缺少 frontmatter（--- ... ---）",
-                suggestion="添加 YAML frontmatter（name、description）",
-            ))
+            if auto_fix:
+                # 自动生成 frontmatter：name 从目录名取，description 从正文第一行取
+                body_lines = content.strip().splitlines()
+                first_line = ""
+                for line in body_lines:
+                    stripped = line.strip()
+                    # 跳过空行和纯标题标记
+                    if stripped and not stripped.startswith("#"):
+                        first_line = stripped
+                        break
+                    elif stripped.startswith("#"):
+                        # 取标题内容作为 description
+                        first_line = stripped.lstrip("# ").strip()
+                        break
+                if not first_line:
+                    first_line = skill_dir.name
+                fm_block = f"---\nname: {skill_dir.name}\ndescription: {first_line}\n---\n"
+                new_content = fm_block + content
+                skill_md.write_text(new_content, encoding="utf-8")
+                # 重新读取以继续后续检查
+                content = new_content
+                fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", content, re.DOTALL)
+                findings.append(AuditFinding(
+                    severity="warning",
+                    category="skill",
+                    target=skill_dir.name,
+                    message="SKILL.md 缺少 frontmatter（--- ... ---）",
+                    suggestion="添加 YAML frontmatter（name、description）",
+                    fixed=True,
+                    fix_detail=f"已自动生成 frontmatter（name={skill_dir.name}）",
+                ))
+            else:
+                findings.append(AuditFinding(
+                    severity="warning",
+                    category="skill",
+                    target=skill_dir.name,
+                    message="SKILL.md 缺少 frontmatter（--- ... ---）",
+                    suggestion="添加 YAML frontmatter（name、description）",
+                ))
         else:
             # 解析 frontmatter
             try:
@@ -188,8 +243,35 @@ def scan_skills() -> list[AuditFinding]:
             ))
 
         # 检查孤立文件（目录下有非 SKILL.md 的 .md 文件）
-        for f in skill_dir.iterdir():
-            if f.suffix == ".md" and f != skill_md:
+        extra_md_files = [f for f in skill_dir.iterdir() if f.suffix == ".md" and f != skill_md]
+        for f in extra_md_files:
+            if auto_fix:
+                # 把额外 .md 文件内容合并到 SKILL.md 末尾，然后删除
+                try:
+                    extra_content = f.read_text(encoding="utf-8")
+                    current = skill_md.read_text(encoding="utf-8")
+                    merged = current.rstrip() + f"\n\n<!-- merged from {f.name} -->\n" + extra_content
+                    skill_md.write_text(merged, encoding="utf-8")
+                    f.unlink()
+                    findings.append(AuditFinding(
+                        severity="info",
+                        category="skill",
+                        target=f"{skill_dir.name}/{f.name}",
+                        message=f"目录中有额外的 .md 文件: {f.name}",
+                        suggestion="合并到 SKILL.md 或删除",
+                        fixed=True,
+                        fix_detail=f"已将 {f.name} 内容合并到 SKILL.md 末尾并删除原文件",
+                    ))
+                except OSError as e:
+                    logger.warning(f"auto_fix: 合并 {f} 失败: {e}")
+                    findings.append(AuditFinding(
+                        severity="info",
+                        category="skill",
+                        target=f"{skill_dir.name}/{f.name}",
+                        message=f"目录中有额外的 .md 文件: {f.name}",
+                        suggestion="合并到 SKILL.md 或删除",
+                    ))
+            else:
                 findings.append(AuditFinding(
                     severity="info",
                     category="skill",
@@ -199,6 +281,111 @@ def scan_skills() -> list[AuditFinding]:
                 ))
 
     # 注意：不再检查触发词冲突，触发逻辑已改为 LLM，不再依赖 triggers 字段
+
+    return findings
+
+
+def scan_skill_overlap() -> list[AuditFinding]:
+    """检测 skill 之间的职责重叠。
+
+    逻辑：
+    1. 收集所有 skill 的 (name, description)
+    2. 对每对 skill，用关键词重叠度判断是否职责重叠
+    3. 仅在 description 有高度重叠（>60% 的词相同）时报告
+    """
+    findings: list[AuditFinding] = []
+
+    if not SKILLS_DIR.exists():
+        return findings
+
+    # 英文停用词
+    _EN_STOP_WORDS = frozenset({
+        "the", "a", "is", "for", "to", "of", "and", "in", "on", "with", "at",
+        "an", "or", "it", "be", "as", "by", "this", "that", "are", "was",
+    })
+
+    def _extract_keywords(text: str) -> set[str]:
+        """从文本中提取关键词（中文用 jieba，英文按空格分词）。"""
+        keywords: set[str] = set()
+        # 英文词
+        en_words = re.findall(r"[a-zA-Z]+", text)
+        for w in en_words:
+            w_lower = w.lower()
+            if len(w_lower) >= 2 and w_lower not in _EN_STOP_WORDS:
+                keywords.add(w_lower)
+        # 中文词（用 jieba 分词）
+        chinese_text = re.sub(r"[a-zA-Z0-9\s\-_/\\.,;:!?(){}[\]\"'`~@#$%^&*+=|<>]", " ", text)
+        if chinese_text.strip():
+            try:
+                import jieba
+                for word in jieba.cut(chinese_text):
+                    word = word.strip()
+                    if len(word) >= 2:
+                        keywords.add(word)
+            except ImportError:
+                # jieba 不可用时，按字拆分中文（长度>=2 的连续中文片段）
+                for seg in re.findall(r"[\u4e00-\u9fff]{2,}", chinese_text):
+                    keywords.add(seg)
+        return keywords
+
+    # 收集所有 skill 的 name 和 description
+    skill_infos: list[tuple[str, str, set[str]]] = []  # (name, description, keywords)
+
+    for skill_dir in SKILLS_DIR.iterdir():
+        if not skill_dir.is_dir():
+            continue
+        skill_md = skill_dir / "SKILL.md"
+        if not skill_md.exists():
+            continue
+        try:
+            content = skill_md.read_text(encoding="utf-8")
+        except OSError:
+            continue
+
+        fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", content, re.DOTALL)
+        if not fm_match:
+            continue
+        try:
+            import yaml
+            meta = yaml.safe_load(fm_match.group(1)) or {}
+        except Exception:
+            continue
+
+        name = meta.get("name", skill_dir.name)
+        description = meta.get("description", "")
+        if not description:
+            continue
+
+        kws = _extract_keywords(description)
+        if kws:
+            skill_infos.append((name, description, kws))
+
+    # 两两比较
+    for i in range(len(skill_infos)):
+        for j in range(i + 1, len(skill_infos)):
+            name_a, desc_a, kws_a = skill_infos[i]
+            name_b, desc_b, kws_b = skill_infos[j]
+
+            overlap = kws_a & kws_b
+            if len(overlap) <= 3:
+                continue
+
+            # 检查重叠度是否 >60%（以较小集合为基准）
+            smaller = min(len(kws_a), len(kws_b))
+            if smaller == 0:
+                continue
+            overlap_ratio = len(overlap) / smaller
+            if overlap_ratio <= 0.6:
+                continue
+
+            findings.append(AuditFinding(
+                severity="warning",
+                category="skill",
+                target=f"{name_a} / {name_b}",
+                message=f"两个 skill 的 description 存在高度职责重叠（重叠词 {len(overlap)} 个，"
+                        f"重叠率 {overlap_ratio:.0%}）：{', '.join(sorted(overlap)[:10])}",
+                suggestion=f"建议检查 [{name_a}] 和 [{name_b}] 是否可以合并",
+            ))
 
     return findings
 
@@ -594,8 +781,11 @@ def scan_user_patterns(days: int = 1) -> list[AuditFinding]:
     return findings
 
 
-def run_audit() -> AuditReport:
-    """执行完整审计，返回报告。"""
+def run_audit(auto_fix: bool = True) -> AuditReport:
+    """执行完整审计，返回报告。
+
+    auto_fix=True 时，对可安全修复的发现执行自动修复，修复结果写入 finding 的 fixed 字段。
+    """
     import time
     start = time.time()
 
@@ -607,7 +797,8 @@ def run_audit() -> AuditReport:
     modules_count = len([p for p in LEARNED_MODULES_DIR.glob("*.py") if not p.name.startswith("_")]) if LEARNED_MODULES_DIR.exists() else 0
 
     findings: list[AuditFinding] = []
-    findings.extend(scan_skills())
+    findings.extend(scan_skills(auto_fix=auto_fix))
+    findings.extend(scan_skill_overlap())
     findings.extend(scan_projects())
     findings.extend(scan_learned_modules())
     findings.extend(scan_user_patterns())
@@ -653,6 +844,14 @@ def format_report_detail(report: AuditReport) -> str:
                 lines.append(f"    • [{f.target}] {f.message}")
                 if f.suggestion:
                     lines.append(f"      → {f.suggestion}")
+        lines.append("")
+
+    # 已自动修复的问题列表
+    fixed_items = [f for f in report.findings if f.fixed]
+    if fixed_items:
+        lines.append("🔧 已自动修复 ({} 条)".format(len(fixed_items)))
+        for f in fixed_items:
+            lines.append(f"  • [{f.target}] {f.fix_detail}")
         lines.append("")
 
     return "\n".join(lines)
