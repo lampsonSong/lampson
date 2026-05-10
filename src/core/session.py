@@ -1369,7 +1369,7 @@ def _build_compaction_config(
     cw = model_context_window or c.get("context_window", 131_072)
     return CompactionConfig(
         context_window=int(cw),
-        trigger_threshold=float(c.get("trigger_threshold", 0.8)),
+        trigger_threshold=float(c.get("trigger_threshold", 0.95)),
         end_threshold_percent=c.get("end_threshold_percent", 80.0),
         max_archive_per_compaction=c.get("max_archive_per_compaction", 20),
         compaction_log_max_bytes=c.get("compaction_log_max_bytes", 10 * 1024 * 1024),

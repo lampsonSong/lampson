@@ -51,7 +51,6 @@ class Agent:
         self.last_prompt_tokens: int = 0
         self.last_stop_reason: str | None = None
         self._fast_path_tool_count: int = 0
-        self._threshold_notified: bool = False
 
         self._compaction_config: CompactionConfig | None = compaction_config
         self.max_tool_rounds: int = max_tool_rounds or _DEFAULT_MAX_TOOL_ROUNDS
@@ -718,24 +717,14 @@ class Agent:
                 from src.core.skill_audit import clear_audit
                 clear_audit()
                 raise
-        # 阈值提醒：context 使用量超 trigger_threshold 时通知用户（不自动压缩）
-        if self._compaction_config and not self._threshold_notified:
+        # context 占比提醒：>= 80% 时在回复末尾追加占比信息
+        if self._compaction_config and result:
             estimated = self._estimate_context_tokens()
-            threshold_tokens = int(self._compaction_config.context_window * self._compaction_config.trigger_threshold)
-            if estimated >= threshold_tokens:
-                usage_pct = estimated / self._compaction_config.context_window * 100
-                notify_msg = (
-                    f"⚠️ 上下文已使用约 {usage_pct:.0f}%（{estimated:,} / "
-                    f"{self._compaction_config.context_window:,} tokens），"
-                    f"接近阈值。如需压缩请发送 /compaction"
-                )
-                logger.info(f"阈值提醒: {usage_pct:.0f}% context used")
-                if self.progress_callback:
-                    try:
-                        self.progress_callback(notify_msg)
-                    except Exception:
-                        pass
-                self._threshold_notified = True
+            cw = self._compaction_config.context_window
+            end_threshold_percent = self._compaction_config.end_threshold_percent
+            usage_pct = estimated / cw * 100 if cw else 0
+            if usage_pct >= end_threshold_percent:
+                result += f"\n---\n📊 Context: {estimated:,} / {cw:,} tokens ({usage_pct:.0f}%)"
 
         return result
 
