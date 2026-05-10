@@ -201,7 +201,6 @@ class FeishuClient:
                 "fields": [
                     {
                         "is_short": i % 2 == 0,
-                        "long_form": i % 2 == 1,
                         "value": {
                             "tag": "lark_md",
                             "content": f"**{f.get('label', '')}**\n{f.get('value', '')}",
