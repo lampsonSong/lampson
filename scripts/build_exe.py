@@ -44,22 +44,79 @@ def build_one(name: str, entry_script: str, project_root: Path) -> Path | None:
 
 
 def build_uninstall_entry(project_root: Path) -> Path:
-    """生成卸载程序的入口脚本。"""
+    """生成卸载程序的入口脚本（内联卸载逻辑，不依赖外部 import）。"""
     uninstall_script = project_root / "scripts" / "_uninstall_entry.py"
     uninstall_script.write_text(
-        '''"""Lamix 卸载程序入口。"""
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from scripts.install_windows import uninstall
+        """
+import subprocess
+import shutil
+from pathlib import Path
+
+def is_admin():
+    try:
+        import ctypes
+        return ctypes.windll.shell32.IsUserAnAdmin() != 0
+    except Exception:
+        return False
+
+def uninstall():
+    print("=" * 50)
+    print(" Lamix 卸载程序")
+    print("=" * 50)
+
+    if not is_admin():
+        print("注意：某些操作可能需要管理员权限")
+    print()
+
+    # 删除任务计划
+    task_name = "Lamix"
+    try:
+        result = subprocess.run(
+            ["schtasks", "/delete", "/tn", task_name, "/f"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            print(f"已删除开机自启动任务：{task_name}")
+        elif "找不到" in result.stderr or "not found" in result.stderr.lower():
+            print(f"任务 {task_name} 不存在，跳过")
+        else:
+            print(f"删除任务失败：{result.stderr.strip()}")
+    except Exception as e:
+        print(f"删除任务时出错：{e}")
+
+    # 询问是否删除配置目录
+    print()
+    data_dir = Path.home() / ".lamix"
+    if data_dir.exists():
+        print(f"配置目录：{data_dir}")
+        print("  保留：下次安装可直接使用，配置、记忆、技能全部保留。")
+        print("  删除：彻底清除所有个人数据。")
+        choice = input("\n是否删除配置目录？(y/N): ").strip().lower()
+        if choice in ("y", "yes"):
+            try:
+                shutil.rmtree(data_dir)
+                print(f"已删除配置目录：{data_dir}")
+            except Exception as e:
+                print(f"删除失败：{e}")
+                print(f"请手动删除：{data_dir}")
+        else:
+            print(f"已保留配置目录：{data_dir}")
+    else:
+        print("配置目录不存在，无需清理。")
+
+    print()
+    print("卸载完成。项目代码需手动删除。")
+
 if __name__ == "__main__":
-    uninstall()
-    input("\\n按回车键退出...")
-''',
+    try:
+        uninstall()
+    except Exception as e:
+        print(f"卸载出错：{e}")
+    input("\n按回车键退出...")
+""",
         encoding="utf-8",
     )
     return uninstall_script
-
 
 def main():
     project_root = Path(__file__).resolve().parent.parent

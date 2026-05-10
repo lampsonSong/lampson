@@ -415,8 +415,12 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command is None:
-        print(HELP_TEXT)
-        sys.exit(0)
+        # 双击 exe 或无参数时，默认启动交互式 CLI
+        run_cli(argparse.Namespace(
+            query=None, query_c=None, memory=None, skills=None,
+            feishu=None, update=None, help_cmd=False,
+        ))
+        return
 
     args.func(args)
 
