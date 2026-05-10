@@ -324,8 +324,13 @@ def main() -> None:
 
     config = load_config()
     if not is_config_complete(config):
-        print("[daemon] 配置不完整，无法启动。", file=sys.stderr)
-        sys.exit(1)
+        print("[daemon] LLM 未配置，请运行 lamix-cli 完成初始配置后重启 daemon。", flush=True)
+        _write_daemon_pid()
+        _heartbeat_mgr = HeartbeatManager(task_id="daemon")
+        _heartbeat_mgr.start()
+        _shutdown.wait()
+        _heartbeat_mgr.stop(user_initiated=True)
+        return
 
     # ── 初始化 SessionManager ──────────────────────────────────────────────
     mgr = get_session_manager(config)
