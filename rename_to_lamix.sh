@@ -69,12 +69,12 @@ echo "[rename] 6/10 更新 GitHub remote (需手动去 GitHub 网站改名仓库
 echo "[rename] 当前 remote: $(git remote get-url origin)"
 
 # ── 7. 合并分支 ───────────────────────────────────────────────────────────
-echo "[rename] 7/10 合并分支到 main 并推送"
+echo "[rename] 7/10 合并分支到 master 并推送"
 cd ~/lamix
 git fetch origin
-git checkout main
+git checkout master
 git merge refactor/rename-to-lamix --no-edit
-git push origin main
+git push origin master
 echo "[rename] 分支已合并并推送"
 
 # ── 8. 重启 daemon ────────────────────────────────────────────────────────

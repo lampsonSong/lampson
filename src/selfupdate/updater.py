@@ -5,7 +5,7 @@
   2. LLM 生成修改方案（文件列表 + 各文件完整内容）
   3. 展示方案给用户确认
   4. 确认后：git checkout -b self-update/<timestamp>，写入文件，git commit
-  5. 用户可随时 /update rollback 回滚到 main
+  5. 用户可随时 /update rollback 回滚到 master
 """
 
 from __future__ import annotations
@@ -84,7 +84,7 @@ def _check_git_clean(project_root: Path) -> tuple[bool, str]:
 
 def _get_current_branch(project_root: Path) -> str:
     _, out, _ = _run_git(["branch", "--show-current"], project_root)
-    return out or "main"
+    return out or "master"
 
 
 def _generate_update_plan(description: str, llm: LLMClient) -> dict[str, Any]:
@@ -227,13 +227,13 @@ def run_update(description: str, llm: LLMClient) -> str:
     ]
     if errors:
         result_lines.append(f"失败文件：{', '.join(errors)}")
-    result_lines.append('\n使用 "/update rollback" 可回滚到 main 分支。')
+    result_lines.append('\n使用 "/update rollback" 可回滚到 master 分支。')
 
     return "\n".join(result_lines)
 
 
 def run_rollback() -> str:
-    """回滚自更新：切换回 main 分支并删除当前 self-update 分支。"""
+    """回滚自更新：切换回 master 分支并删除当前 self-update 分支。"""
     if not sys.stdin.isatty():
         return "[回滚不可用] 当前运行在非交互模式，回滚需要在 CLI REPL 中执行。"
 
@@ -244,24 +244,24 @@ def run_rollback() -> str:
         return f"当前分支是 '{current_branch}'，不是 self-update 分支，无需回滚。"
 
     try:
-        confirm = input(f"确认回滚？将切换回 main 并删除分支 '{current_branch}'(y/N): ").strip().lower()
+        confirm = input(f"确认回滚？将切换回 master 并删除分支 '{current_branch}'(y/N): ").strip().lower()
     except (KeyboardInterrupt, EOFError):
         return "回滚已取消。"
 
     if confirm != "y":
         return "回滚已取消。"
 
-    # 切换回 main
-    code, _, err = _run_git(["checkout", "main"], project_root)
+    # 切换回 master
+    code, _, err = _run_git(["checkout", "master"], project_root)
     if code != 0:
-        return f"[回滚失败] 无法切换到 main：{err}"
+        return f"[回滚失败] 无法切换到 master：{err}"
 
     # 删除 self-update 分支
     code, _, err = _run_git(["branch", "-D", current_branch], project_root)
     if code != 0:
-        return f"已切换到 main，但删除分支失败：{err}"
+        return f"已切换到 master，但删除分支失败：{err}"
 
-    return f"已回滚到 main，分支 '{current_branch}' 已删除。"
+    return f"已回滚到 master，分支 '{current_branch}' 已删除。"
 
 
 def list_update_branches() -> str:
