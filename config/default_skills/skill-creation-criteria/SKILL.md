@@ -1,6 +1,6 @@
 ---
 name: skill-creation-criteria
-description: 什么内容应该沉淀为 skill，什么不该。
+description: 什么内容应该沉淀为 skill，什么不该。用户信息存放规范。
 ---
 
 # Skill 创建标准
@@ -16,7 +16,7 @@ description: 什么内容应该沉淀为 skill，什么不该。
 - 简单查询、闲聊、一次性操作
 - 行为偏好 → 放 memory
 - 项目特定信息 → 放 projects/
-- 用户个人信息 → 放 users/
+- 用户个人信息 → 放 `~/.lamix/users/{user_id}.md`
 
 ## 格式要求
 
@@ -35,3 +35,9 @@ description: 一句话描述 + 使用场景
 
 - 小写英文，连字符分隔
 - 名字要能让人一眼看出用途
+
+## 用户数据存放规范
+
+- 用户个人信息（偏好、习惯、纠正记录）→ `~/.lamix/users/{user_id}.md`
+- 不要在 projects/ 或 skills/ 里存用户信息
+- 不要在根目录散落用户相关的 md 文件
