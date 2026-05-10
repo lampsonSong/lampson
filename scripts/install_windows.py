@@ -288,11 +288,28 @@ def uninstall() -> None:
     except Exception as e:
         print(f"❌ 删除任务时出错：{e}")
 
-    # 提示手动清理
+    # 用户数据清理选择
+    print()
+    data_dir = Path.home() / ".lamix"
+    if data_dir.exists():
+        print(f"配置目录 {data_dir} 仍存在。")
+        print("  保留：下次安装可直接使用，配置、记忆、技能全部保留。")
+        print("  删除：彻底清除所有个人数据。")
+        choice = input("\n是否删除配置目录？(y/N): ").strip().lower()
+        if choice in ("y", "yes", "是"):
+            import shutil
+            try:
+                shutil.rmtree(data_dir)
+                print(f"✓ 已删除配置目录：{data_dir}")
+            except Exception as e:
+                print(f"❌ 删除失败：{e}")
+                print(f"  请手动删除：{data_dir}")
+        else:
+            print(f"  已保留配置目录：{data_dir}")
+
     print("\n卸载完成。")
-    print("注意：以下内容未自动删除，如需清理请手动操作：")
-    print(f"  - 配置目录：{Path.home() / '.lamix'}")
-    print(f"  - 项目代码：{Path(__file__).parent.parent}")
+    project_dir = Path(__file__).parent.parent
+    print(f"项目代码需手动删除：{project_dir}")
     print()
 
 
