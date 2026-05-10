@@ -323,6 +323,68 @@ def is_config_complete(config: dict[str, Any]) -> bool:
         return False
 
 
+def _select(prompt_text: str, options: list[tuple[str, str]]) -> str | None:
+    """用 prompt_toolkit 实现上下箭头选择菜单。
+
+    Args:
+        prompt_text: 显示在菜单上方的提示文字
+        options: [(value, label), ...] 选项列表
+
+    Returns:
+        选中项的 value，Esc/Ctrl+C 返回 None
+    """
+    from prompt_toolkit import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+
+    selected = [0]
+    result: list[str | None] = [None]
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    @kb.add("k")
+    def _up(event: Any) -> None:
+        selected[0] = (selected[0] - 1) % len(options)
+
+    @kb.add("down")
+    @kb.add("j")
+    def _down(event: Any) -> None:
+        selected[0] = (selected[0] + 1) % len(options)
+
+    @kb.add("enter")
+    def _enter(event: Any) -> None:
+        result[0] = options[selected[0]][0]
+        event.app.exit()
+
+    @kb.add("escape")
+    @kb.add("c-c")
+    def _cancel(event: Any) -> None:
+        result[0] = None
+        event.app.exit()
+
+    def _get_text() -> list[tuple[str, str]]:
+        fragments: list[tuple[str, str]] = []
+        fragments.append(("bold", f"{prompt_text}\n"))
+        fragments.append(("", "(↑/↓ 选择, Enter 确认, Esc 退出)\n\n"))
+        for i, (_, label) in enumerate(options):
+            if i == selected[0]:
+                fragments.append(("fg:cyan bold", f"  ❯ {label}\n"))
+            else:
+                fragments.append(("", f"    {label}\n"))
+        return fragments
+
+    app: Application[None] = Application(
+        layout=Layout(HSplit([Window(FormattedTextControl(_get_text))])),
+        key_bindings=kb,
+        full_screen=False,
+    )
+    app.run()
+    return result[0]
+
+
 def run_setup_wizard() -> dict[str, Any]:
     """首次运行引导用户填写配置，返回配置字典。"""
     print(f"\n{_bold('欢迎使用 Lamix！')}首次运行需要配置 LLM 供应商信息。\n")
@@ -331,17 +393,15 @@ def run_setup_wizard() -> dict[str, Any]:
 
     try:
         # 1. 选择 Provider
-        while True:
-            print(_bold("请选择 LLM 供应商："))
-            print("  1. 智谱 GLM（推荐）")
-            print("  2. MiniMax")
-            print("  3. DeepSeek")
-            print("  4. 自定义（手动填写 URL）")
-            provider_choice = input("请输入编号 [1-4]: ").strip()
-
-            if provider_choice in ["1", "2", "3", "4"]:
-                break
-            print(_red("无效输入，请输入 1-4 之间的数字。\n"))
+        provider_choice = _select("请选择 LLM 供应商：", [
+            ("1", "智谱 GLM（推荐）"),
+            ("2", "MiniMax"),
+            ("3", "DeepSeek"),
+            ("4", "自定义（手动填写 URL）"),
+        ])
+        if provider_choice is None:
+            print("\n\n配置已取消。")
+            raise SystemExit(1)
 
         # 2. 设置预设或自定义配置
         if provider_choice in PROVIDER_PRESETS:
@@ -376,33 +436,24 @@ def run_setup_wizard() -> dict[str, Any]:
 
         # 4. 选择模型
         if models:
-            print(f"\n{_bold('选择模型：')}")
-            for i, model in enumerate(models, 1):
-                if model == default_model:
-                    print(f"  {i}. {model}（默认）")
-                else:
-                    print(f"  {i}. {model}")
-            print(f"  {len(models) + 1}. 手动输入")
+            model_options: list[tuple[str, str]] = []
+            for model in models:
+                label = f"{model}（默认）" if model == default_model else model
+                model_options.append((model, label))
+            model_options.append(("__manual__", "手动输入"))
 
-            while True:
-                model_choice = input(f"请输入编号 [1-{len(models) + 1}]（回车使用默认）: ").strip()
+            model_choice = _select("选择模型：", model_options)
+            if model_choice is None:
+                print("\n\n配置已取消。")
+                raise SystemExit(1)
 
-                if not model_choice:
+            if model_choice == "__manual__":
+                selected_model = input("请输入模型名: ").strip()
+                if not selected_model:
+                    print(_yellow("模型名为空，使用默认模型"))
                     selected_model = default_model
-                    break
-                elif model_choice.isdigit():
-                    idx = int(model_choice) - 1
-                    if 0 <= idx < len(models):
-                        selected_model = models[idx]
-                        break
-                    elif idx == len(models):
-                        selected_model = input("请输入模型名: ").strip()
-                        if selected_model:
-                            break
-                        print(_red("模型名不能为空。\n"))
-                        continue
-
-                print(_red(f"无效输入，请输入 1-{len(models) + 1} 之间的数字。\n"))
+            else:
+                selected_model = model_choice
         else:
             # 自定义 provider，直接输入模型名
             selected_model = input(f"\n请输入模型名（回车使用默认 {config['llm']['model']}）: ").strip()
@@ -417,9 +468,11 @@ def run_setup_wizard() -> dict[str, Any]:
             print(_green("✓ 连接成功"))
         else:
             print(_yellow("⚠ 连接验证失败，但您可以继续使用（请检查 API Key 和网络）"))
-            retry = input("是否重新配置？(y/N): ").strip().lower()
-            if retry == "y":
-                # 递归调用重新配置
+            retry = _select("是否重新配置？", [
+                ("yes", "是，重新配置"),
+                ("no", "否，继续使用"),
+            ])
+            if retry == "yes":
                 return run_setup_wizard()
 
         # 6. 飞书配置（可选）
