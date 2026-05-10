@@ -16,6 +16,22 @@
 > Phase 1-4 的代码均在 macOS 上编写并通过语法检查和单元测试（474 passed）。
 > Phase 0 和 Phase 5 需要在实际 Windows 环境中验证。
 
+### Phase 完成详情
+
+| Phase | 关键改动 |
+|-------|---------|
+| Phase 1 | `ProcessManager` 抽象基类 + `PosixProcessManager` + `WindowsProcessManager`，watchdog 重构使用抽象接口，`HeartbeatManager` 支持 `stop.flag` 优雅终止 |
+| Phase 2 | `desktop.py` 的 `query_ui_element` 拆分为 macOS（AppleScript）/ Windows（PowerShell UI Automation）两个分支 |
+| Phase 3 | `manager.py` 捕获 `NotImplementedError`，daemon SSL patch 仅 macOS 执行，全项目 `open()` 显式 `encoding="utf-8"` |
+| Phase 4 | `scripts/install_windows.py`（安装/卸载/schtasks 注册/pythonw 无窗口启动），`scripts/build_exe.py`（PyInstaller 打包 exe）|
+
+### 其他跨平台适配
+
+- search.py: `_find_rg()` 跨平台路径探测（macOS/Linux/Windows 常见路径）
+- signal 处理: `add_signal_handler` 捕获 NotImplementedError
+- Config 热重载: daemon 每 30 秒检测 config.yaml mtime，飞书配置变更无需重启
+- 安装脚本: pythonw.exe 启动 daemon 避免控制台弹窗，卸载时用户选择是否删除配置目录
+
 
 ## 1. 平台差异分析
 

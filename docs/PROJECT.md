@@ -176,7 +176,92 @@ skills_management:
 
 ---
 
-## 八、部署
+## 八、特色功能
+
+### 8.1 Boot Tasks（重启验证）
+
+改了 daemon 代码后需要重启才能生效。Boot Task 机制让你在重启前写好验证任务，daemon 重启后自动执行并汇报结果。
+
+**使用场景**：改了 compaction 逻辑，重启后自动验证压缩是否正常。
+
+```bash
+# 写入 boot task（重启前执行）
+file_write("~/.lamix/boot_tasks.json", '[{"task": "验证改动：发几条消息测试交互，检查日志无异常"}]')
+
+# 重启 daemon
+/restart
+```
+
+daemon 启动后读取 boot_tasks.json，把任务注入 session 执行，完成后清空文件。
+
+### 8.2 定时任务
+
+通过 `task_schedule` 工具注册定时任务，支持三种触发方式：
+
+| 类型 | 说明 | 示例 |
+|------|------|------|
+| `interval` | 固定间隔 | 每 30 分钟检查一次 |
+| `cron` | 定时执行 | 每天凌晨 4 点自我审计 |
+| `delayed` | 一次性延迟 | 5 分钟后提醒 |
+
+```bash
+# 注册间隔任务
+task_schedule(action="schedule", task_id="monitor", task_type="interval", interval_seconds=1800, prompt="检查服务状态")
+
+# 注册 cron 任务
+task_schedule(action="schedule", task_id="daily_report", task_type="cron", cron_hour=9, cron_minute=0, prompt="发送昨日工作汇总")
+
+# 查看所有任务
+task_schedule(action="list")
+
+# 取消任务
+task_schedule(action="cancel", task_id="monitor")
+```
+
+### 8.3 每日自我审计
+
+daemon 每天凌晨 4 点自动运行自我审计，扫描 skills/projects/learned_modules 的健康状态：
+
+- **自动修复**：空目录删除、散落 .md 合并到 SKILL.md、缺失 frontmatter 自动生成
+- **重叠检测**：检查 skill 之间的职责重叠，建议合并
+- **问题报告**：通过飞书发送审计结果
+
+可在 `config.yaml` 中关闭：
+
+```yaml
+self_audit:
+  enabled: false
+```
+
+### 8.4 桌面控制（键鼠 + 截图）
+
+Lamix 可以操作鼠标键盘和截屏，实现 GUI 自动化。
+
+**前提条件**：
+- macOS：系统设置 → 隐私与安全 → 辅助功能 → 授予终端/Python 权限
+- Windows：以管理员身份运行，或授予对应权限
+- 依赖 `pyautogui` 和 `Pillow`（默认安装）
+
+**能力**：截图、点击、输入文字、按键、组合键、滚动、拖拽、UI 元素查询
+
+### 8.5 视觉分析
+
+通过截图 + 视觉模型分析屏幕内容，配合桌面控制实现"看到就能操作"。
+
+**前提条件**：在 `config.yaml` 中配置视觉模型：
+
+```yaml
+vision:
+  model: "glm-4.6v"
+```
+
+未配置时，视觉分析工具调用会提示用户配置。
+
+### 8.6 Config 热重载
+
+daemon 运行中修改 `~/.lamix/config.yaml`（比如改了飞书配置），无需重启。daemon 每 30 秒检测配置文件变化，自动热重载飞书 adapter。
+
+## 九、部署
 
 ```bash
 # 安装
@@ -194,7 +279,7 @@ launchctl kickstart -k gui/$(id -u)/com.lamix.gateway && sleep 1 && launchctl lo
 
 ---
 
-## 九、已知问题
+## 十、已知问题
 
 - 飞书 WebSocket 断线后不会自动重连
 - `_cosine_sim` 使用 `zip(strict=True)` 需要 Python 3.10+
