@@ -52,19 +52,23 @@ _MAX_TOTAL_BYTES = 10 * 1024  # 10KB
 
 
 
-def _send_feishu(config: dict, text: str) -> None:
-    """发送飞书消息。"""
-    owner_chat_id = config.get("feishu", {}).get("owner_chat_id", "").strip()
-    app_id = config.get("feishu", {}).get("app_id", "").strip()
-    app_secret = config.get("feishu", {}).get("app_secret", "").strip()
-    if not owner_chat_id or not app_id or not app_secret:
-        return
+def _notify_user(text: str, config: dict | None = None) -> None:
+    """通过用户当前渠道发送通知。
+
+    优先使用 session 的 partial_sender（自动匹配渠道），
+    fallback 到 print（CLI 模式或无 session 时）。
+    """
+    # 优先走 session partial_sender
     try:
-        from src.feishu.client import FeishuClient
-        client = FeishuClient(app_id=app_id, app_secret=app_secret)
-        client.send_message(receive_id=owner_chat_id, text=text, receive_id_type="chat_id")
+        from src.tools import session as session_tool
+        current_session = session_tool.get_current_session()
+        if current_session and current_session.partial_sender:
+            current_session.partial_sender(text)
+            return
     except Exception:
         pass
+    # Fallback: daemon 启动早期可能没有 session，直接 print
+    print(f"[daemon] {text}", flush=True)
 
 
 # ── 任务回调 ────────────────────────────────────────────────────────────────
@@ -79,7 +83,7 @@ def _self_audit_callback() -> None:
         if len(content) > 4000:
             content = content[:4000] + "\n\n...（报告过长已截断）"
         _audit_log(f"[self_audit] 审计完成，开始发送报告")
-        _send_feishu(config, f"🕐 Lamix 自我审计报告\n\n{content}")
+        _notify_user(f"🕐 Lamix 自我审计报告\n\n{content}")
         print("[self_audit] 审计完成并已发送", flush=True)
     except Exception as e:
         print(f"[self_audit] 执行失败: {e}", flush=True)
@@ -165,7 +169,7 @@ def _notify_boot_tasks_running(config: dict, tasks: list[dict]) -> None:
         if len(desc) > 80:
             desc = desc[:77] + "..."
         lines.append(f"{i}. {desc}")
-    _send_feishu(config, "\n".join(lines))
+    _notify_user("\n".join(lines))
 
 
 def _write_boot_task(task: dict) -> None:

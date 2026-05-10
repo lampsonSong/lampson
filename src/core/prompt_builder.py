@@ -422,13 +422,8 @@ def load_user() -> str:
 
 
 def _notify_user_md_oversize(length: int) -> None:
-    """USER.md 超长时通过当前渠道通知用户。
-
-    优先使用 session 的 partial_sender（和用户当前对话的渠道一致），
-    fallback 到飞书直接发送（daemon 场景下可能没有活跃 session）。
-    """
+    """USER.md 超长时通过当前渠道通知用户。"""
     warning = f"⚠ USER.md 已达 {length} 字符（上限 {USER_MD_MAX_LENGTH}），请精简内容。"
-    # 1. 优先走 session 的 partial_sender（自动匹配当前渠道）
     try:
         from src.tools import session as session_tool
         current_session = session_tool.get_current_session()
@@ -437,24 +432,7 @@ def _notify_user_md_oversize(length: int) -> None:
             return
     except Exception:
         pass
-    # 2. Fallback: 通过飞书直接发（daemon 场景）
-    try:
-        from src.core.config import load_config
-        config = load_config()
-        owner_chat_id = config.get("feishu", {}).get("owner_chat_id", "").strip()
-        app_id = config.get("feishu", {}).get("app_id", "").strip()
-        app_secret = config.get("feishu", {}).get("app_secret", "").strip()
-        if not owner_chat_id or not app_id or not app_secret:
-            return
-        from src.feishu.client import FeishuClient
-        client = FeishuClient(app_id=app_id, app_secret=app_secret)
-        client.send_message(
-            receive_id=owner_chat_id,
-            text=warning,
-            receive_id_type="chat_id",
-        )
-    except Exception:
-        pass  # 通知失败不影响主流程
+    print(warning, flush=True)
 
 
 # ── Model Guidance ────────────────────────────────────────────────────────────

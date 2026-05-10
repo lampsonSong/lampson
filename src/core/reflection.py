@@ -224,13 +224,13 @@ def execute_learnings(learnings: list[dict[str, Any]]) -> list[str]:
             hint = _create_skill(target, content, reason)
             if hint:
                 hints.append(hint)
-                _notify_feishu(f"📝 **Skill 新建**\n\n- 名称：{target}\n- 原因：{reason}")
+                _notify_user(f"📝 **Skill 新建**\n\n- 名称：{target}\n- 原因：{reason}")
 
         elif ltype == "skill_update":
             hint = _update_skill(target, content, reason)
             if hint:
                 hints.append(hint)
-                _notify_feishu(f"🔧 **Skill 更新**\n\n- 名称：{target}\n- 原因：{reason}")
+                _notify_user(f"🔧 **Skill 更新**\n\n- 名称：{target}\n- 原因：{reason}")
 
         elif ltype == "module_create":
             hint = _create_module(target, content, reason)
@@ -251,35 +251,19 @@ def execute_learnings(learnings: list[dict[str, Any]]) -> list[str]:
 # ── 飞书通知 ────────────────────────────────────────────────────────────────
 
 
-def _notify_feishu(message: str) -> None:
-    """发送飞书卡片通知（skill 变更时调用）。静默失败，不阻塞主流程。"""
+def _notify_user(message: str) -> None:
+    """通过用户当前渠道发送通知（skill 变更时调用）。静默失败，不阻塞主流程。"""
     try:
-        config_path = Path.home() / ".lamix" / "config.yaml"
-        if not config_path.exists():
+        from src.tools import session as session_tool
+        current_session = session_tool.get_current_session()
+        if current_session and current_session.partial_sender:
+            current_session.partial_sender(message)
+            logger.info("[反思] 通知已通过当前渠道发送")
             return
-        with open(config_path, encoding="utf-8") as f:
-            config = yaml.safe_load(f)
-
-        owner_chat_id = config.get("feishu", {}).get("owner_chat_id", "").strip()
-        app_id = config.get("feishu", {}).get("app_id", "").strip()
-        app_secret = config.get("feishu", {}).get("app_secret", "").strip()
-
-        if not owner_chat_id or not app_id or not app_secret:
-            return
-
-        from src.feishu.client import FeishuClient
-        client = FeishuClient(app_id=app_id, app_secret=app_secret)
-        client.send_card(
-            receive_id=owner_chat_id,
-            card={
-                "config": {"wide_screen_mode": True},
-                "elements": [{"tag": "markdown", "content": message}],
-            },
-            receive_id_type="chat_id",
-        )
-        logger.info("[反思] 飞书通知已发送")
-    except Exception as e:
-        logger.warning(f"[反思] 飞书通知失败: {e}")
+    except Exception:
+        pass
+    # Fallback: print
+    print(f"[反思] {message}", flush=True)
 
 
 # ── 沉淀执行 ─────────────────────────────────────────────────────────────────
