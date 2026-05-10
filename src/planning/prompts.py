@@ -3,10 +3,8 @@
 # ── 共用常量块 ──
 
 PERSISTENT_ENV_BLOCK = """## 环境信息
-- 运行机器：macOS (Darwin, Apple Silicon)
-- lamix 项目路径：/Users/songyuhao/lamix
-- 工作目录：/Users/songyuhao
-- 已知远程机器：train40 (IP: 10.136.61.40, 跳板: jump2@10.92.160.31)
+- 运行机器：由运行环境决定
+- lamix 项目路径：由运行环境决定
 - 本机只能执行本地命令，操作远程需 SSH
 - 文件读取 100KB 限制，shell 默认超时 30 秒
 
