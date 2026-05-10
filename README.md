@@ -2,8 +2,7 @@
 
 自更新的 AI Agent daemon，和你一起探索这个世界的AI伙计。
 
-<details>
-<summary><strong>为什么做 Lamix</strong></summary>
+## 为什么做 Lamix
 
 LLM 的核心能力是理解语言，但实际把一件事做成，还需要大量 LLM 自身不具备的能力：
 
@@ -26,8 +25,6 @@ Lamix 把这些能力拆成三层：
 其中反思不只是做对了才沉淀。被用户纠正的错误、过时的方案、不再适用的技能，同样是学习——更新比新增更重要。
 
 它不是一个聊天机器人，是一个会学习的执行者。每次完成任务后自主判断有没有值得记住的东西——新发现的工作流沉淀为 skill，项目相关的信息更新到 project，通用知识归档为 info。过时的知识主动淘汰，不让记忆变成负担。用得越久越懂你。
-
-</details>
 
 <details>
 <summary><strong>功能</strong></summary>
@@ -87,13 +84,16 @@ lamix gateway
 
 ### Windows
 
-**推荐：一键安装**
+<details>
+<summary><strong>一键安装（推荐）</strong></summary>
 
 下载源码后，双击 `scripts/install.bat`，自动安装依赖、构建 exe。
 
 产物在 `dist/` 目录：
 - **lamix.exe** — 双击启动
 - **lamix-uninstall.exe** — 双击卸载
+
+</details>
 
 <details>
 <summary>手动安装</summary>
