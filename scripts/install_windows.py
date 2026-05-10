@@ -353,8 +353,8 @@ def main() -> None:
     print("=" * 60)
     print()
     print("下一步：")
-    print("  1. 运行 'lamix-cli --config' 进行初始配置")
-    print("  2. 运行 'lamix-cli' 开始使用")
+    print("  1. 运行 'lamix config' 进行初始配置")
+    print("  2. 运行 'lamix cli' 开始使用")
     print()
 
     if not task_registered:

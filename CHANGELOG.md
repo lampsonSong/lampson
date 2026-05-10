@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.0] - 2026-05-10
+
+### Changed
+
+- 命令体系重构：顶层命令从 `lamix-cli` 改为 `lamix`，通过子命令分发
+  - `lamix cli` — 交互式 CLI（原 `lamix-cli`）
+  - `lamix gateway` — 启动 daemon（原 `python -m src.daemon`）
+  - `lamix config` — 显示当前配置（原 `lamix-cli --config`）
+  - `lamix model` — 模型管理（占位）
+  - `lamix update` — 自更新（占位）
+  - `lamix -V` — 显示版本号
+- Windows exe 产物从 `lamix-cli.exe` 改为 `lamix.exe`
+
 ## [0.1.0] - 2025-05-10
 
 ### Added
@@ -35,7 +48,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
-- 命令名 `lamix` → `lamix-cli`（区分 daemon 模式）
+- 命令名统一为 `lamix`，通过子命令分发（cli / gateway / model / update / config）
 - 默认分支 `main` → `master`
 - `is_config_complete` 检查 api_key 而非 base_url（修复 wizard 不触发）
 - 编码：全项目 `open()` 显式 `encoding="utf-8"`（Windows GBK 兼容）

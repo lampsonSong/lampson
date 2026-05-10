@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lamix"
-version = "0.1.0"
+version = "0.2.0"
 description = "一起认识这个世界的AI伙计"
 requires-python = ">=3.11"
 dependencies = [
@@ -24,7 +24,7 @@ dependencies = [
 all = ["lamix"]
 
 [project.scripts]
-lamix-cli = "src.cli:main"
+lamix = "src.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

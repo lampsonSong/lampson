@@ -1,14 +1,14 @@
 """构建 Windows exe 可执行文件。
 
-使用 PyInstaller 将 lamix-cli 和卸载程序打包为单文件 .exe。
-用户双击 lamix-cli.exe 启动配置向导和交互式 CLI。
+使用 PyInstaller 将 lamix 和卸载程序打包为单文件 .exe。
+用户双击 lamix.exe 启动配置向导和交互式 CLI。
 双击 lamix-uninstall.exe 执行卸载。
 
 依赖：pip install pyinstaller
 
 用法：
     python scripts/build_exe.py
-    # 产出在 dist/lamix-cli.exe 和 dist/lamix-uninstall.exe
+    # 产出在 dist/lamix.exe 和 dist/lamix-uninstall.exe
 """
 
 import os
@@ -76,9 +76,9 @@ def main():
 
     results = []
 
-    # 1. 构建 lamix-cli.exe
+    # 1. 构建 lamix.exe
     cli_entry = str(project_root / "src" / "cli.py")
-    results.append(build_one("lamix-cli", cli_entry, project_root))
+    results.append(build_one("lamix", cli_entry, project_root))
 
     # 2. 构建 lamix-uninstall.exe
     uninstall_entry = build_uninstall_entry(project_root)
@@ -92,7 +92,7 @@ def main():
         for p in successes:
             print(f"  {p}")
         print("\n用户使用方式：")
-        print("  双击 lamix-cli.exe -> 启动配置向导和交互式 CLI")
+        print("  双击 lamix.exe -> 启动配置向导和交互式 CLI")
         print("  双击 lamix-uninstall.exe -> 卸载 Lamix")
     else:
         print("构建失败。")

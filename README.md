@@ -61,10 +61,10 @@ pip install -e .
 
 ```bash
 # 方式一：交互式 CLI
-lamix-cli
+lamix cli
 
 # 方式二：后台 daemon（飞书消息接收）
-python -m src.daemon
+lamix gateway
 ```
 
 ### Windows
@@ -115,13 +115,13 @@ python scripts/install_windows.py
 
 ```bash
 # 交互式聊天
-lamix-cli
+lamix cli
 
 # 单条查询
-lamix-cli "帮我查一下今天天气"
+lamix cli "帮我查一下今天天气"
 
 # 查看配置
-lamix-cli --config
+lamix config
 ```
 
 首次运行会进入配置向导，引导填写 LLM API Key 和飞书凭证。
@@ -131,15 +131,15 @@ lamix-cli --config
 下载源码后，双击 `scripts/install.bat`，自动安装依赖、构建 exe。
 
 产物在 `dist/` 目录：
-- **lamix-cli.exe** — 双击启动
+- **lamix.exe** — 双击启动
 - **lamix-uninstall.exe** — 双击卸载
 
 ### Daemon 模式（后台常驻）
 
-> 首次使用请先运行 `lamix-cli` 完成初始配置（LLM 供应商、API Key 等），再启动 daemon。
+> 首次使用请先运行 `lamix cli` 完成初始配置（LLM 供应商、API Key 等），再启动 daemon。
 
 ```bash
-python -m src.daemon
+lamix gateway
 ```
 
 Daemon 模式启动后通过飞书 WebSocket 接收消息，配合 watchdog 实现进程守护。修改配置后无需重启，daemon 每 30 秒自动热重载。

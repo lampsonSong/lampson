@@ -1,12 +1,19 @@
-"""CLI 入口：基于 prompt_toolkit 的 REPL。
+"""Lamix 顶层命令分发器。
 
-职责仅限：参数解析 → 构建 Session → REPL 循环。
-所有业务逻辑在 core/session.py，LLM/工具/规划在 core/agent.py。
+lamix              → 显示帮助
+lamix cli [query]  → 交互式 CLI（启动 daemon + REPL）
+lamix gateway      → 仅启动 daemon
+lamix model        → 模型管理（占位）
+lamix update       → 自更新（占位）
+lamix config       → 显示当前配置
+lamix -V/--version → 版本号
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
+import textwrap
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
@@ -28,6 +35,15 @@ PROMPT_STYLE = Style.from_dict({
 })
 
 
+def _get_version() -> str:
+    """从 pyproject.toml 的 importlib.metadata 读取版本号。"""
+    try:
+        from importlib.metadata import version
+        return version("lamix")
+    except Exception:
+        return "0.2.0"
+
+
 def _cli_partial_sender(text: str) -> None:
     """CLI 下 compaction 等进度文案即时打印。"""
     print(text, flush=True)
@@ -42,79 +58,6 @@ def _cli_progress_callback(event: dict) -> None:
     result_preview = event.get("result_preview", "")
     round_num = event.get("round", "?")
     print(f"  [工具 {round_num}] {tool}({args_preview}) → {result_preview}", flush=True)
-
-
-def _parse_args() -> tuple[str | None, bool]:
-    """解析命令行参数，返回 (input_text, is_slash_command)。
-
-    返回 None 表示进入交互式 REPL 模式。
-    """
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        prog="lamix-cli",
-        description="Lamix CLI 智能助手",
-        add_help=True,
-    )
-    parser.add_argument(
-        "query", nargs="?", default=None,
-        help="直接对话内容（单条查询模式）",
-    )
-    parser.add_argument(
-        "-c", dest="query_c", default=None, metavar="QUERY",
-        help="直接对话内容（显式指定）",
-    )
-    parser.add_argument(
-        "--memory", nargs="+", metavar="SUBCMD",
-        help="执行 memory 子命令，如 --memory show",
-    )
-    parser.add_argument(
-        "--skills", nargs="+", metavar="SUBCMD",
-        help="执行 skills 子命令，如 --skills list",
-    )
-    parser.add_argument(
-        "--feishu", nargs="+", metavar="SUBCMD",
-        help="执行 feishu 子命令",
-    )
-    parser.add_argument(
-        "--update", nargs="+", metavar="SUBCMD",
-        help="执行 update 子命令",
-    )
-    parser.add_argument(
-        "--config", action="store_true", default=False,
-        help="显示当前配置",
-    )
-    parser.add_argument(
-        "--help-cmd", action="store_true", default=False, dest="help_cmd",
-        help="显示可用命令帮助",
-    )
-
-    args = parser.parse_args()
-
-    if args.help_cmd:
-        return "/help", True
-    if args.config:
-        return "/config", True
-    if args.memory:
-        return "/memory " + " ".join(args.memory), True
-    if args.skills:
-        return "/skills " + " ".join(args.skills), True
-    if args.feishu:
-        return "/feishu " + " ".join(args.feishu), True
-    if args.update:
-        return "/update " + " ".join(args.update), True
-
-    query = args.query_c or args.query
-    if query:
-        return query, False
-
-    # 检测管道输入
-    if not sys.stdin.isatty():
-        piped = sys.stdin.read().strip()
-        if piped:
-            return piped, False
-
-    return None, False
 
 
 def _run_repl(config: dict) -> None:
@@ -210,27 +153,8 @@ def _run_repl(config: dict) -> None:
         print("再见！")
 
 
-def main() -> None:
-    """程序入口。"""
-    non_interactive_input, is_slash_command = _parse_args()
-
-    config = load_config()
-    if not is_config_complete(config):
-        if non_interactive_input is not None:
-            print("Lamix 未配置，请先运行 lamix 进入交互模式完成配置。")
-            sys.exit(1)
-        try:
-            config = run_setup_wizard()
-        except (KeyboardInterrupt, EOFError):
-            print("\n配置已取消，退出。")
-            sys.exit(0)
-        if not is_config_complete(config):
-            print("API Key 未填写，无法启动。")
-            sys.exit(1)
-
-    mgr = get_session_manager(config)
-
-    # 初始化 PlatformManager（多平台网关 + 后台任务支持）
+def _init_platform(config: dict) -> None:
+    """初始化 PlatformManager（多平台网关 + 后台任务支持）。"""
     import asyncio
     import threading
     from src.platforms.manager import PlatformManager
@@ -253,19 +177,201 @@ def main() -> None:
             "app_secret": feishu_cfg["app_secret"],
         }))
 
+
+# ── 子命令处理 ────────────────────────────────────────────
+
+def run_cli(args: argparse.Namespace) -> None:
+    """'lamix cli' 子命令：继承原 main() 的所有逻辑。"""
+    # 确定非交互输入
+    non_interactive_input: str | None = None
+    is_slash_command = False
+
+    if args.help_cmd:
+        non_interactive_input, is_slash_command = "/help", True
+    elif args.memory:
+        non_interactive_input, is_slash_command = "/memory " + " ".join(args.memory), True
+    elif args.skills:
+        non_interactive_input, is_slash_command = "/skills " + " ".join(args.skills), True
+    elif args.feishu:
+        non_interactive_input, is_slash_command = "/feishu " + " ".join(args.feishu), True
+    elif args.update:
+        non_interactive_input, is_slash_command = "/update " + " ".join(args.update), True
+    else:
+        query = args.query_c or args.query
+        if query:
+            non_interactive_input = query
+        elif not sys.stdin.isatty():
+            piped = sys.stdin.read().strip()
+            if piped:
+                non_interactive_input = piped
+
+    config = load_config()
+    if not is_config_complete(config):
+        if non_interactive_input is not None:
+            print("Lamix 未配置，请先运行 lamix cli 进入交互模式完成配置。")
+            sys.exit(1)
+        try:
+            config = run_setup_wizard()
+        except (KeyboardInterrupt, EOFError):
+            print("\n配置已取消，退出。")
+            sys.exit(0)
+        if not is_config_complete(config):
+            print("API Key 未填写，无法启动。")
+            sys.exit(1)
+
+    _init_platform(config)
+
     # 非交互模式
     if non_interactive_input is not None:
+        mgr = get_session_manager(config)
         session = mgr.get_or_create("cli", "default")
         session.agent.progress_callback = _cli_progress_callback
         session.partial_sender = _cli_partial_sender
         result = session.handle_input(non_interactive_input)
-
         if result.reply:
             print(result.reply)
         return
 
     # 交互模式
     _run_repl(config)
+
+
+def run_gateway(args: argparse.Namespace) -> None:
+    """'lamix gateway' 子命令：启动 daemon。"""
+    from src.daemon import main as daemon_main
+    daemon_main()
+
+
+def run_model(args: argparse.Namespace) -> None:
+    """'lamix model' 子命令：模型管理（占位）。"""
+    print("模型管理功能开发中")
+
+
+def run_update(args: argparse.Namespace) -> None:
+    """'lamix update' 子命令：自更新（占位）。"""
+    print("自更新功能开发中")
+
+
+def run_config(args: argparse.Namespace) -> None:
+    """'lamix config' 子命令：显示当前配置。"""
+    config = load_config()
+    if not is_config_complete(config):
+        print("Lamix 未配置，请先运行 lamix cli 进入交互模式完成配置。")
+        sys.exit(1)
+
+    _init_platform(config)
+
+    mgr = get_session_manager(config)
+    session = mgr.get_or_create("cli", "default")
+    session.agent.progress_callback = _cli_progress_callback
+    session.partial_sender = _cli_partial_sender
+    result = session.handle_input("/config")
+    if result.reply:
+        print(result.reply)
+
+
+# ── 帮助文本 ──────────────────────────────────────────────
+
+HELP_TEXT = textwrap.dedent("""\
+    usage: lamix <command> [options]
+
+    Lamix - 自更新的 AI Agent daemon
+
+    Commands:
+      cli       启动交互式 CLI（含 daemon）
+      gateway   仅启动 daemon（后台常驻）
+      model     模型管理
+      update    自更新
+      config    显示当前配置
+
+    Options:
+      -V, --version  显示版本号
+      -h, --help     显示帮助
+""")
+
+
+# ── 入口 ──────────────────────────────────────────────────
+
+def main() -> None:
+    """顶层命令分发器入口。"""
+    parser = argparse.ArgumentParser(
+        prog="lamix",
+        description="Lamix - 自更新的 AI Agent daemon",
+        add_help=True,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "-V", "--version", action="version",
+        version=f"lamix {_get_version()}",
+    )
+
+    subparsers = parser.add_subparsers(dest="command", title="commands")
+
+    # ── cli ───────────────────────────────────────────────
+    cli_parser = subparsers.add_parser(
+        "cli", help="启动交互式 CLI（含 daemon）",
+    )
+    cli_parser.add_argument(
+        "query", nargs="?", default=None,
+        help="直接对话内容（单条查询模式）",
+    )
+    cli_parser.add_argument(
+        "-c", dest="query_c", default=None, metavar="QUERY",
+        help="直接对话内容（显式指定）",
+    )
+    cli_parser.add_argument(
+        "--memory", nargs="+", metavar="SUBCMD",
+        help="执行 memory 子命令，如 --memory show",
+    )
+    cli_parser.add_argument(
+        "--skills", nargs="+", metavar="SUBCMD",
+        help="执行 skills 子命令，如 --skills list",
+    )
+    cli_parser.add_argument(
+        "--feishu", nargs="+", metavar="SUBCMD",
+        help="执行 feishu 子命令",
+    )
+    cli_parser.add_argument(
+        "--update", nargs="+", metavar="SUBCMD",
+        help="执行 update 子命令",
+    )
+    cli_parser.add_argument(
+        "--help-cmd", action="store_true", default=False, dest="help_cmd",
+        help="显示可用命令帮助",
+    )
+    cli_parser.set_defaults(func=run_cli)
+
+    # ── gateway ───────────────────────────────────────────
+    gw_parser = subparsers.add_parser(
+        "gateway", help="仅启动 daemon（后台常驻）",
+    )
+    gw_parser.set_defaults(func=run_gateway)
+
+    # ── model ─────────────────────────────────────────────
+    model_parser = subparsers.add_parser(
+        "model", help="模型管理",
+    )
+    model_parser.set_defaults(func=run_model)
+
+    # ── update ────────────────────────────────────────────
+    update_parser = subparsers.add_parser(
+        "update", help="自更新",
+    )
+    update_parser.set_defaults(func=run_update)
+
+    # ── config ────────────────────────────────────────────
+    config_parser = subparsers.add_parser(
+        "config", help="显示当前配置",
+    )
+    config_parser.set_defaults(func=run_config)
+
+    args = parser.parse_args()
+
+    if args.command is None:
+        print(HELP_TEXT)
+        sys.exit(0)
+
+    args.func(args)
 
 
 if __name__ == "__main__":

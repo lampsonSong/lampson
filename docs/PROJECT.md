@@ -62,7 +62,7 @@ lamix 命令 ──→ cli.py（独立 REPL，不连 daemon）
 
 ## 三、Setup Wizard 流程
 
-首次运行 `lamix-cli` 时自动进入配置向导：
+首次运行 `lamix cli` 时自动进入配置向导：
 
 | 步骤 | 内容 | 可跳过 |
 |------|------|--------|

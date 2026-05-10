@@ -38,9 +38,9 @@ REM 完成
 echo.
 echo [3/3] 完成！
 echo.
-if exist dist\lamix-cli.exe (
+if exist dist\lamix.exe (
     echo 双击这些文件即可使用：
-    echo   dist\lamix-cli.exe
+    echo   dist\lamix.exe
     echo   dist\lamix-uninstall.exe
     echo.
     echo 可以把它们复制到桌面。
