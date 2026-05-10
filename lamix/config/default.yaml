@@ -1,0 +1,52 @@
+# Lamix 默认配置模板
+# 复制到 ~/.lamix/config.yaml 并填写相应字段
+
+llm:
+  api_key: ""                                        # 智谱 API Key（必填）
+  base_url: "https://open.bigmodel.cn/api/paas/v4/" # LLM API 地址
+  model: "glm-5.1"                               # 模型名称
+  context_window: 131072                           # 模型 context window（token 数），各模型不同，需按实际填写
+
+feishu:
+  app_id: ""      # 飞书应用 App ID（可选）
+  app_secret: ""  # 飞书应用 App Secret（可选）
+
+memory_path: "~/.lamix/memory"   # 记忆文件存储路径
+skills_path: "~/.lamix/skills"   # 技能文件存储路径
+projects_path: "~/.lamix/projects"  # 项目记录目录（.md）
+
+# Skills 管理（冷技能归档阈值）
+skills_management:
+  cleanup_max_skills: 300      # 触发清理的 skill 总数阈值
+  cleanup_age_days: 10         # 创建超过此天数的 skill 参与清理
+  cleanup_min_invocations: 0   # 调用次数不超过此值的参与清理
+
+# Embedding 配置（语义检索 & session 搜索）
+# 不配 base_url 则不启用 embedding，降级为纯关键词搜索
+embedding:
+  provider: "zhipu"
+  model: "embedding-3"
+  # base_url: "https://open.bigmodel.cn/api/paas/v4/"  # 必须显式配置
+  # api_key: ""                                        # 必须显式配置
+
+# 检索配置
+retrieval:
+  skill_top_k: 3
+  project_top_k: 2
+  similarity_threshold: 0.3
+
+# 上下文压缩配置
+compaction:
+  enabled: true                    # 是否启用自动压缩
+  trigger_threshold: 0.8           # 触发阈值（占 context_window 的百分比）
+  end_threshold: 0.3               # 压缩目标（占 context_window 的百分比）
+  max_iterations: 3                # 最大压缩迭代次数
+  enable_archive: true             # 是否归档有价值内容到文件
+
+# MCP 服务器配置（Phase 2 预留）
+# mcp:
+#   servers:
+#     - name: filesystem
+#       command: "npx"
+#       args: ["-y", "@modelcontextprotocol/server-filesystem", "/home/user"]
+#       enabled: true
