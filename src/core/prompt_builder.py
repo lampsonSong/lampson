@@ -393,8 +393,14 @@ def load_identity() -> str:
     return fallback or "你是 Lamix，一个 CLI 智能助手。"
 
 
+USER_MD_MAX_LENGTH = 2000  # USER.md 最大字符数
+
 def load_user() -> str:
-    """加载 ~/.lamix/USER.md，不存在则从模板复制后读取（限 500 字符以内）。"""
+    """加载 ~/.lamix/USER.md，不存在则从模板复制后读取。
+
+    超过 2000 字符时，内容仍会加载（不截断），但会在头部插入警告，
+    同时尝试通过飞书通知用户处理。
+    """
     _ensure_user_file()
     if not USER_PATH.exists():
         return ""
@@ -402,11 +408,38 @@ def load_user() -> str:
         content = USER_PATH.read_text(encoding="utf-8").strip()
         if not content:
             return ""
-        if len(content) > 500:
-            content = content[:500] + "\n\n_(已截断)_"
+        if len(content) > USER_MD_MAX_LENGTH:
+            warning = (
+                f"⚠ USER.md 已达 {len(content)} 字符（上限 {USER_MD_MAX_LENGTH}），"
+                "请精简内容，删除过时或冗余条目。"
+            )
+            # 尝试飞书通知（daemon 场景）
+            _notify_user_md_oversize(len(content))
+            return warning + "\n\n" + content
         return content
     except OSError:
         return ""
+
+
+def _notify_user_md_oversize(length: int) -> None:
+    """USER.md 超长时通过飞书通知用户。"""
+    try:
+        from src.core.config import load_config
+        config = load_config()
+        owner_chat_id = config.get("feishu", {}).get("owner_chat_id", "").strip()
+        app_id = config.get("feishu", {}).get("app_id", "").strip()
+        app_secret = config.get("feishu", {}).get("app_secret", "").strip()
+        if not owner_chat_id or not app_id or not app_secret:
+            return
+        from src.feishu.client import FeishuClient
+        client = FeishuClient(app_id=app_id, app_secret=app_secret)
+        client.send_message(
+            receive_id=owner_chat_id,
+            text=f"⚠ USER.md 已达 {length} 字符（上限 {USER_MD_MAX_LENGTH}），请精简内容。",
+            receive_id_type="chat_id",
+        )
+    except Exception:
+        pass  # 通知失败不影响主流程
 
 
 # ── Model Guidance ────────────────────────────────────────────────────────────
