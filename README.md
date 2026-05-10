@@ -118,11 +118,21 @@ lamix-cli --config
 
 首次运行会进入配置向导，引导填写 LLM API Key 和飞书凭证。
 
-### Windows exe（推荐）
+### Windows（从源码安装 + 生成 exe）
 
-从 [Releases](https://github.com/lampsonSong/lamix/releases) 下载 `lamix-cli.exe`，双击即可启动。
+```cmd
+git clone https://github.com/lampsonSong/lamix.git
+cd lamix
+pip install -e .
+pip install pyinstaller
+python scripts/build_exe.py
+```
 
-首次运行会自动进入配置向导。
+构建完成后在 `dist/` 目录下生成：
+- **lamix-cli.exe** — 双击启动配置向导和交互式 CLI
+- **lamix-uninstall.exe** — 双击卸载
+
+可以将这两个 exe 复制到桌面或任意位置使用，不依赖源码目录。
 
 ### Daemon 模式（后台常驻）
 
