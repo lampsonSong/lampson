@@ -335,6 +335,59 @@ def _install_feishu_skills() -> None:
         print(f"已自动安装飞书 skills：{', '.join(installed)}")
 
 
+def _setup_user_profile() -> None:
+    """引导用户设置 USER.md（称呼、偏好、渠道）。
+    
+    仅在 USER.md 仍是默认内容时触发。
+    """
+    from src.core.config import LAMIX_DIR
+    user_path = LAMIX_DIR / "USER.md"
+    default_path = Path(__file__).resolve().parent.parent / "config" / "default_user.md"
+    
+    # 检查 USER.md 是否还是默认内容
+    if user_path.exists():
+        try:
+            content = user_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return
+        try:
+            default = default_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            default = ""
+        if content != default and len(content) > len(default) + 5:
+            return  # 用户已自定义过
+    
+    print()
+    print(_bold("最后一步：聊聊你自己") + "（直接回车跳过）")
+    
+    lines = []
+    
+    # 称呼
+    name = input("你希望我怎么称呼你？").strip()
+    if name:
+        lines.append(f"称呼：{name}")
+    else:
+        lines.append("称呼：用户")
+    
+    # 偏好
+    pref = input("有什么特别的偏好吗？（比如回复用中文、代码用英文、喜欢简洁回复等）").strip()
+    if pref:
+        lines.append(f"偏好：{pref}")
+    
+    # 渠道
+    channel = input("你主要通过什么渠道跟我交流？（飞书/Telegram/Discord/CLI）").strip()
+    if channel:
+        lines.append(f"主渠道：{channel}")
+    
+    # 如果用户至少填了一个非空回答，写入 USER.md
+    if name or pref or channel:
+        user_path.parent.mkdir(parents=True, exist_ok=True)
+        user_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        print(_green("✓ 用户画像已保存"))
+    else:
+        print("跳过，随时可以编辑 ~/.lamix/USER.md")
+
+
 def is_config_complete(config: dict[str, Any]) -> bool:
     """检查必填项是否已填写。用户必须至少配置过 api_key（说明走过 setup wizard）。"""
     if not CONFIG_PATH.exists():
