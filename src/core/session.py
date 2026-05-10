@@ -389,9 +389,10 @@ class Session:
         agent.project_index = pidx
         agent.retrieval_config = retrieval
         skills_tools_reg.set_retrieval_indices(sidx, pidx)
-        # 注入 LLM Client 给 reflection 的自动合并
+        # 注入 LLM Client 和 SkillIndex 给 reflection
         from src.core import reflection
         reflection.set_llm_client(primary_llm)
+        reflection.set_skill_index(sidx)
         # 注入 Session 引用给 session_load 工具
         from src.tools import session as session_tool
         session_tool.set_current_session(session)

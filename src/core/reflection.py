@@ -36,11 +36,42 @@ _MIN_SKILL_CONTENT_LEN = 80
 # 全局 LLM Client（由 Session 初始化时注入）
 _llm_client: Any = None
 
+# 全局 SkillIndex（由 Session 初始化时注入）
+_skill_index: Any = None
+
 
 def set_llm_client(client: Any) -> None:
     """由 Session 初始化时调用，注入当前 LLM Client。"""
     global _llm_client
     _llm_client = client
+
+
+def set_skill_index(index: Any) -> None:
+    """由 Session 初始化时调用，注入当前 SkillIndex，skill 变更后自动刷新索引。"""
+    global _skill_index
+    _skill_index = index
+
+
+def _refresh_skill_index() -> None:
+    """skill 文件变更后重建索引 + 刷新 tools 注册。静默失败。"""
+    global _skill_index
+    if _skill_index is None:
+        return
+    try:
+        _skill_index.load_or_build()
+        from src.core import skills_tools as skills_tools_reg
+        from src.tools import session as session_tool
+        current_session = session_tool.get_current_session()
+        if current_session:
+            skills_tools_reg.set_retrieval_indices(
+                _skill_index, current_session.project_index
+            )
+            current_session.skill_index = _skill_index
+            if current_session.agent:
+                current_session.agent.skill_index = _skill_index
+        logger.info('[反思] Skill 索引已重建')
+    except Exception as e:
+        logger.warning('[反思] Skill 索引重建失败: %s', e)
 
 
 # ── 反思 Prompt ──────────────────────────────────────────────────────────────
@@ -225,12 +256,14 @@ def execute_learnings(learnings: list[dict[str, Any]]) -> list[str]:
             if hint:
                 hints.append(hint)
                 _notify_user(f"📝 **Skill 新建**\n\n- 名称：{target}\n- 原因：{reason}")
+                _refresh_skill_index()
 
         elif ltype == "skill_update":
             hint = _update_skill(target, content, reason)
             if hint:
                 hints.append(hint)
                 _notify_user(f"🔧 **Skill 更新**\n\n- 名称：{target}\n- 原因：{reason}")
+                _refresh_skill_index()
 
         elif ltype == "module_create":
             hint = _create_module(target, content, reason)
