@@ -388,6 +388,22 @@ def _setup_user_profile() -> None:
         print("跳过，随时可以编辑 ~/.lamix/USER.md")
 
 
+def _notify_daemon_restart() -> None:
+    """如果 daemon 正在运行，提示用户需要重启才能让飞书配置生效。"""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "python.*src.daemon"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            print()
+            print(_yellow("⚠ 检测到 daemon 正在运行，飞书配置需要重启 daemon 才能生效。"))
+            print("  重启方式：lamix-cli -c \"/restart\" 或手动 kill daemon 进程后启动。")
+    except Exception:
+        pass
+
+
 def is_config_complete(config: dict[str, Any]) -> bool:
     """检查必填项是否已填写。用户必须至少配置过 api_key（说明走过 setup wizard）。"""
     if not CONFIG_PATH.exists():
@@ -567,6 +583,17 @@ def run_setup_wizard() -> dict[str, Any]:
         # 7. 保存配置
         save_config(config)
         print(f"\n{_green('配置已保存到')} {CONFIG_PATH}\n")
+
+        # 8. 如果配置了飞书，自动安装飞书专属 skills
+        if config.get("feishu", {}).get("app_id"):
+            _install_feishu_skills()
+
+        # 9. 用户画像引导
+        _setup_user_profile()
+
+        # 10. 提示重启 daemon（如果正在运行）
+        _notify_daemon_restart()
+
         return config
 
     except (KeyboardInterrupt, EOFError):
