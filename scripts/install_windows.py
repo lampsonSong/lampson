@@ -161,7 +161,12 @@ def register_scheduled_task() -> bool:
         return False
 
     task_name = "Lamix"
-    daemon_command = f'"{sys.executable}" -m src.daemon'
+    # 用 pythonw.exe 避免开机启动时弹出控制台窗口
+    python_exe = sys.executable
+    pythonw_exe = python_exe.replace("python.exe", "pythonw.exe")
+    if not Path(pythonw_exe).exists():
+        pythonw_exe = python_exe
+    daemon_command = f'"{pythonw_exe}" -m src.daemon'
 
     # 先尝试删除已存在的任务
     try:
@@ -231,17 +236,22 @@ def start_daemon() -> None:
     DETACHED_PROCESS = 0x00000008
     CREATE_NEW_PROCESS_GROUP = 0x00000200
 
+    # 用 pythonw.exe 启动 daemon（无控制台窗口）
+    python_exe = sys.executable
+    pythonw_exe = python_exe.replace("python.exe", "pythonw.exe")
+    if not Path(pythonw_exe).exists():
+        pythonw_exe = python_exe  # fallback
+
     try:
-        # 打开日志文件用于重定向
         with open(daemon_log, "a", encoding="utf-8") as log_file:
             subprocess.Popen(
-                [sys.executable, "-m", "src.daemon"],
+                [pythonw_exe, "-m", "src.daemon"],
                 stdout=log_file,
                 stderr=log_file,
                 creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
                 cwd=Path(__file__).parent.parent
             )
-        print(f"✓ Daemon 已启动")
+        print(f"✓ Daemon 已启动（后台运行，无弹窗）")
         print(f"  日志文件：{daemon_log}")
     except Exception as e:
         print(f"❌ Daemon 启动失败：{e}")
