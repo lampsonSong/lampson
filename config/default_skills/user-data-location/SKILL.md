@@ -9,6 +9,6 @@ description: 用户相关信息应记录在 users 目录中。
 
 ## 规则
 
-- 用户信息 → `~/.lampson/users/{user_id}.md`
+- 用户信息 → `~/.lamix/users/{user_id}.md`
 - 不要在 projects/ 或 skills/ 里新建文件存用户信息
 - 不要在根目录散落用户相关的 md 文件

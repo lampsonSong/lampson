@@ -1,4 +1,4 @@
-"""配置管理模块：加载、保存、引导用户填写 ~/.lampson/config.yaml"""
+"""配置管理模块：加载、保存、引导用户填写 ~/.lamix/config.yaml"""
 
 from __future__ import annotations
 
@@ -12,17 +12,17 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-LAMPSON_DIR = Path.home() / ".lampson"
-CONFIG_PATH = LAMPSON_DIR / "config.yaml"
-MEMORY_DIR = LAMPSON_DIR / "memory"
-SKILLS_DIR = LAMPSON_DIR / "memory" / "skills"
-INDEX_DIR = LAMPSON_DIR / "index"
-PROJECTS_DIR = LAMPSON_DIR / "memory" / "projects"
-INFO_DIR = LAMPSON_DIR / "memory" / "info"
+LAMIX_DIR = Path.home() / ".lamix"
+CONFIG_PATH = LAMIX_DIR / "config.yaml"
+MEMORY_DIR = LAMIX_DIR / "memory"
+SKILLS_DIR = LAMIX_DIR / "memory" / "skills"
+INDEX_DIR = LAMIX_DIR / "index"
+PROJECTS_DIR = LAMIX_DIR / "memory" / "projects"
+INFO_DIR = LAMIX_DIR / "memory" / "info"
 
 # 旧路径（迁移前）
-_OLD_SKILLS_DIR = LAMPSON_DIR / "skills"
-_OLD_PROJECTS_DIR = LAMPSON_DIR / "projects"
+_OLD_SKILLS_DIR = LAMIX_DIR / "skills"
+_OLD_PROJECTS_DIR = LAMIX_DIR / "projects"
 
 _DEFAULT_RETRIEVAL: dict[str, Any] = {
     "skill_top_k": 3,
@@ -66,8 +66,8 @@ _ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
 
 def ensure_dirs() -> None:
-    """确保 ~/.lampson 及子目录存在。"""
-    LAMPSON_DIR.mkdir(exist_ok=True)
+    """确保 ~/.lamix 及子目录存在。"""
+    LAMIX_DIR.mkdir(exist_ok=True)
     MEMORY_DIR.mkdir(exist_ok=True)
     (MEMORY_DIR / "sessions").mkdir(exist_ok=True)
     (MEMORY_DIR / "sessions" / "tool_bodies").mkdir(exist_ok=True)
@@ -107,7 +107,7 @@ def _fix_config_paths() -> None:
         if isinstance(old_value, str) and old_value.strip():
             expanded = Path(old_value.strip()).expanduser()
             # 如果配置的路径既不是新路径，也不是旧路径的实际位置，跳过
-            # 只修正指向旧路径（~/.lampson/skills 等不含 memory/）的情况
+            # 只修正指向旧路径（~/.lamix/skills 等不含 memory/）的情况
             new_path = Path(new_value).expanduser()
             if expanded.resolve() != new_path.resolve():
                 # 检查是否是旧路径（不含 memory/ 子目录）
@@ -127,13 +127,13 @@ def _fix_config_paths() -> None:
 
 def _migrate_old_dirs() -> None:
     import shutil
-    migrated = LAMPSON_DIR / ".memory_migrated"
+    migrated = LAMIX_DIR / ".memory_migrated"
     if migrated.exists():
         # 即使已迁移，仍需检查 config.yaml 路径是否过时
         _fix_config_paths()
         return
-    old_skills = LAMPSON_DIR / "skills"
-    old_projects = LAMPSON_DIR / "projects"
+    old_skills = LAMIX_DIR / "skills"
+    old_projects = LAMIX_DIR / "projects"
     moved = False
     if old_skills.is_dir() and any(old_skills.iterdir()):
         SKILLS_DIR.mkdir(parents=True, exist_ok=True)
@@ -271,7 +271,7 @@ def is_config_complete(config: dict[str, Any]) -> bool:
 
 def run_setup_wizard() -> dict[str, Any]:
     """首次运行引导用户填写配置，返回配置字典。"""
-    print("\n欢迎使用 Lampson！首次运行需要配置一些信息。\n")
+    print("\n欢迎使用 Lamix！首次运行需要配置一些信息。\n")
 
     config = load_config()
 

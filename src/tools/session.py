@@ -115,7 +115,7 @@ def _run_search(params: dict) -> str:
 
     lines = [f"找到 {len(results)} 条相关记录：\n"]
     for i, r in enumerate(results, 1):
-        role_label = "用户" if r.role == "user" else "Lampson"
+        role_label = "用户" if r.role == "user" else "Lamix"
         from_ts = _format_ts(r.ts)
         lines.append(f"--- 结果 {i} ---\n[{from_ts}] {role_label}（session: {r.session_id}）\n{r.snippet}\n")
 

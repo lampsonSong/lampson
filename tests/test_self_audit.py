@@ -20,8 +20,8 @@ from src.core.self_audit import (
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 @pytest.fixture
-def temp_lampson_dir(tmp_path):
-    """用临时目录替代 ~/.lampson 用于测试。"""
+def temp_lamix_dir(tmp_path):
+    """用临时目录替代 ~/.lamix 用于测试。"""
     skills_dir = tmp_path / "skills"
     projects_dir = tmp_path / "projects"
     learned_modules_dir = tmp_path / "learned_modules"
@@ -79,8 +79,8 @@ class TestAuditReport:
 # ── scan_skills ───────────────────────────────────────────────────────────────
 
 class TestScanSkills:
-    def test_valid_skill_no_findings(self, temp_lampson_dir):
-        _, skills_dir, _, _ = temp_lampson_dir
+    def test_valid_skill_no_findings(self, temp_lamix_dir):
+        _, skills_dir, _, _ = temp_lamix_dir
         skill_dir = skills_dir / "good-skill"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text("""---
@@ -98,15 +98,15 @@ triggers:
         error_finding = [f for f in findings if f.severity == "error"]
         assert len(error_finding) == 0
 
-    def test_missing_skills_dir(self, temp_lampson_dir):
-        _, skills_dir, _, _ = temp_lampson_dir
+    def test_missing_skills_dir(self, temp_lamix_dir):
+        _, skills_dir, _, _ = temp_lamix_dir
         import shutil
         shutil.rmtree(skills_dir)
         findings = scan_skills()
         assert findings == []
 
-    def test_orphan_dir_no_skills_md(self, temp_lampson_dir):
-        _, skills_dir, _, _ = temp_lampson_dir
+    def test_orphan_dir_no_skills_md(self, temp_lamix_dir):
+        _, skills_dir, _, _ = temp_lamix_dir
         orphan = skills_dir / "orphan-skill"
         orphan.mkdir()
         (orphan / "readme.md").write_text("some doc", encoding="utf-8")
@@ -114,8 +114,8 @@ triggers:
         findings = scan_skills()
         assert any(f.target == "orphan-skill" and "没有 SKILL.md" in f.message for f in findings)
 
-    def test_missing_frontmatter(self, temp_lampson_dir):
-        _, skills_dir, _, _ = temp_lampson_dir
+    def test_missing_frontmatter(self, temp_lamix_dir):
+        _, skills_dir, _, _ = temp_lamix_dir
         skill_dir = skills_dir / "no-fm"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text("没有 frontmatter 的 skill 正文", encoding="utf-8")
@@ -124,8 +124,8 @@ triggers:
         assert any("缺少 frontmatter" in f.message for f in findings)
 
 
-    def test_missing_skill_name(self, temp_lampson_dir):
-        _, skills_dir, _, _ = temp_lampson_dir
+    def test_missing_skill_name(self, temp_lamix_dir):
+        _, skills_dir, _, _ = temp_lamix_dir
         skill_dir = skills_dir / "no-name"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text("""---
@@ -137,8 +137,8 @@ description: 缺少 name 字段
         findings = scan_skills()
         assert any("name 字段" in f.message and f.severity == "info" for f in findings)
 
-    def test_template_placeholder(self, temp_lampson_dir):
-        _, skills_dir, _, _ = temp_lampson_dir
+    def test_template_placeholder(self, temp_lamix_dir):
+        _, skills_dir, _, _ = temp_lamix_dir
         skill_dir = skills_dir / "template-skill"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text("""---
@@ -172,8 +172,8 @@ triggers:
 # ── scan_projects ─────────────────────────────────────────────────────────────
 
 class TestScanProjects:
-    def test_valid_project_no_findings(self, temp_lampson_dir):
-        _, _, projects_dir, _ = temp_lampson_dir
+    def test_valid_project_no_findings(self, temp_lamix_dir):
+        _, _, projects_dir, _ = temp_lamix_dir
         (projects_dir / "good-project.md").write_text("""# good-project
 
 ## 基本信息
@@ -187,22 +187,22 @@ class TestScanProjects:
         error_findings = [f for f in findings if f.severity == "error"]
         assert len(error_findings) == 0
 
-    def test_missing_first_header(self, temp_lampson_dir):
-        _, _, projects_dir, _ = temp_lampson_dir
+    def test_missing_first_header(self, temp_lamix_dir):
+        _, _, projects_dir, _ = temp_lamix_dir
         (projects_dir / "no-header.md").write_text("没有标题的 project 文件", encoding="utf-8")
 
         findings = scan_projects()
         assert any("markdown 标题" in f.message for f in findings)
 
-    def test_empty_file(self, temp_lampson_dir):
-        _, _, projects_dir, _ = temp_lampson_dir
+    def test_empty_file(self, temp_lamix_dir):
+        _, _, projects_dir, _ = temp_lamix_dir
         (projects_dir / "empty.md").write_text("", encoding="utf-8")
 
         findings = scan_projects()
         assert any(f.target == "empty" and f.severity == "error" for f in findings)
 
-    def test_unclosed_code_block(self, temp_lampson_dir):
-        _, _, projects_dir, _ = temp_lampson_dir
+    def test_unclosed_code_block(self, temp_lamix_dir):
+        _, _, projects_dir, _ = temp_lamix_dir
         # 3 opening ``` + 1 closing ``` = odd total triggers unclosed detection
         bt = chr(96)
         triple = bt * 3
@@ -216,8 +216,8 @@ class TestScanProjects:
 # ── scan_learned_modules ───────────────────────────────────────────────────────
 
 class TestScanLearnedModules:
-    def test_valid_module_no_findings(self, temp_lampson_dir):
-        _, _, _, modules_dir = temp_lampson_dir
+    def test_valid_module_no_findings(self, temp_lamix_dir):
+        _, _, _, modules_dir = temp_lamix_dir
         (modules_dir / "valid_module.py").write_text('''TOOL_SCHEMA = {
     "function": {
         "name": "learned_valid_module",
@@ -234,15 +234,15 @@ def TOOL_RUNNER(params):
         error_findings = [f for f in findings if f.severity == "error"]
         assert len(error_findings) == 0
 
-    def test_syntax_error(self, temp_lampson_dir):
-        _, _, _, modules_dir = temp_lampson_dir
+    def test_syntax_error(self, temp_lamix_dir):
+        _, _, _, modules_dir = temp_lamix_dir
         (modules_dir / "bad_syntax.py").write_text("def broken(:", encoding="utf-8")
 
         findings = scan_learned_modules()
         assert any(f.target == "bad_syntax" and f.severity == "error" and "语法错误" in f.message for f in findings)
 
-    def test_blocked_import(self, temp_lampson_dir):
-        _, _, _, modules_dir = temp_lampson_dir
+    def test_blocked_import(self, temp_lamix_dir):
+        _, _, _, modules_dir = temp_lamix_dir
         (modules_dir / "bad_import.py").write_text('''from src.core import agent
 def TOOL_RUNNER(params):
     return "ok"
@@ -252,8 +252,8 @@ TOOL_SCHEMA = {"function": {"name": "x", "description": "", "parameters": {"type
         findings = scan_learned_modules()
         assert any(f.target == "bad_import" and "危险 import" in f.message for f in findings)
 
-    def test_missing_runner(self, temp_lampson_dir):
-        _, _, _, modules_dir = temp_lampson_dir
+    def test_missing_runner(self, temp_lamix_dir):
+        _, _, _, modules_dir = temp_lamix_dir
         (modules_dir / "no_runner.py").write_text('''TOOL_SCHEMA = {"function": {"name": "learned_no_runner", "description": "", "parameters": {"type": "object", "properties": {}, "required": []}}}
 ''', encoding="utf-8")
 
@@ -264,8 +264,8 @@ TOOL_SCHEMA = {"function": {"name": "x", "description": "", "parameters": {"type
 # ── run_audit & format_report_detail ─────────────────────────────────────────
 
 class TestRunAudit:
-    def test_full_audit_returns_report(self, temp_lampson_dir):
-        _, skills_dir, projects_dir, modules_dir = temp_lampson_dir
+    def test_full_audit_returns_report(self, temp_lamix_dir):
+        _, skills_dir, projects_dir, modules_dir = temp_lamix_dir
 
         sd = skills_dir / "normal"
         sd.mkdir()

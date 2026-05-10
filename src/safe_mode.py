@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-safe_mode.py — Lampson 安全恢复入口
+safe_mode.py — Lamix 安全恢复入口
 
 永远不被自学习模块修改的最小化执行通道：
 - 对话（LLM）
@@ -8,7 +8,7 @@ safe_mode.py — Lampson 安全恢复入口
 - Recovery（恢复 skills/memory）
 - /exit 退出并重启主程序
 
-配置读取 ~/.lampson/config.yaml，不依赖主程序。
+配置读取 ~/.lamix/config.yaml，不依赖主程序。
 """
 
 import json
@@ -23,13 +23,13 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 # 路径常量
-LAMPSON_DIR = Path.home() / ".lampson"
-CONFIG_PATH = LAMPSON_DIR / "config.yaml"
-BACKUP_DIR = LAMPSON_DIR / "backups"
-LAMPSON_ROOT = Path(__file__).resolve().parent.parent  # ~/lampson
+LAMIX_DIR = Path.home() / ".lamix"
+CONFIG_PATH = LAMIX_DIR / "config.yaml"
+BACKUP_DIR = LAMIX_DIR / "backups"
+LAMIX_ROOT = Path(__file__).resolve().parent.parent  # ~/lamix
 DAEMON_ENTRY = f"{sys.executable} -m src.daemon"
-DAEMON_LOG = LAMPSON_DIR / "logs" / "daemon.log"
-DAEMON_ERR_LOG = LAMPSON_DIR / "logs" / "daemon.err.log"
+DAEMON_LOG = LAMIX_DIR / "logs" / "daemon.log"
+DAEMON_ERR_LOG = LAMIX_DIR / "logs" / "daemon.err.log"
 
 # 需要恢复的关键目录（排除 venv/logs 等）
 CRITICAL_DIRS = ["memory"]
@@ -85,7 +85,7 @@ def create_backup() -> str:
 
     with tarfile.open(path, "w:gz") as tar:
         for dir_name in CRITICAL_DIRS:
-            dir_path = LAMPSON_DIR / dir_name
+            dir_path = LAMIX_DIR / dir_name
             if dir_path.exists():
                 tar.add(dir_path, arcname=dir_name)
 
@@ -108,7 +108,7 @@ def restore_backup(name: str) -> bool:
         for member in tar.getmembers():
             # 安全检查：只提取 critical dirs 内的内容
             if member.name.split("/")[0] in CRITICAL_DIRS:
-                tar.extract(member, LAMPSON_DIR)
+                tar.extract(member, LAMIX_DIR)
 
     print(f"[safe_mode] 已恢复到: {name}")
     return True
@@ -159,7 +159,7 @@ def process_chat(text: str, llm_config: dict) -> str:
         response = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": "你是 Lampson 的安全模式，只能执行基础命令和 recovery 操作。"},
+                {"role": "system", "content": "你是 Lamix 的安全模式，只能执行基础命令和 recovery 操作。"},
                 {"role": "user", "content": text},
             ],
             max_tokens=500,
@@ -227,7 +227,7 @@ def process_message(text: str, config: dict) -> Tuple[Optional[str], bool]:
     if text.startswith("/sh "):
         shell_cmd = text[4:].strip()
         if not shell_cmd:
-            return "用法: /sh <command>\n例如: /sh ls -la ~/.lampson", False
+            return "用法: /sh <command>\n例如: /sh ls -la ~/.lamix", False
         dangerous = ["rm -rf", "dd", "mkfs", ":(){:|:&};:", "curl | sh", "wget -O- | sh"]
         for d in dangerous:
             if d in shell_cmd:
@@ -372,14 +372,14 @@ def start_feishu_listener(config: dict) -> Tuple:
 
 
 def restart_daemon() -> None:
-    """重启 Lampson daemon。"""
-    print("[safe_mode] 重启 Lampson daemon...", flush=True)
-    LAMPSON_DIR.mkdir(parents=True, exist_ok=True)
+    """重启 Lamix daemon。"""
+    print("[safe_mode] 重启 Lamix daemon...", flush=True)
+    LAMIX_DIR.mkdir(parents=True, exist_ok=True)
     try:
         # 启动 daemon（不等待）
         subprocess.Popen(
             DAEMON_ENTRY.split(),
-            cwd=str(LAMPSON_ROOT),
+            cwd=str(LAMIX_ROOT),
             stdout=open(DAEMON_LOG, "a"),
             stderr=open(DAEMON_ERR_LOG, "a"),
         )
@@ -394,7 +394,7 @@ def restart_daemon() -> None:
 def main() -> None:
     """主入口。"""
     print("=" * 50)
-    print("Lampson Safe Mode")
+    print("Lamix Safe Mode")
     print("=" * 50)
     print("可用命令：")
     print("  /recovery       - 查看恢复选项")

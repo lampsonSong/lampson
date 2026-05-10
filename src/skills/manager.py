@@ -1,4 +1,4 @@
-"""技能管理器：扫描 ~/.lampson/skills/，解析 SKILL.md，提供加载和查询接口。
+"""技能管理器：扫描 ~/.lamix/skills/，解析 SKILL.md，提供加载和查询接口。
 
 SKILL.md 格式：
     ---
@@ -21,7 +21,7 @@ from typing import Any
 import yaml
 
 
-SKILLS_DIR = Path.home() / ".lampson" / "memory" / "skills"
+SKILLS_DIR = Path.home() / ".lamix" / "memory" / "skills"
 BASE_SKILLS_DIR = Path(__file__).resolve().parent.parent.parent / "config" / "default_skills"
 
 # SKILL.md frontmatter 解析正则
@@ -67,7 +67,7 @@ def _parse_skill_md(path: Path) -> Skill | None:
 def load_all_skills() -> dict[str, Skill]:
     """扫描 base skills 和 user skills，加载并返回所有技能。
 
-    加载顺序：先 base（随仓库），再 user（~/.lampson/skills/）。
+    加载顺序：先 base（随仓库），再 user（~/.lamix/skills/）。
     同名 skill 以 user 版本为准（覆盖 base）。
     """
     skills: dict[str, Skill] = {}

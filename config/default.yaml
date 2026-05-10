@@ -1,5 +1,5 @@
-# Lampson 默认配置模板
-# 复制到 ~/.lampson/config.yaml 并填写相应字段
+# Lamix 默认配置模板
+# 复制到 ~/.lamix/config.yaml 并填写相应字段
 
 llm:
   api_key: ""                                        # 智谱 API Key（必填）
@@ -11,9 +11,9 @@ feishu:
   app_id: ""      # 飞书应用 App ID（可选）
   app_secret: ""  # 飞书应用 App Secret（可选）
 
-memory_path: "~/.lampson/memory"   # 记忆文件存储路径
-skills_path: "~/.lampson/skills"   # 技能文件存储路径
-projects_path: "~/.lampson/projects"  # 项目记录目录（.md）
+memory_path: "~/.lamix/memory"   # 记忆文件存储路径
+skills_path: "~/.lamix/skills"   # 技能文件存储路径
+projects_path: "~/.lamix/projects"  # 项目记录目录（.md）
 
 # Skills 管理（冷技能归档阈值）
 skills_management:

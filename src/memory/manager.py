@@ -6,9 +6,9 @@ from datetime import datetime
 from pathlib import Path
 
 
-LAMPSON_DIR = Path.home() / ".lampson"
-MEMORY_FILE = LAMPSON_DIR / "MEMORY.md"
-SESSIONS_DIR = LAMPSON_DIR / "memory" / "sessions"
+LAMIX_DIR = Path.home() / ".lamix"
+MEMORY_FILE = LAMIX_DIR / "MEMORY.md"
+SESSIONS_DIR = LAMIX_DIR / "memory" / "sessions"
 MEMORY_SIZE_LIMIT = 500  # 500 字符
 
 

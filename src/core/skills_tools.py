@@ -8,10 +8,10 @@ from typing import Any
 
 import yaml
 
-LAMPSON_DIR = Path.home() / ".lampson"
-SKILLS_DIR = LAMPSON_DIR / "memory" / "skills"
-PROJECTS_DIR = LAMPSON_DIR / "memory" / "projects"
-INFO_DIR = LAMPSON_DIR / "memory" / "info"
+LAMIX_DIR = Path.home() / ".lamix"
+SKILLS_DIR = LAMIX_DIR / "memory" / "skills"
+PROJECTS_DIR = LAMIX_DIR / "memory" / "projects"
+INFO_DIR = LAMIX_DIR / "memory" / "info"
 
 # Session 在启动时通过 set_retrieval_indices 注入，供 skill search/search_projects 使用
 _active_skill_index: Any = None
@@ -94,7 +94,7 @@ PROJECT_CONTEXT_SCHEMA = {
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "项目名称，例如 'Lampson'、'hermes'"
+                    "description": "项目名称，例如 'Lamix'、'hermes'"
                 }
             },
             "required": ["name"]
@@ -164,7 +164,7 @@ def project_context(params: dict[str, Any]) -> str:
     from src.core.prompt_builder import load_project_context as _load
     name = params.get("name", "")
     if not name:
-        return "project_context 需要 name 参数，例如：project_context(name=\"Lampson\")"
+        return "project_context 需要 name 参数，例如：project_context(name=\"Lamix\")"
     return _load(name)
 
 

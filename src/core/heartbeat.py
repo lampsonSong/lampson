@@ -2,7 +2,7 @@
 
 职责：
 1. HeartbeatManager：进程内线程，定期写心跳文件
-2. 心跳文件：~/.lampson/heartbeat/<pid>.json
+2. 心跳文件：~/.lamix/heartbeat/<pid>.json
 3. 收到 kill 信号时标记 user_stopped，避免 watchdog 误重拉
 """
 
@@ -15,9 +15,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from src.core.config import LAMPSON_DIR
+from src.core.config import LAMIX_DIR
 
-HEARTBEAT_DIR = LAMPSON_DIR / "heartbeat"
+HEARTBEAT_DIR = LAMIX_DIR / "heartbeat"
 HEARTBEAT_INTERVAL = 10  # 秒
 
 

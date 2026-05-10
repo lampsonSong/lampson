@@ -123,7 +123,7 @@ class FeishuListener:
         try:
             client = get_client()
             # 提取标题：取第一个 ## 或 **加粗**
-            title = "Lampson 回复"
+            title = "Lamix 回复"
             m = re.search(r"##\s*(.+)", text) or re.search(r"\*\*(.+?)\*\*", text)
             if m:
                 title = m.group(1).strip()
@@ -175,7 +175,7 @@ class FeishuListener:
         return {
             "schema": "2.0",
             "header": {
-                "title": {"tag": "plain_text", "content": "Lampson 工作进度"},
+                "title": {"tag": "plain_text", "content": "Lamix 工作进度"},
                 "template": "green" if finished else "blue",
             },
             "body": {"elements": elements},
@@ -197,7 +197,7 @@ class FeishuListener:
             try:
                 client = get_client()
                 status = "已完成" if finished else "处理中"
-                text_lines = [f"[Lampson 工作进度 - {status} ({len(lines)} 个工具调用)]"]
+                text_lines = [f"[Lamix 工作进度 - {status} ({len(lines)} 个工具调用)]"]
                 for line in lines[-10:]:
                     text_lines.append(line[:150])
                 client.send_text(receive_id=chat_id, text="\n".join(text_lines), receive_id_type="chat_id")

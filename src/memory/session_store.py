@@ -1,7 +1,7 @@
 """
 Session Store: JSONL 写入 + SQLite 索引同步。
 
-JSONL 是 source of truth（~/.lampson/memory/sessions/YYYY-MM-DD/{session_id}.jsonl）；
+JSONL 是 source of truth（~/.lamix/memory/sessions/YYYY-MM-DD/{session_id}.jsonl）；
 SQLite search.db 是加速层（FTS5 + sessions/segments 表）。
 
 设计文档：docs/memory-design.md
@@ -23,10 +23,10 @@ import jieba
 
 # ── 路径配置 ────────────────────────────────────────────────────────────
 
-LAMPSON_DIR = Path.home() / ".lampson"
-SESSIONS_DIR = LAMPSON_DIR / "memory" / "sessions"
-SEARCH_DB = LAMPSON_DIR / "memory" / "search.db"
-TOOL_BODIES_DIR = LAMPSON_DIR / "memory" / "tool_bodies"
+LAMIX_DIR = Path.home() / ".lamix"
+SESSIONS_DIR = LAMIX_DIR / "memory" / "sessions"
+SEARCH_DB = LAMIX_DIR / "memory" / "search.db"
+TOOL_BODIES_DIR = LAMIX_DIR / "memory" / "tool_bodies"
 
 # ── session_id → source 内存缓存（进程级别）──────────────────────────────
 
@@ -108,7 +108,7 @@ def _jieba_cut(text: str) -> str:
 
 def _ensure_dirs() -> None:
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-    LAMPSON_DIR.mkdir(parents=True, exist_ok=True)
+    LAMIX_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def close_orphan_sessions() -> int:
@@ -874,9 +874,9 @@ def load_resume_context(session_id: str) -> str | None:
 def _resolve_archive_target(target: str) -> Path | None:
     """将 archive target 解析为文件路径。"""
     if target.startswith("skill:"):
-        return LAMPSON_DIR / "skills" / f"{target[6:]}.md"
+        return LAMIX_DIR / "skills" / f"{target[6:]}.md"
     elif target.startswith("project:"):
-        return LAMPSON_DIR / "projects" / f"{target[8:]}.md"
+        return LAMIX_DIR / "projects" / f"{target[8:]}.md"
     return None
 
 

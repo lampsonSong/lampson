@@ -1,6 +1,6 @@
 """分层 System Prompt 构建器。
 
-Lampson system prompt 分层加载：
+Lamix system prompt 分层加载：
 
 Layer 1    Identity        - MEMORY.md（Agent 人格与行为准则）
 Layer 1.5  User            - USER.md（用户画像与偏好，多用户基础）
@@ -21,12 +21,12 @@ from typing import Any
 import yaml
 
 
-LAMPSON_DIR = Path.home() / ".lampson"
-MEMORY_PATH = LAMPSON_DIR / "MEMORY.md"
-USER_PATH = LAMPSON_DIR / "USER.md"
-SKILLS_DIR = LAMPSON_DIR / "memory" / "skills"
-PROJECTS_DIR = LAMPSON_DIR / "memory" / "projects"
-INFO_DIR = LAMPSON_DIR / "memory" / "info"
+LAMIX_DIR = Path.home() / ".lamix"
+MEMORY_PATH = LAMIX_DIR / "MEMORY.md"
+USER_PATH = LAMIX_DIR / "USER.md"
+SKILLS_DIR = LAMIX_DIR / "memory" / "skills"
+PROJECTS_DIR = LAMIX_DIR / "memory" / "projects"
+INFO_DIR = LAMIX_DIR / "memory" / "info"
 
 # 配置文件默认模板路径（仓库内）
 _CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "config"
@@ -49,7 +49,7 @@ MEMORY_GUIDANCE = (
 
 SKILLS_GUIDANCE = (
     "完成复杂任务（5+ 工具调用）、修复疑难错误或发现重要工作流后，\n"
-    "考虑将工作流记录到 ~/.lampson/memory/skills/ 目录下以便复用。\n"
+    "考虑将工作流记录到 ~/.lamix/memory/skills/ 目录下以便复用。\n"
     "如果发现某个 skill 过时或错误，及时更新它。\n"
     "不维护的 skills 迟早会成为负担。"
 )
@@ -132,7 +132,7 @@ def _skills_mtime_fingerprint(paths: list[Path]) -> frozenset[tuple[str, float]]
 
 
 def build_skills_index() -> str:
-    """扫描 ~/.lampson/skills 下 SKILL.md，生成注入 system prompt 的技能目录块。"""
+    """扫描 ~/.lamix/skills 下 SKILL.md，生成注入 system prompt 的技能目录块。"""
     global _skills_index_cache
     paths = _skill_md_paths_under_skills()
     if not paths:
@@ -216,7 +216,7 @@ def _extract_project_info(path: Path) -> tuple[str, str]:
 
 
 def build_project_index() -> str:
-    """扫描 ~/.lampson/projects/*.md，生成项目索引。"""
+    """扫描 ~/.lamix/projects/*.md，生成项目索引。"""
     global _projects_index_cache
     if not PROJECTS_DIR.exists():
         _projects_index_cache = (frozenset(), "")
@@ -244,7 +244,7 @@ def build_project_index() -> str:
 def load_project_context(name: str) -> str:
     """加载指定项目的完整上下文（projects/xxx.md 内容）。"""
     if not name:
-        return "project_context 需要 name 参数，例如：project_context(name=\"Lampson\")"
+        return "project_context 需要 name 参数，例如：project_context(name=\"Lamix\")"
 
     if not PROJECTS_DIR.exists():
         return f"[项目目录不存在：{PROJECTS_DIR}]"
@@ -370,7 +370,7 @@ def _read_config_template(path: Path) -> str:
 
 
 def _ensure_user_file() -> None:
-    """首次运行时将 default_user.md 模板复制为 ~/.lampson/USER.md。"""
+    """首次运行时将 default_user.md 模板复制为 ~/.lamix/USER.md。"""
     if USER_PATH.exists():
         return
     template = _read_config_template(_DEFAULT_USER_PATH)
@@ -380,7 +380,7 @@ def _ensure_user_file() -> None:
 
 
 def load_identity() -> str:
-    """加载 ~/.lampson/MEMORY.md，不存在则用 config/default_identity.md。"""
+    """加载 ~/.lamix/MEMORY.md，不存在则用 config/default_identity.md。"""
     if MEMORY_PATH.exists():
         try:
             content = MEMORY_PATH.read_text(encoding="utf-8").strip()
@@ -390,11 +390,11 @@ def load_identity() -> str:
             pass
     # 兜底：读仓库配置模板
     fallback = _read_config_template(_DEFAULT_IDENTITY_PATH)
-    return fallback or "你是 Lampson，一个 CLI 智能助手。"
+    return fallback or "你是 Lamix，一个 CLI 智能助手。"
 
 
 def load_user() -> str:
-    """加载 ~/.lampson/USER.md，不存在则从模板复制后读取（限 500 字符以内）。"""
+    """加载 ~/.lamix/USER.md，不存在则从模板复制后读取（限 500 字符以内）。"""
     _ensure_user_file()
     if not USER_PATH.exists():
         return ""

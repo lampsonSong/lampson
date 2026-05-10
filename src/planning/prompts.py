@@ -4,7 +4,7 @@
 
 PERSISTENT_ENV_BLOCK = """## 环境信息
 - 运行机器：macOS (Darwin, Apple Silicon)
-- lampson 项目路径：/Users/songyuhao/lampson
+- lamix 项目路径：/Users/songyuhao/lamix
 - 工作目录：/Users/songyuhao
 - 已知远程机器：train40 (IP: 10.136.61.40, 跳板: jump2@10.92.160.31)
 - 本机只能执行本地命令，操作远程需 SSH
@@ -24,18 +24,18 @@ PERSISTENT_ENV_BLOCK = """## 环境信息
 - **注意**：工具名必须是 `shell`、`file_read`、`file_write`、`search`、`skill`、`search_projects`、`project_context`、`session` 之一
 """
 
-MEMORY_STRUCTURE_BLOCK = """## lampson 记忆结构
+MEMORY_STRUCTURE_BLOCK = """## lamix 记忆结构
 
-lampson 的所有持久化数据存储在 ~/.lampson/ 目录下：
+lamix 的所有持久化数据存储在 ~/.lamix/ 目录下：
 
 ```
-~/.lampson/
+~/.lamix/
 ├── memory/
 │   ├── core.md              # 核心记忆（关于用户的基本偏好和重要事实）
 │   ├── sessions/            # 历史会话摘要（每个文件是一次对话的总结）
 │   ├── projects/            # 项目记录（用户主动记录的项目信息和文档）
 │   │   └── <项目名>.md      # 每个项目一个文件
-│   ├── skills/              # 技能文件（lampson 掌握的操作技能）
+│   ├── skills/              # 技能文件（lamix 掌握的操作技能）
 │   │   └── <技能名>/SKILL.md # 每个技能一个目录
 │   └── info/                # 知识性信息
 │       └── <名>.md          # 每条一个文件

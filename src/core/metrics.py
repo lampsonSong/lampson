@@ -13,11 +13,11 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
 
-from src.core.config import LAMPSON_DIR
+from src.core.config import LAMIX_DIR
 
 logger = logging.getLogger(__name__)
 
-METRICS_PATH = LAMPSON_DIR / "metrics.jsonl"
+METRICS_PATH = LAMIX_DIR / "metrics.jsonl"
 
 
 @dataclass

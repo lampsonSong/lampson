@@ -1,5 +1,5 @@
 """
-Memory 模块：管理 Lampson 的记忆系统。
+Memory 模块：管理 Lamix 的记忆系统。
 
 JSONL + SQLite FTS5 架构：
 - session_store: JSONL 写入 + SQLite 索引同步

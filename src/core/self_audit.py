@@ -20,12 +20,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from src.core.config import LAMPSON_DIR, SKILLS_DIR, PROJECTS_DIR, load_config
+from src.core.config import LAMIX_DIR, SKILLS_DIR, PROJECTS_DIR, load_config
 
 logger = logging.getLogger(__name__)
 
-LEARNED_MODULES_DIR = LAMPSON_DIR / "learned_modules"
-AUDIT_LOG_DIR = LAMPSON_DIR / "logs"
+LEARNED_MODULES_DIR = LAMIX_DIR / "learned_modules"
+AUDIT_LOG_DIR = LAMIX_DIR / "logs"
 AUDIT_LOG_PATH = AUDIT_LOG_DIR / "self_audit.log"
 
 
@@ -413,7 +413,7 @@ def scan_user_patterns(days: int = 1) -> list[AuditFinding]:
     from datetime import date, timedelta
 
     findings: list[AuditFinding] = []
-    sessions_dir = LAMPSON_DIR / "memory" / "sessions"
+    sessions_dir = LAMIX_DIR / "memory" / "sessions"
     if not sessions_dir.exists():
         return findings
 

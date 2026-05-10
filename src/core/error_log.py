@@ -1,7 +1,7 @@
 """
 Error Log — 结构化错误日志，支持自动 debug 复现。
 
-写入 ~/.lampson/memory/errors.jsonl，每条记录包含：
+写入 ~/.lamix/memory/errors.jsonl，每条记录包含：
 - 错误基本信息（类型、消息、来源）
 - 上下文快照（session_id、最近 N 条 messages 摘要、tool_call/result）
 - 用于自动 debug 的复现信息
@@ -24,8 +24,8 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-LAMPSON_DIR = Path.home() / ".lampson"
-ERRORS_LOG = LAMPSON_DIR / "memory" / "errors.jsonl"
+LAMIX_DIR = Path.home() / ".lamix"
+ERRORS_LOG = LAMIX_DIR / "memory" / "errors.jsonl"
 
 # 错误来源分类
 SOURCE_LLM = "llm"

@@ -17,7 +17,7 @@ import queue
 import threading
 
 from src.core.config import (
-    LAMPSON_DIR,
+    LAMIX_DIR,
     get_retrieval_config,
     get_embedding_config,
     INDEX_DIR,
@@ -70,7 +70,7 @@ HELP_TEXT = """\
   /new                           开始新 session（清空当前对话上下文）
   /exit                          退出
 
-直接输入自然语言即可与 Lampson 对话。"""
+直接输入自然语言即可与 Lamix 对话。"""
 
 
 def _assistant_content_as_text(content: Any) -> str:
@@ -1190,7 +1190,7 @@ class Session:
 
         lines = [f"找到 {len(results)} 条与 \"{query}\" 相关的记录：\n"]
         for i, r in enumerate(results, 1):
-            role_label = "用户" if r.role == "user" else "Lampson"
+            role_label = "用户" if r.role == "user" else "Lamix"
             try:
                 dt = datetime.fromtimestamp(r.ts / 1000).strftime("%Y-%m-%d %H:%M")
             except Exception:
@@ -1253,7 +1253,7 @@ class Session:
                 pass
 
         # 读取 MEMORY.md 最后修改时间
-        memory_path = LAMPSON_DIR / "MEMORY.md"
+        memory_path = LAMIX_DIR / "MEMORY.md"
         hours_since_update = float("inf")
         if memory_path.exists():
             mtime = memory_path.stat().st_mtime
@@ -1287,7 +1287,7 @@ class Session:
         # LLM 抽取精华
         all_content = "\n\n".join(skill_summaries + project_summaries)
         prompt = (
-            "以下是 Lampson 的归档知识（skill 和 project），"
+            "以下是 Lamix 的归档知识（skill 和 project），"
             "请抽取对长期记忆最有价值的精华，生成简洁的 MEMORY.md 内容。\n"
             "只保留：用户偏好、关键决策、重要约束、常用工具技巧。\n"
             "每条一行，用简洁的中文描述。不要超过 50 行。\n\n"

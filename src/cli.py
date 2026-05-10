@@ -17,7 +17,7 @@ from src.core.config import (
     load_config,
     is_config_complete,
     run_setup_wizard,
-    LAMPSON_DIR,
+    LAMIX_DIR,
 )
 from src.core.session_manager import get_session_manager
 from src.memory import session_store
@@ -52,8 +52,8 @@ def _parse_args() -> tuple[str | None, bool]:
     import argparse
 
     parser = argparse.ArgumentParser(
-        prog="lampson",
-        description="Lampson CLI 智能助手",
+        prog="lamix",
+        description="Lamix CLI 智能助手",
         add_help=True,
     )
     parser.add_argument(
@@ -126,9 +126,9 @@ def _run_repl(config: dict) -> None:
     session.partial_sender = _cli_partial_sender
     skill_count = len(session.skills)
     feishu_status = "已连接" if session.feishu_ready else "未配置"
-    print(f"Lampson 已启动（技能: {skill_count} 个，飞书: {feishu_status}）。输入 /help 查看命令，Ctrl+C 或 /exit 退出。\n")
+    print(f"Lamix 已启动（技能: {skill_count} 个，飞书: {feishu_status}）。输入 /help 查看命令，Ctrl+C 或 /exit 退出。\n")
 
-    history_file = LAMPSON_DIR / ".repl_history"
+    history_file = LAMIX_DIR / ".repl_history"
     prompt_session: PromptSession = PromptSession(
         history=FileHistory(str(history_file)),
         auto_suggest=AutoSuggestFromHistory(),
@@ -164,7 +164,7 @@ def _run_repl(config: dict) -> None:
                 if result.is_command:
                     print(result.reply)
                 else:
-                    print(f"\nLampson> {result.reply}\n")
+                    print(f"\nLamix> {result.reply}\n")
 
                 # 计划待确认时由用户选择是否执行
                 if (
@@ -181,9 +181,9 @@ def _run_repl(config: dict) -> None:
                     if confirm_input in ("y", "yes", "是"):
                         exec_result = session.agent.confirm_and_execute()
                         if exec_result:
-                            print(f"\nLampson> {exec_result}\n")
+                            print(f"\nLamix> {exec_result}\n")
                     else:
-                        print(f"\nLampson> {session.agent.cancel_plan()}\n")
+                        print(f"\nLamix> {session.agent.cancel_plan()}\n")
                     # 与 handle_input 一致：确认/取消后的回合也尝试压缩
                     try:
                         cr = session.agent.maybe_compact(
@@ -217,7 +217,7 @@ def main() -> None:
     config = load_config()
     if not is_config_complete(config):
         if non_interactive_input is not None:
-            print("Lampson 未配置，请先运行 lampson 进入交互模式完成配置。")
+            print("Lamix 未配置，请先运行 lamix 进入交互模式完成配置。")
             sys.exit(1)
         try:
             config = run_setup_wizard()

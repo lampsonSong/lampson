@@ -22,9 +22,9 @@ from src.planning.steps import Plan, StepStatus
 
 logger = logging.getLogger(__name__)
 
-LAMPSON_DIR = Path.home() / ".lampson"
-SKILLS_DIR = LAMPSON_DIR / "memory" / "skills"
-PROJECTS_DIR = LAMPSON_DIR / "memory" / "projects"
+LAMIX_DIR = Path.home() / ".lamix"
+SKILLS_DIR = LAMIX_DIR / "memory" / "skills"
+PROJECTS_DIR = LAMIX_DIR / "memory" / "projects"
 
 # 反思冷却时间（秒）：距上次反思不足此间隔则跳过
 _REFLECT_COOLDOWN = 300  # 5 分钟
@@ -254,7 +254,7 @@ def execute_learnings(learnings: list[dict[str, Any]]) -> list[str]:
 def _notify_feishu(message: str) -> None:
     """发送飞书卡片通知（skill 变更时调用）。静默失败，不阻塞主流程。"""
     try:
-        config_path = Path.home() / ".lampson" / "config.yaml"
+        config_path = Path.home() / ".lamix" / "config.yaml"
         if not config_path.exists():
             return
         with open(config_path) as f:
@@ -384,7 +384,7 @@ def _create_module(target: str, content: str, reason: str) -> str | None:
         logger.warning(f"模块名非法: {target}，跳过")
         return None
 
-    MODULES_DIR = LAMPSON_DIR / "learned_modules"
+    MODULES_DIR = LAMIX_DIR / "learned_modules"
     MODULES_DIR.mkdir(parents=True, exist_ok=True)
     module_file = MODULES_DIR / f"{safe_name}.py"
 
@@ -409,7 +409,7 @@ def _update_module(target: str, content: str, reason: str) -> str | None:
     if not safe_name:
         return None
 
-    MODULES_DIR = LAMPSON_DIR / "learned_modules"
+    MODULES_DIR = LAMIX_DIR / "learned_modules"
     module_file = MODULES_DIR / f"{safe_name}.py"
 
     if not module_file.exists():
@@ -494,7 +494,7 @@ def _get_existing_projects_summary() -> str:
 
 def _get_existing_modules_summary() -> str:
     """获取已有 learned_modules 列表摘要。"""
-    MODULES_DIR = LAMPSON_DIR / "learned_modules"
+    MODULES_DIR = LAMIX_DIR / "learned_modules"
     if not MODULES_DIR.exists():
         return "(无)"
     lines = []

@@ -134,7 +134,7 @@ def _resolve_runner(module_name: str, func_name: str) -> tuple[Any, str]:
 
     mod = get_module(module_name)
     if mod is None:
-        return None, f"模块 '{module_name}' 未加载。请确认 ~/.lampson/learned_modules/{module_name}.py 存在且已注册。"
+        return None, f"模块 '{module_name}' 未加载。请确认 ~/.lamix/learned_modules/{module_name}.py 存在且已注册。"
 
     func = getattr(mod, func_name, None)
     if func is None or not callable(func):

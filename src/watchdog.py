@@ -3,7 +3,7 @@
 启动方式：由 launchd 管理（独立于 daemon 的 service）。
 心跳超时（30 秒无心跳）→ 检查是否 user_stopped → 否则重启 daemon。
 
-心跳文件：~/.lampson/heartbeat/<pid>.json
+心跳文件：~/.lamix/heartbeat/<pid>.json
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from pathlib import Path
 # 添加项目路径
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.core.config import LAMPSON_DIR
+from src.core.config import LAMIX_DIR
 from src.core.heartbeat import (
     HEARTBEAT_DIR,
     HEARTBEAT_INTERVAL,
@@ -34,8 +34,8 @@ from src.core.heartbeat import (
 
 HEARTBEAT_TIMEOUT = 30  # 秒，无心跳则认为死亡
 WATCHDOG_INTERVAL = 10  # 秒，检查频率
-LOG_DIR = LAMPSON_DIR / "logs"
-DAEMON_LAUNCHCTL_LABEL = "com.lampson.gateway"
+LOG_DIR = LAMIX_DIR / "logs"
+DAEMON_LAUNCHCTL_LABEL = "com.lamix.gateway"
 
 
 def _log(msg: str) -> None:
@@ -54,7 +54,7 @@ def _log(msg: str) -> None:
 
 def _load_config() -> dict:
     """加载配置。"""
-    config_path = LAMPSON_DIR / "config.yaml"
+    config_path = LAMIX_DIR / "config.yaml"
     if not config_path.exists():
         return {}
     try:
@@ -215,7 +215,7 @@ class Watchdog:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Lampson Watchdog")
+    parser = argparse.ArgumentParser(description="Lamix Watchdog")
     parser.parse_args()
     Watchdog().run()
 

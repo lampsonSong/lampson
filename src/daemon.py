@@ -1,4 +1,4 @@
-"""Lampson Daemon 主进程。
+"""Lamix Daemon 主进程。
 
 职责：
 1. 加载配置、初始化 SessionManager
@@ -24,7 +24,7 @@ import tempfile
 import threading
 from pathlib import Path
 
-from src.core.config import load_config, is_config_complete, LAMPSON_DIR
+from src.core.config import load_config, is_config_complete, LAMIX_DIR
 from src.core.heartbeat import HeartbeatManager
 from src.core.session_manager import get_session_manager
 from src.core.self_audit import (
@@ -37,8 +37,8 @@ from src.core.self_audit import (
 from src.core.task_scheduler import TaskScheduler, TaskType, TaskConfig, schedule, start as scheduler_start, shutdown as scheduler_shutdown
 from src.core.tools import load_learned_modules
 
-LOG_DIR = LAMPSON_DIR / "logs"
-_BOOT_TASKS_PATH = LAMPSON_DIR / "boot_tasks.json"
+LOG_DIR = LAMIX_DIR / "logs"
+_BOOT_TASKS_PATH = LAMIX_DIR / "boot_tasks.json"
 _DAEMON_PID_PATH = LOG_DIR / "daemon.pid"
 _shutdown = threading.Event()
 _heartbeat_mgr: HeartbeatManager | None = None
@@ -79,7 +79,7 @@ def _self_audit_callback() -> None:
         if len(content) > 4000:
             content = content[:4000] + "\n\n...（报告过长已截断）"
         _audit_log(f"[self_audit] 审计完成，开始发送报告")
-        _send_feishu(config, f"🕐 Lampson 自我审计报告\n\n{content}")
+        _send_feishu(config, f"🕐 Lamix 自我审计报告\n\n{content}")
         print("[self_audit] 审计完成并已发送", flush=True)
     except Exception as e:
         print(f"[self_audit] 执行失败: {e}", flush=True)
@@ -137,7 +137,7 @@ def _send_boot_notification(config: dict, pid: int) -> None:
     try:
         from src.feishu.client import FeishuClient
         client = FeishuClient(app_id=app_id, app_secret=app_secret)
-        text = f"Lampson 已上线 (PID={pid})"
+        text = f"Lamix 已上线 (PID={pid})"
 
         for attempt in range(2):
             try:
@@ -285,7 +285,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         prog="python -m src.daemon",
-        description="Lampson 常驻 daemon：多平台消息网关 + 飞书 WebSocket 长连接监听。",
+        description="Lamix 常驻 daemon：多平台消息网关 + 飞书 WebSocket 长连接监听。",
     )
     parser.parse_args()
 
@@ -320,7 +320,7 @@ def main() -> None:
     # ── 写 pid ───────────────────────────────────────────────────────────
     pid = os.getpid()
     _write_daemon_pid()
-    print(f"[daemon] Lampson daemon 已启动 (PID={pid})", flush=True)
+    print(f"[daemon] Lamix daemon 已启动 (PID={pid})", flush=True)
 
     # ── 启动心跳 ──────────────────────────────────────────────────────────
     _heartbeat_mgr = HeartbeatManager(task_id="daemon")
@@ -418,7 +418,7 @@ def _trigger_safe_mode(pm, mgr) -> None:
         try:
             proc = subprocess.Popen(
                 [sys.executable, str(SAFE_MODE_SCRIPT)],
-                cwd=str(LAMPSON_DIR.parent / "lampson"),
+                cwd=str(LAMIX_DIR.parent / "lamix"),
                 stdout=open(LOG_DIR / "safe_mode.log", "a"),
                 stderr=open(LOG_DIR / "safe_mode.err.log", "a"),
             )

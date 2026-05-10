@@ -27,7 +27,7 @@ class TestFixConfigPaths:
         config_file.write_text(yaml.dump(config_data), encoding="utf-8")
 
         with (
-            patch.object(cfg_mod, "LAMPSON_DIR", tmp_path),
+            patch.object(cfg_mod, "LAMIX_DIR", tmp_path),
             patch.object(cfg_mod, "CONFIG_PATH", config_file),
             patch.object(cfg_mod, "SKILLS_DIR", new_skills),
             patch.object(cfg_mod, "PROJECTS_DIR", tmp_path / "memory" / "projects"),
@@ -56,7 +56,7 @@ class TestFixConfigPaths:
         config_file.write_text(yaml.dump(config_data), encoding="utf-8")
 
         with (
-            patch.object(cfg_mod, "LAMPSON_DIR", tmp_path),
+            patch.object(cfg_mod, "LAMIX_DIR", tmp_path),
             patch.object(cfg_mod, "CONFIG_PATH", config_file),
             patch.object(cfg_mod, "SKILLS_DIR", new_skills),
             patch.object(cfg_mod, "PROJECTS_DIR", tmp_path / "memory" / "projects"),
@@ -85,7 +85,7 @@ class TestFixConfigPaths:
         new_projects = tmp_path / "memory" / "projects"
 
         with (
-            patch.object(cfg_mod, "LAMPSON_DIR", tmp_path),
+            patch.object(cfg_mod, "LAMIX_DIR", tmp_path),
             patch.object(cfg_mod, "CONFIG_PATH", config_file),
             patch.object(cfg_mod, "SKILLS_DIR", new_skills),
             patch.object(cfg_mod, "PROJECTS_DIR", new_projects),
@@ -115,7 +115,7 @@ class TestFixConfigPaths:
 
         config_file = tmp_path / "config.yaml"
         config_data = {
-            "skills_path": "~/.lampson/skills",
+            "skills_path": "~/.lamix/skills",
             "llm": {"api_key": "test"},
         }
         config_file.write_text(yaml.dump(config_data), encoding="utf-8")
@@ -123,7 +123,7 @@ class TestFixConfigPaths:
         new_skills = tmp_path / "memory" / "skills"
 
         with (
-            patch.object(cfg_mod, "LAMPSON_DIR", tmp_path),
+            patch.object(cfg_mod, "LAMIX_DIR", tmp_path),
             patch.object(cfg_mod, "CONFIG_PATH", config_file),
             patch.object(cfg_mod, "SKILLS_DIR", new_skills),
             patch.object(cfg_mod, "PROJECTS_DIR", tmp_path / "memory" / "projects"),
@@ -158,7 +158,7 @@ class TestMigrateOldDirs:
         new_skills = tmp_path / "memory" / "skills"
 
         with (
-            patch.object(cfg_mod, "LAMPSON_DIR", tmp_path),
+            patch.object(cfg_mod, "LAMIX_DIR", tmp_path),
             patch.object(cfg_mod, "CONFIG_PATH", config_file),
             patch.object(cfg_mod, "SKILLS_DIR", new_skills),
             patch.object(cfg_mod, "PROJECTS_DIR", tmp_path / "memory" / "projects"),

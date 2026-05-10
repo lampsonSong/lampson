@@ -29,7 +29,7 @@ PROTECTED_FILES = {
     "src/tools/shell.py",
 }
 
-UPDATE_SYSTEM_PROMPT = """你是 Lampson 的自更新助手。用户会给你一个需求描述，你需要分析并生成代码修改方案。
+UPDATE_SYSTEM_PROMPT = """你是 Lamix 的自更新助手。用户会给你一个需求描述，你需要分析并生成代码修改方案。
 
 响应格式必须是合法的 JSON，结构如下：
 {
@@ -47,7 +47,7 @@ UPDATE_SYSTEM_PROMPT = """你是 Lampson 的自更新助手。用户会给你一
 注意：
 - 只修改必要的文件
 - content 字段必须是完整可运行的代码，不能有 TODO 或 placeholder
-- 路径相对于项目根目录（lampson/）
+- 路径相对于项目根目录（lamix/）
 - 如果不需要修改任何文件（纯对话），files 返回空数组
 """
 

@@ -73,7 +73,7 @@ if _vision:
 # ── learned_modules 延迟加载 ──────────────────────────────────────────────
 
 def load_learned_modules() -> None:
-    """扫描 ~/.lampson/learned_modules/，注册所有包含 TOOL_SCHEMA 的模块为工具。
+    """扫描 ~/.lamix/learned_modules/，注册所有包含 TOOL_SCHEMA 的模块为工具。
 
     必须在 daemon 启动完成后调用，不能在模块初始化时调用，否则会产生循环导入：
     tools.py → learned_modules.py → tools.py（tools 模块还未初始化完成）。
@@ -102,7 +102,7 @@ def _ensure_feishu_client() -> bool:
         return True
 
     config_paths = [
-        Path("~/.lampson/config.yaml").expanduser(),
+        Path("~/.lamix/config.yaml").expanduser(),
         Path("config/default.yaml").expanduser(),
     ]
 

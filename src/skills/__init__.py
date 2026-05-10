@@ -1,1 +1,1 @@
-"""Skills 模块：管理 Lampson 的技能系统。"""
+"""Skills 模块：管理 Lamix 的技能系统。"""
