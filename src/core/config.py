@@ -5,9 +5,11 @@ from __future__ import annotations
 import logging
 import os
 import re
+from getpass import getpass
 from pathlib import Path
 from typing import Any
 
+import httpx
 import yaml
 
 logger = logging.getLogger(__name__)
@@ -63,6 +65,56 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 # Pattern to match ${ENV_VAR} placeholders
 _ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
+
+# Provider presets for setup wizard
+PROVIDER_PRESETS = {
+    "1": {
+        "name": "智谱 GLM",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4/",
+        "models": ["glm-5.1", "glm-5-turbo", "glm-4-plus"],
+        "default_model": "glm-5.1",
+        "key_hint": "在 open.bigmodel.cn 获取",
+    },
+    "2": {
+        "name": "MiniMax",
+        "base_url": "https://api.minimaxi.com/v1/",
+        "models": ["MiniMax-M2.5", "MiniMax-M2.7-highspeed"],
+        "default_model": "MiniMax-M2.5",
+        "key_hint": "在 platform.minimaxi.com 获取",
+    },
+    "3": {
+        "name": "DeepSeek",
+        "base_url": "https://api.deepseek.com/",
+        "models": ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"],
+        "default_model": "deepseek-v4-flash",
+        "key_hint": "在 platform.deepseek.com 获取（新用户送 500 万 token）",
+    },
+}
+
+
+def _bold(text: str) -> str:
+    """返回加粗文本（ANSI 转义码）。"""
+    return f"\033[1m{text}\033[0m"
+
+
+def _cyan(text: str) -> str:
+    """返回青色文本（ANSI 转义码）。"""
+    return f"\033[36m{text}\033[0m"
+
+
+def _green(text: str) -> str:
+    """返回绿色文本（ANSI 转义码）。"""
+    return f"\033[32m{text}\033[0m"
+
+
+def _red(text: str) -> str:
+    """返回红色文本（ANSI 转义码）。"""
+    return f"\033[31m{text}\033[0m"
+
+
+def _yellow(text: str) -> str:
+    """返回黄色文本（ANSI 转义码）。"""
+    return f"\033[33m{text}\033[0m"
 
 
 def ensure_dirs() -> None:
@@ -271,41 +323,152 @@ def is_config_complete(config: dict[str, Any]) -> bool:
 
 def run_setup_wizard() -> dict[str, Any]:
     """首次运行引导用户填写配置，返回配置字典。"""
-    print("\n欢迎使用 Lamix！首次运行需要配置一些信息。\n")
+    print(f"\n{_bold('欢迎使用 Lamix！')}首次运行需要配置 LLM 供应商信息。\n")
 
     config = load_config()
 
-    api_key = input("请输入 API Key（内网模型可直接回车跳过）: ").strip()
-    config["llm"]["api_key"] = api_key
+    try:
+        # 1. 选择 Provider
+        while True:
+            print(_bold("请选择 LLM 供应商："))
+            print("  1. 智谱 GLM（推荐）")
+            print("  2. MiniMax")
+            print("  3. DeepSeek")
+            print("  4. 自定义（手动填写 URL）")
+            provider_choice = input("请输入编号 [1-4]: ").strip()
 
-    base_url = input(
-        f"LLM Base URL（回车使用默认 {config['llm']['base_url']}）: "
-    ).strip()
-    if base_url:
+            if provider_choice in ["1", "2", "3", "4"]:
+                break
+            print(_red("无效输入，请输入 1-4 之间的数字。\n"))
+
+        # 2. 设置预设或自定义配置
+        if provider_choice in PROVIDER_PRESETS:
+            preset = PROVIDER_PRESETS[provider_choice]
+            provider_name = preset["name"]
+            base_url = preset["base_url"]
+            models = preset["models"]
+            default_model = preset["default_model"]
+            key_hint = preset["key_hint"]
+        else:  # 自定义
+            provider_name = "自定义"
+            base_url = input("\n请输入 API Base URL: ").strip()
+            if not base_url:
+                print(_yellow("未输入 Base URL，使用默认值"))
+                base_url = config["llm"]["base_url"]
+            models = []
+            default_model = ""
+            key_hint = "请向供应商获取"
+
+        # 3. 输入 API Key
+        print(f"\n{_cyan('已选择：' + provider_name)}")
+        print(f"{_cyan('API 地址：' + base_url)}")
+
+        try:
+            api_key = getpass(f"请输入 API Key（{key_hint}）: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            # getpass 在某些环境可能失败，降级为普通 input
+            api_key = input(f"请输入 API Key（{key_hint}）: ").strip()
+
+        config["llm"]["api_key"] = api_key
         config["llm"]["base_url"] = base_url
 
-    model = input(
-        f"模型名（回车使用默认 {config['llm']['model']}）: "
-    ).strip()
-    if model:
-        config["llm"]["model"] = model
+        # 4. 选择模型
+        if models:
+            print(f"\n{_bold('选择模型：')}")
+            for i, model in enumerate(models, 1):
+                if model == default_model:
+                    print(f"  {i}. {model}（默认）")
+                else:
+                    print(f"  {i}. {model}")
+            print(f"  {len(models) + 1}. 手动输入")
 
-    print("\n飞书配置（可选，直接回车跳过）：")
-    app_id = input("飞书 App ID: ").strip()
-    if app_id:
-        config["feishu"]["app_id"] = app_id
+            while True:
+                model_choice = input(f"请输入编号 [1-{len(models) + 1}]（回车使用默认）: ").strip()
 
-    app_secret = input("飞书 App Secret: ").strip()
-    if app_secret:
-        config["feishu"]["app_secret"] = app_secret
+                if not model_choice:
+                    selected_model = default_model
+                    break
+                elif model_choice.isdigit():
+                    idx = int(model_choice) - 1
+                    if 0 <= idx < len(models):
+                        selected_model = models[idx]
+                        break
+                    elif idx == len(models):
+                        selected_model = input("请输入模型名: ").strip()
+                        if selected_model:
+                            break
+                        print(_red("模型名不能为空。\n"))
+                        continue
 
-    chat_ids_raw = input("要监听的飞书会话 ID（chat_id，多个用逗号分隔，回车跳过）: ").strip()
-    if chat_ids_raw:
-        config["feishu"]["chat_ids"] = [c.strip() for c in chat_ids_raw.split(",") if c.strip()]
+                print(_red(f"无效输入，请输入 1-{len(models) + 1} 之间的数字。\n"))
+        else:
+            # 自定义 provider，直接输入模型名
+            selected_model = input(f"\n请输入模型名（回车使用默认 {config['llm']['model']}）: ").strip()
+            if not selected_model:
+                selected_model = config["llm"]["model"]
 
-    save_config(config)
-    print(f"\n配置已保存到 {CONFIG_PATH}\n")
-    return config
+        config["llm"]["model"] = selected_model
+
+        # 5. 连通性验证
+        print(f"\n{_cyan('正在验证连接...')}")
+        if _verify_connection(base_url, api_key):
+            print(_green("✓ 连接成功"))
+        else:
+            print(_yellow("⚠ 连接验证失败，但您可以继续使用（请检查 API Key 和网络）"))
+            retry = input("是否重新配置？(y/N): ").strip().lower()
+            if retry == "y":
+                # 递归调用重新配置
+                return run_setup_wizard()
+
+        # 6. 飞书配置（可选）
+        print(f"\n{_bold('飞书配置')}（可选，直接回车跳过）：")
+        app_id = input("飞书 App ID: ").strip()
+        if app_id:
+            config["feishu"]["app_id"] = app_id
+
+        app_secret = input("飞书 App Secret: ").strip()
+        if app_secret:
+            config["feishu"]["app_secret"] = app_secret
+
+        chat_ids_raw = input("要监听的飞书会话 ID（chat_id，多个用逗号分隔，回车跳过）: ").strip()
+        if chat_ids_raw:
+            config["feishu"]["chat_ids"] = [c.strip() for c in chat_ids_raw.split(",") if c.strip()]
+
+        # 7. 保存配置
+        save_config(config)
+        print(f"\n{_green('配置已保存到')} {CONFIG_PATH}\n")
+        return config
+
+    except (KeyboardInterrupt, EOFError):
+        print("\n\n配置已取消。")
+        raise SystemExit(1)
+
+
+def _verify_connection(base_url: str, api_key: str) -> bool:
+    """验证 API 连接是否正常。
+
+    Args:
+        base_url: API 基础 URL
+        api_key: API 密钥
+
+    Returns:
+        连接成功返回 True，失败返回 False
+    """
+    if not api_key:
+        # 如果没有 API Key（如内网模型），跳过验证
+        return True
+
+    try:
+        # 尝试调用 /models 端点
+        url = base_url.rstrip("/") + "/models"
+        headers = {"Authorization": f"Bearer {api_key}"}
+
+        with httpx.Client(timeout=10.0) as client:
+            response = client.get(url, headers=headers)
+            return response.status_code == 200
+    except Exception as e:
+        logger.debug("Connection verification failed: %s", e)
+        return False
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
