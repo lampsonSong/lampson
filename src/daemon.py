@@ -250,6 +250,8 @@ def _get_boot_tasks_session(mgr, config: dict):
 
 def _inject_boot_tasks(session, tasks: list[dict], config: dict | None = None) -> None:
     """将 boot_tasks 注入 session 并主动执行一轮 agent。"""
+    _feishu_sender = None
+
     # 飞书 session 需要 partial_sender 才能把回复发出去
     if config and session.channel == "feishu":
         owner_chat_id = config.get("feishu", {}).get("owner_chat_id", "").strip()
@@ -258,10 +260,11 @@ def _inject_boot_tasks(session, tasks: list[dict], config: dict | None = None) -
         if owner_chat_id and app_id and app_secret:
             from src.feishu.client import FeishuClient
             client = FeishuClient(app_id=app_id, app_secret=app_secret)
-            session.partial_sender = lambda t: client.send_message(
+            _feishu_sender = lambda t: client.send_message(
                 receive_id=owner_chat_id, text=t, receive_id_type="chat_id"
             )
-            session._reply_callback = session.partial_sender
+            session.partial_sender = _feishu_sender
+            session._reply_callback = _feishu_sender
 
     lines = ["[系统] 你刚完成重启，有以下待办任务需要执行："]
     for i, t in enumerate(tasks, 1):
@@ -274,9 +277,24 @@ def _inject_boot_tasks(session, tasks: list[dict], config: dict | None = None) -
         result = session.handle_input(prompt)
         if result.reply:
             print(f"[daemon] boot_tasks 执行完成: {result.reply[:100]}", flush=True)
+        else:
+            # 空结果也通知用户
+            msg = "boot_tasks 执行完成但返回为空，可能 context 过长导致 LLM 无法响应。"
+            print(f"[daemon] {msg}", flush=True)
+            if _feishu_sender:
+                try:
+                    _feishu_sender(msg)
+                except Exception:
+                    pass
     except Exception as e:
-        print(f"[daemon] boot_tasks 执行失败: {e}", flush=True)
-
+        err_msg = f"boot_tasks 执行失败: {e}"
+        print(f"[daemon] {err_msg}", flush=True)
+        # 失败时通知用户
+        if _feishu_sender:
+            try:
+                _feishu_sender(f"⚠️ 启动待办任务执行失败：{e}")
+            except Exception:
+                pass
 
 def _patch_websockets_ssl() -> None:
     """Monkey-patch websockets.connect 使用 certifi CA 证书。
