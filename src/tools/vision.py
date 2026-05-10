@@ -4,20 +4,41 @@ from __future__ import annotations
 
 import base64
 import io
+from pathlib import Path
 from typing import Any
 
 import httpx
+import yaml
 from PIL import Image
 
 
-# 智谱 GLM-4.6V
-API_KEY = "REDACTED"
-API_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
-MODEL = "glm-4.6v"
-TIMEOUT = 60
+def _load_vision_config() -> dict[str, Any]:
+    """从 ~/.lamix/config.yaml 加载 vision 配置段。"""
+    config_path = Path.home() / ".lamix" / "config.yaml"
 
-# base64 编码后超过此阈值（字符数）则自动压缩
-MAX_BASE64_LENGTH = 4_000_000  # ~3MB 原始数据
+    if not config_path.exists():
+        return {}
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+        return config.get("vision", {})
+    except Exception:
+        return {}
+
+
+def _get_config_value(key: str, default: Any) -> Any:
+    """获取 vision 配置项，如果不存在则返回默认值。"""
+    vision_config = _load_vision_config()
+    return vision_config.get(key, default)
+
+
+# 从配置文件读取，提供合理默认值
+API_KEY = _get_config_value("api_key", "")
+API_URL = _get_config_value("base_url", "https://open.bigmodel.cn/api/paas/v4/chat/completions")
+MODEL = _get_config_value("model", "glm-4.6v")
+TIMEOUT = _get_config_value("timeout", 60)
+MAX_BASE64_LENGTH = _get_config_value("max_base64_length", 4_000_000)
 
 
 def _compress_image(image_base64: str, max_length: int = MAX_BASE64_LENGTH) -> str:
@@ -51,6 +72,19 @@ def analyze_image(image_base64: str, prompt: str = "描述这张图片的内容"
     Returns:
         模型的文字回复
     """
+    # 检查配置是否存在
+    if not API_KEY:
+        return (
+            "[配置错误] 未配置 vision API key。\n"
+            "请在 ~/.lamix/config.yaml 中添加 vision 配置段：\n"
+            "vision:\n"
+            "  api_key: your_api_key_here\n"
+            "  model: glm-4.6v\n"
+            "  base_url: https://open.bigmodel.cn/api/paas/v4/chat/completions\n"
+            "  timeout: 60\n"
+            "  max_base64_length: 4000000"
+        )
+
     try:
         image_base64 = _compress_image(image_base64)
 

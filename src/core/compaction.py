@@ -44,6 +44,7 @@ def _notify_progress(cb: Callable[[str], None] | None, msg: str) -> None:
 LAMIX_DIR = Path.home() / ".lamix"
 SKILLS_DIR = LAMIX_DIR / "memory" / "skills"
 PROJECTS_DIR = LAMIX_DIR / "memory" / "projects"
+INFO_DIR = LAMIX_DIR / "memory" / "info"
 COMPACTION_LOG = LAMIX_DIR / ".compaction_log.jsonl"
 
 # ── 配置 ──────────────────────────────────────────────────────────────────────
@@ -113,7 +114,7 @@ assistant 消息的 `referenced_tool_results` 字段记录了该回复引用了�
 只输出 JSON，不要其他内容：
 {
   "decisions": [
-    {"msg_id": "msg_001", "action": "keep|archive|discard", "target": "skill:xxx|project:xxx|null", "reason": "原因"}
+    {"msg_id": "msg_001", "action": "keep|archive|discard", "target": "skill:xxx|project:xxx|info:xxx|null", "reason": "原因"}
   ],
   "tool_refs": {
     "call_001": {
@@ -608,7 +609,7 @@ def _write_segment_boundary(
 # ── Step 3-4: Read + Integrate ───────────────────────────────────────────────
 
 def _list_existing_files() -> dict[str, str]:
-    """列出所有现有 skill 和 project 文件的前 200 字摘要。"""
+    """列出所有现有 skill、project 和 info 文件的前 200 字摘要。"""
     result: dict[str, str] = {}
     for path in SKILLS_DIR.glob("*.md"):
         try:
@@ -620,6 +621,12 @@ def _list_existing_files() -> dict[str, str]:
         try:
             content = path.read_text(encoding="utf-8")[:200]
             result[f"project:{path.stem}"] = content
+        except OSError:
+            pass
+    for path in INFO_DIR.glob("*.md"):
+        try:
+            content = path.read_text(encoding="utf-8")[:200]
+            result[f"info:{path.stem}"] = content
         except OSError:
             pass
     return result
@@ -663,6 +670,8 @@ def _target_to_path(target: str) -> Path | None:
         return SKILLS_DIR / f"{target[6:]}.md"
     elif target.startswith("project:"):
         return PROJECTS_DIR / f"{target[8:]}.md"
+    elif target.startswith("info:"):
+        return INFO_DIR / f"{target[5:]}.md"
     return None
 
 

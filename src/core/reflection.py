@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 LAMIX_DIR = Path.home() / ".lamix"
 SKILLS_DIR = LAMIX_DIR / "memory" / "skills"
 PROJECTS_DIR = LAMIX_DIR / "memory" / "projects"
+INFO_DIR = LAMIX_DIR / "memory" / "info"
 
 # 反思冷却时间（秒）：距上次反思不足此间隔则跳过
 _REFLECT_COOLDOWN = 300  # 5 分钟
@@ -90,13 +91,16 @@ REFLECT_PROMPT = """你是一个知识管理助手。请分析这次任务执行
 ## 已有 Projects
 {existing_projects}
 
+## 已有 Info
+{existing_info}
+
 ## 已有自我学习模块
 {existing_modules}
 
 请只输出一个 JSON 对象，不要其他文字。字段说明：
 - "learnings": 数组。每项含：
-  - "type": "project_create" | "project_update" | "skill_create" | "skill_update" | "module_create" | "module_update"
-  - "target": 项目名、技能名或模块名（模块名用 snake_case）
+  - "type": "project_create" | "project_update" | "skill_create" | "skill_update" | "info_create" | "info_update" | "module_create" | "module_update"
+  - "target": 项目名、技能名、信息名或模块名（模块名用 snake_case）
   - "reason": 一句话说明为什么值得记录
   - "content": 要写入的正文内容
 
@@ -105,6 +109,8 @@ REFLECT_PROMPT = """你是一个知识管理助手。请分析这次任务执行
 - project_update: 在已有项目中发现了新信息（新模块、新配置）或需要修正过时内容。仅当已有 Projects 列表中已有该项目时使用
 - skill_create: 发现了一种可复用的操作方法，当前 skills 里没有覆盖的
 - skill_update: 执行过程中发现某个已有 skill 的步骤不够、有错误，需要修正或补充
+- info_create: 发现了通用的、项目无关的知识信息（如服务地址、工具用法、API文档），当前 info 中没有的
+- info_update: 已有 info 需要修正或补充
 - module_create: 发现了一段可复用的代码逻辑（如数据转换、日志解析、格式化、自动化脚本等），可作为独立 Python 模块沉淀。内容为完整的、可运行的 Python 代码
 - module_update: 现有模块的代码有 bug、可以优化、或需要新增功能。仅当已有 Modules 列表中有该模块时使用
 - 空数组: 简单查询、闲聊、或信息已经记录过
@@ -113,6 +119,7 @@ REFLECT_PROMPT = """你是一个知识管理助手。请分析这次任务执行
 - 不要重复记录已有信息
 - skill 的 content 是方法论（通用步骤），不是具体答案
 - project_update 的 content 是增量信息，不是整个文件重写
+- info 的 content 是项目无关的通用知识（如服务地址、工具配置、API说明等）
 - module 的 content 是完整的、可运行的 Python 代码，禁止 import src 内部模块
 
 示例：
@@ -188,6 +195,7 @@ def reflect_and_learn(
     """执行反思，返回 learnings 列表。调用方负责后续的沉淀执行。"""
     existing_skills = _get_existing_skills_summary()
     existing_projects = _get_existing_projects_summary()
+    existing_info = _get_existing_info_summary()
     existing_modules = _get_existing_modules_summary()
 
     # 构建反思上下文
@@ -210,6 +218,7 @@ def reflect_and_learn(
         execution_summary=execution_summary,
         existing_skills=existing_skills,
         existing_projects=existing_projects,
+        existing_info=existing_info,
         existing_modules=existing_modules,
     ) + extra_context
 
@@ -264,6 +273,16 @@ def execute_learnings(learnings: list[dict[str, Any]]) -> list[str]:
                 hints.append(hint)
                 _notify_user(f"🔧 **Skill 更新**\n\n- 名称：{target}\n- 原因：{reason}")
                 _refresh_skill_index()
+
+        elif ltype == "info_create":
+            hint = _create_info(target, content, reason)
+            if hint:
+                hints.append(hint)
+
+        elif ltype == "info_update":
+            hint = _update_info(target, content, reason)
+            if hint:
+                hints.append(hint)
 
         elif ltype == "module_create":
             hint = _create_module(target, content, reason)
@@ -338,6 +357,56 @@ def _update_project(target: str, content: str, reason: str) -> str | None:
     project_file.write_text(updated + "\n", encoding="utf-8")
     logger.info(f"已更新项目: {target} ({reason})")
     return f"已更新项目: {target}（{reason}）"
+
+
+def _get_existing_info_summary() -> str:
+    """获取已有 info 列表摘要。"""
+    if not INFO_DIR.exists():
+        return "(无)"
+    lines = []
+    for info_file in sorted(INFO_DIR.glob("*.md")):
+        content = info_file.read_text(encoding="utf-8")
+        first_line = content.split("\n")[0].lstrip("# ").strip()
+        lines.append(f"- {info_file.stem}: {first_line}")
+    return "\n".join(lines) if lines else "(无)"
+
+
+def _create_info(target: str, content: str, reason: str) -> str | None:
+    """创建新的 info 文件。如果已存在则降级为 update。"""
+    if not target or not content:
+        return None
+
+    INFO_DIR.mkdir(parents=True, exist_ok=True)
+    info_file = INFO_DIR / f"{target}.md"
+
+    if info_file.exists():
+        return _update_info(target, content, reason)
+
+    info_file.write_text(content + f"\n\n> 创建于 {date.today()}\n", encoding="utf-8")
+    logger.info(f"已创建 Info: {target} ({reason})")
+    return f"已创建 Info: {target}（{reason}）"
+
+
+def _update_info(target: str, content: str, reason: str) -> str | None:
+    """追加内容到已有 info 文件。"""
+    if not target or not content:
+        return None
+
+    INFO_DIR.mkdir(parents=True, exist_ok=True)
+    info_file = INFO_DIR / f"{target}.md"
+
+    if not info_file.exists():
+        return _create_info(target, content, reason)
+
+    existing = info_file.read_text(encoding="utf-8")
+    # 简单追加：如果已有内容里已经包含这段新内容，跳过
+    if content.strip() in existing:
+        return None
+
+    updated = existing.rstrip() + f"\n\n## 更新 {date.today()}\n" + content.strip()
+    info_file.write_text(updated + "\n", encoding="utf-8")
+    logger.info(f"已更新 Info: {target} ({reason})")
+    return f"已更新 Info: {target}（{reason}）"
 
 
 def _create_skill(
@@ -507,8 +576,6 @@ def _get_existing_projects_summary() -> str:
         first_line = content.split("\n")[0].lstrip("# ").strip()
         lines.append(f"- {proj_file.stem}: {first_line}")
     return "\n".join(lines) if lines else "(无)"
-
-
 def _get_existing_modules_summary() -> str:
     """获取已有 learned_modules 列表摘要。"""
     MODULES_DIR = LAMIX_DIR / "learned_modules"
