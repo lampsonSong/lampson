@@ -811,11 +811,34 @@ class Session:
             llm.messages[:0] = inject_msgs
 
         content_display = "\n".join(content_lines)
-        return (
+        result_text = (
             f"已加载 session {session_id} 的对话历史"
             f"（共 {len(inject_msgs)} 条{segment_info}）\n\n"
             f"{content_display}"
         )
+
+        # 同时把内容摘要发送到当前渠道（让用户在飞书/CLI 看到加载的内容）
+        try:
+            # 截断规则：如果超过 140 字，只显示最近 140 字
+            display_content = content_display
+            if len(content_display) > 140:
+                display_content = "..." + content_display[-140:]
+
+            summary = (
+                f"已加载 session {session_id} 的对话历史"
+                f"（共 {len(inject_msgs)} 条{segment_info}）\n\n"
+                f"{display_content}"
+            )
+
+            # 优先使用 partial_sender，fallback 到 interim_sender
+            sender = self.partial_sender or getattr(self.agent, "interim_sender", None)
+            if sender:
+                sender(summary)
+        except Exception:
+            # 发送失败不影响返回值
+            pass
+
+        return result_text
 
     def start_feishu_listener(self, safe_mode_callback=None, shutdown_callback=None) -> None:
         """启动飞书长连接监听（daemon thread，不阻塞 REPL）。"""

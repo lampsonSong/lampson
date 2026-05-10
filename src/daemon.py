@@ -169,7 +169,31 @@ def _notify_boot_tasks_running(config: dict, tasks: list[dict]) -> None:
         if len(desc) > 80:
             desc = desc[:77] + "..."
         lines.append(f"{i}. {desc}")
-    _notify_user("\n".join(lines))
+
+    message = "\n".join(lines)
+
+    # 优先直接用飞书 API 发送（解决 daemon 启动早期没有 session 的问题）
+    feishu_cfg = (config or {}).get("feishu", {}) or {}
+    owner_chat_id = feishu_cfg.get("owner_chat_id", "").strip()
+    app_id = feishu_cfg.get("app_id", "").strip()
+    app_secret = feishu_cfg.get("app_secret", "").strip()
+
+    if owner_chat_id and app_id and app_secret:
+        try:
+            from src.feishu.client import FeishuClient
+            client = FeishuClient(app_id=app_id, app_secret=app_secret)
+            client.send_message(
+                receive_id=owner_chat_id,
+                text=message,
+                receive_id_type="chat_id",
+            )
+            print(f"[daemon] boot_tasks 运行提示已发送到飞书", flush=True)
+            return
+        except Exception as e:
+            print(f"[daemon] 飞书发送失败，fallback 到 _notify_user: {e}", flush=True)
+
+    # Fallback: session 可能已经存在的情况
+    _notify_user(message)
 
 
 def _write_boot_task(task: dict) -> None:
