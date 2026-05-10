@@ -740,27 +740,39 @@ class Session:
     def load_session(self, session_id: str = "", limit: int | None = None) -> str:
         """加载指定或最近 session 的对话历史到当前 llm.messages。
 
+        从最后一个 compaction 点（segment_boundary）之后开始加载，
+        之前的消息已归档到 skill/project 文件中。
+
         Args:
             session_id: 要加载的 session ID。为空则加载最近的。
-            limit: 最多加载最近 N 条消息。None 表示加载全部。
+            limit: 已废弃，保留参数兼容性，不使用。
 
         Returns:
-            加载结果摘要。
+            加载结果，包含全部对话内容。
         """
         if not session_id:
-            # 找最近一个已结束的 session
             sessions = session_store.list_recent_sessions(limit=1, ended_only=True)
             if not sessions:
                 return "没有找到历史 session。"
             session_id = sessions[0]["session_id"]
 
-        messages = session_store.get_session_messages(session_id, limit=limit)
+        # 找最后一个 compaction 点
+        boundary = session_store.get_latest_segment_boundary(session_id)
+        from_segment = None
+        segment_info = ""
+        if boundary is not None:
+            from_segment = boundary.get("segment", 0) + 1
+            segment_info = f"，从 segment {from_segment} 开始（之前已 compaction 归档）"
+
+        # 加载消息（不限制条数）
+        messages = session_store.get_session_messages(session_id, from_segment=from_segment)
         if not messages:
             return f"Session {session_id} 没有消息记录。"
 
-        # 追加到当前 llm.messages（system prompt 之后）
+        # 构建注入消息 + 返回值内容
         llm = self.agent.llm
         inject_msgs: list[dict] = []
+        content_lines: list[str] = []
         for msg in messages:
             role = msg.get("role", "")
             if role not in ("user", "assistant"):
@@ -774,6 +786,21 @@ class Session:
                 entry["content"] = content
             inject_msgs.append(entry)
 
+            # 构建返回值展示
+            label = "用户" if role == "user" else "Lamix"
+            if isinstance(content, str) and content:
+                content_lines.append(f"[{label}] {content}")
+            elif isinstance(content, list):
+                # 多段 content（text blocks）
+                texts = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        texts.append(block.get("text", ""))
+                content_lines.append(f"[{label}] {' '.join(texts)}")
+            if msg.get("tool_calls"):
+                tc_names = [tc.get("function", {}).get("name", "?") for tc in msg["tool_calls"]]
+                content_lines.append(f"  [tool_calls: {', '.join(tc_names)}]")
+
         if not inject_msgs:
             return f"Session {session_id} 没有可加载的对话消息。"
 
@@ -783,9 +810,12 @@ class Session:
         else:
             llm.messages[:0] = inject_msgs
 
-        loaded_count = len(inject_msgs)
-        suffix = f"（共 {loaded_count} 条，限制 {limit} 条）" if limit else f"（共 {loaded_count} 条）"
-        return f"已加载 session {session_id} 的对话历史{suffix}"
+        content_display = "\n".join(content_lines)
+        return (
+            f"已加载 session {session_id} 的对话历史"
+            f"（共 {len(inject_msgs)} 条{segment_info}）\n\n"
+            f"{content_display}"
+        )
 
     def start_feishu_listener(self, safe_mode_callback=None, shutdown_callback=None) -> None:
         """启动飞书长连接监听（daemon thread，不阻塞 REPL）。"""

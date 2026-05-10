@@ -125,11 +125,10 @@ def _run_search(params: dict) -> str:
 def _run_load(params: dict) -> str:
     """执行加载。"""
     session_id = params.get("session_id", "")
-    limit = int(params.get("limit", 50))
 
     # 委托给 Session.load_session()
     if _current_session is not None and hasattr(_current_session, "load_session"):
-        return _current_session.load_session(session_id=session_id, limit=limit)  # type: ignore[union-attr]
+        return _current_session.load_session(session_id=session_id)  # type: ignore[union-attr]
 
     # Fallback：没有 session 引用时，只查询不注入
     if not session_id:
@@ -138,11 +137,46 @@ def _run_load(params: dict) -> str:
             return "没有找到历史 session。"
         session_id = sessions[0]["session_id"]
 
-    messages = session_store.get_session_messages(session_id, limit=limit)
+    # 找最后一个 compaction 点
+    boundary = session_store.get_latest_segment_boundary(session_id)
+    from_segment = None
+    segment_info = ""
+    if boundary is not None:
+        from_segment = boundary.get("segment", 0) + 1
+        segment_info = f"，从 segment {from_segment} 开始（之前已 compaction 归档）"
+
+    messages = session_store.get_session_messages(session_id, from_segment=from_segment)
     if not messages:
         return f"Session {session_id} 没有消息记录。"
 
-    return f"找到 session {session_id}，共 {len(messages)} 条消息。但无法注入到当前对话（缺少 Session 引用）。"
+    # 构建内容展示
+    content_lines = []
+    for msg in messages:
+        role = msg.get("role", "")
+        if role not in ("user", "assistant"):
+            continue
+        content = msg.get("content", "")
+        label = "用户" if role == "user" else "Lamix"
+        if isinstance(content, str) and content:
+            content_lines.append(f"[{label}] {content}")
+        elif isinstance(content, list):
+            texts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    texts.append(block.get("text", ""))
+            content_lines.append(f"[{label}] {' '.join(texts)}")
+        if msg.get("tool_calls"):
+            tc_names = [tc.get("function", {}).get("name", "?") for tc in msg["tool_calls"]]
+            content_lines.append(f"  [tool_calls: {', '.join(tc_names)}]")
+
+    if not content_lines:
+        return f"Session {session_id} 没有可加载的对话消息。"
+
+    content_display = "\n".join(content_lines)
+    return (
+        f"找到 session {session_id}，共 {len(messages)} 条消息{segment_info}。但无法注入到当前对话（缺少 Session 引用）。\n\n"
+        f"{content_display}"
+    )
 
 
 # ── 统一入口 ─────────────────────────────────────────────────────────────────
