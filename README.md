@@ -49,14 +49,22 @@ Lamix 把这些能力拆成三层：
 ### macOS / Linux
 
 ```bash
-# 1. 安装 ripgrep
+# 安装
 brew install ripgrep        # macOS
 # sudo apt install ripgrep  # Ubuntu/Debian
-
-# 2. 克隆并安装
 git clone https://github.com/lampsonSong/lamix.git
 cd lamix
 pip install -e .
+```
+
+安装完成后：
+
+```bash
+# 方式一：交互式 CLI
+lamix-cli
+
+# 方式二：后台 daemon（飞书消息接收）
+python -m src.daemon
 ```
 
 ### Windows
