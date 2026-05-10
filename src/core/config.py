@@ -398,8 +398,7 @@ def _notify_daemon_restart() -> None:
         )
         if result.returncode == 0 and result.stdout.strip():
             print()
-            print(_yellow("⚠ 检测到 daemon 正在运行，飞书配置需要重启 daemon 才能生效。"))
-            print("  重启方式：lamix-cli -c \"/restart\" 或手动 kill daemon 进程后启动。")
+            print(_green("✓ 检测到 daemon 正在运行，配置将在 30 秒内自动热重载生效。"))
     except Exception:
         pass
 

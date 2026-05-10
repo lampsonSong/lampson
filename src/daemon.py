@@ -384,6 +384,9 @@ def main() -> None:
         boot_session = _get_boot_tasks_session(mgr, config)
         _inject_boot_tasks(boot_session, tasks, config=config)
 
+    # ── Config 热重载检测 ────────────────────────────────────────────────
+    _start_config_watcher(pm, config)
+
     # ── 主事件循环 ────────────────────────────────────────────────────────
     try:
         asyncio.run(pm.run())
@@ -415,6 +418,78 @@ def main() -> None:
 
 
 # ── Safe Mode 切换 ─────────────────────────────────────────────────────────
+
+
+def _start_config_watcher(pm, config: dict) -> None:
+    """启动 config.yaml 热重载检测线程。
+
+    每 30 秒检查 config.yaml 的 mtime，变了就重新加载飞书 adapter。
+    """
+    from src.core.config import CONFIG_PATH
+
+    def _watcher():
+        last_mtime = CONFIG_PATH.stat().st_mtime if CONFIG_PATH.exists() else 0
+        while not _shutdown.is_set():
+            _shutdown.wait(30)
+            if _shutdown.is_set():
+                break
+            try:
+                if not CONFIG_PATH.exists():
+                    continue
+                mtime = CONFIG_PATH.stat().st_mtime
+                if mtime == last_mtime:
+                    continue
+                last_mtime = mtime
+                print("[daemon] 检测到配置变更，热重载飞书 adapter...", flush=True)
+                _reload_feishu_adapter(pm)
+            except Exception as e:
+                print(f"[daemon] config watcher 异常: {e}", flush=True)
+
+    t = threading.Thread(target=_watcher, daemon=True, name="config-watcher")
+    t.start()
+
+
+def _reload_feishu_adapter(pm) -> None:
+    """热重载飞书 adapter：关闭旧的，创建新的。"""
+    import asyncio
+    from src.core.config import load_config
+    from src.platforms.adapters.feishu import FeishuAdapter
+
+    # 1. 关闭旧的飞书 adapter
+    old_adapter = pm._adapters.get("feishu")
+    if old_adapter is not None:
+        try:
+            # shutdown 是 async，需要在事件循环里跑
+            if pm._loop is not None and pm._loop.is_running():
+                asyncio.run_coroutine_threadsafe(old_adapter.shutdown(), pm._loop).result(timeout=10)
+            del pm._adapters["feishu"]
+            print("[daemon] 旧飞书 adapter 已关闭", flush=True)
+        except Exception as e:
+            print(f"[daemon] 关闭旧飞书 adapter 失败: {e}", flush=True)
+
+    # 2. 读新配置
+    new_config = load_config()
+    feishu_cfg = new_config.get("feishu", {})
+    app_id = feishu_cfg.get("app_id", "").strip()
+    app_secret = feishu_cfg.get("app_secret", "").strip()
+
+    if not app_id or not app_secret:
+        print("[daemon] 新配置中无飞书凭证，不启动 adapter", flush=True)
+        return
+
+    # 3. 创建并启动新的
+    try:
+        new_adapter = FeishuAdapter({
+            "app_id": app_id,
+            "app_secret": app_secret,
+        })
+        mgr = get_session_manager(new_config)
+        new_adapter.session_manager = mgr
+        pm.register(new_adapter)
+        new_adapter.start()
+        print("[daemon] 新飞书 adapter 已启动，热重载完成", flush=True)
+    except Exception as e:
+        print(f"[daemon] 热重载飞书 adapter 失败: {e}", flush=True)
 
 
 def _trigger_safe_mode(pm, mgr) -> None:
