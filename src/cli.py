@@ -60,6 +60,26 @@ def _cli_progress_callback(event: dict) -> None:
     print(f"  [工具 {round_num}] {tool}({args_preview}) → {result_preview}", flush=True)
 
 
+def _maybe_greet_first_run(session) -> None:
+    """首次运行时自动发一句问候，不追问个人信息，从自然对话中学习。"""
+    user_path = LAMIX_DIR / "USER.md"
+    if not user_path.exists():
+        return
+    try:
+        user_content = user_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return
+    # 判断是否仍是默认内容（只包含"称呼：用户"之类的占位）
+    if "称呼：用户" in user_content or len(user_content) < 30:
+        result = session.handle_input("[系统] 这是首次运行，请用一句话简短问候用户，不要追问任何个人信息。")
+        if result.reply:
+            # 去掉可能的 "Lamix>" 前缀
+            reply = result.reply
+            if reply.startswith("Lamix> "):
+                reply = reply[7:]
+            print(f"\nLamix> {reply}\n")
+
+
 def _run_repl(config: dict) -> None:
     """交互式 REPL 循环。"""
     mgr = get_session_manager(config)
@@ -70,6 +90,9 @@ def _run_repl(config: dict) -> None:
     skill_count = len(session.skills)
     feishu_status = "已连接" if session.feishu_ready else "未配置"
     print(f"Lamix 已启动（技能: {skill_count} 个，飞书: {feishu_status}）。输入 /help 查看命令，Ctrl+C 或 /exit 退出。\n")
+
+    # 首次运行检测：USER.md 仍是默认内容时，自动发问候让对话自然开始
+    _maybe_greet_first_run(session)
 
     history_file = LAMIX_DIR / ".repl_history"
     prompt_session: PromptSession = PromptSession(
