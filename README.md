@@ -117,6 +117,8 @@ lamix-cli --config
 
 ### Daemon 模式（后台常驻）
 
+> 首次使用请先运行 `lamix-cli` 完成初始配置（LLM 供应商、API Key 等），再启动 daemon。
+
 ```bash
 python -m src.daemon
 ```
