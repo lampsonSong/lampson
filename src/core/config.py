@@ -87,7 +87,7 @@ PROVIDER_PRESETS = {
         "base_url": "https://api.deepseek.com/",
         "models": ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"],
         "default_model": "deepseek-v4-flash",
-        "key_hint": "在 platform.deepseek.com 获取（新用户送 500 万 token）",
+        "key_hint": "在 platform.deepseek.com 获取",
     },
 }
 
