@@ -115,6 +115,12 @@ lamix-cli --config
 
 首次运行会进入配置向导，引导填写 LLM API Key 和飞书凭证。
 
+### Windows exe（推荐）
+
+从 [Releases](https://github.com/lampsonSong/lamix/releases) 下载 `lamix-cli.exe`，双击即可启动。
+
+首次运行会自动进入配置向导。
+
 ### Daemon 模式（后台常驻）
 
 > 首次使用请先运行 `lamix-cli` 完成初始配置（LLM 供应商、API Key 等），再启动 daemon。
