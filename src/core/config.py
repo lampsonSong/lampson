@@ -403,6 +403,115 @@ def _notify_daemon_restart() -> None:
         pass
 
 
+def _setup_fallback_models(config: dict) -> None:
+    """引导用户配置 fallback 模型（主模型失败时的备选）。
+    
+    配完一个后询问是否继续配下一个，随时可跳过。
+    """
+    print()
+    print(_bold("Fallback 模型配置") + "（可选，直接回车跳过）")
+    print("  主模型请求失败时，会按顺序尝试 fallback 模型。")
+    print()
+
+    models = []
+    idx = 1
+    while True:
+        label = f"第 {idx} 个 fallback" if idx > 1 else "Fallback 模型"
+        
+        # 选择供应商
+        choice = _select(
+            f"选择 {label} 的供应商（回车跳过）：",
+            [
+                ("1", "智谱 GLM（推荐）"),
+                ("2", "MiniMax"),
+                ("3", "DeepSeek"),
+                ("4", "自定义"),
+                ("skip", "跳过，不配置 fallback"),
+            ],
+        )
+        if choice is None or choice == "skip":
+            break
+
+        if choice in PROVIDER_PRESETS:
+            preset = PROVIDER_PRESETS[choice]
+            provider_name = preset["name"]
+            base_url = preset["base_url"]
+            models_list = preset["models"]
+            default_model = preset["default_model"]
+        else:
+            provider_name = "自定义"
+            base_url = input("请输入 API Base URL: ").strip()
+            if not base_url:
+                print("  未输入 URL，跳过")
+                continue
+            models_list = []
+            default_model = ""
+
+        # 选择模型
+        if models_list:
+            model_options = [(m, f"{m}（默认）" if m == default_model else m) for m in models_list]
+            model_options.append(("__manual__", "手动输入"))
+            model_choice = _select(f"选择 {label} 的模型：", model_options)
+            if model_choice is None:
+                break
+            if model_choice == "__manual__":
+                selected_model = input("请输入模型名: ").strip()
+                if not selected_model:
+                    continue
+            else:
+                selected_model = model_choice
+        else:
+            selected_model = input(f"请输入模型名: ").strip()
+            if not selected_model:
+                continue
+
+        # API Key（可选，默认继承主模型的）
+        primary_key = config.get("llm", {}).get("api_key", "")
+        primary_url = config.get("llm", {}).get("base_url", "")
+        use_primary = (base_url == primary_url)
+        
+        if use_primary:
+            api_key = primary_key
+            print(f"  使用主模型的 API Key")
+        else:
+            try:
+                from getpass import getpass
+                api_key = getpass(f"请输入 {provider_name} 的 API Key（回车跳过）: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                api_key = input(f"请输入 API Key: ").strip()
+            if not api_key:
+                print("  未输入 Key，跳过")
+                continue
+
+        model_cfg = {
+            "name": selected_model,
+            "api_key": api_key,
+            "base_url": base_url,
+        }
+        models.append(model_cfg)
+        print(_green(f"✓ 已添加 fallback 模型：{selected_model}"))
+
+        # 询问是否继续
+        idx += 1
+        if idx > 5:
+            print("  最多配置 5 个 fallback 模型")
+            break
+        
+        cont = _select("是否继续添加 fallback 模型？", [
+            ("yes", "是，继续添加"),
+            ("no", "否，完成配置"),
+        ])
+        if cont is None or cont != "yes":
+            break
+
+    if models:
+        config["models"] = models
+        names = ", ".join(m["name"] for m in models)
+        print(f"\n已配置 {len(models)} 个 fallback 模型：{names}")
+    else:
+        print("  未配置 fallback 模型，主模型失败时将直接报错。")
+
+
 def is_config_complete(config: dict[str, Any]) -> bool:
     """检查必填项是否已填写。用户必须至少配置过 api_key（说明走过 setup wizard）。"""
     if not CONFIG_PATH.exists():
@@ -583,14 +692,20 @@ def run_setup_wizard() -> dict[str, Any]:
         save_config(config)
         print(f"\n{_green('配置已保存到')} {CONFIG_PATH}\n")
 
-        # 8. 如果配置了飞书，自动安装飞书专属 skills
+        # 8. Fallback 模型配置
+        _setup_fallback_models(config)
+
+        # 9. 保存配置（fallback 可能修改了 config）
+        save_config(config)
+
+        # 10. 如果配置了飞书，自动安装飞书专属 skills
         if config.get("feishu", {}).get("app_id"):
             _install_feishu_skills()
 
-        # 9. 用户画像引导
+        # 11. 用户画像引导
         _setup_user_profile()
 
-        # 10. 提示重启 daemon（如果正在运行）
+        # 12. 提示热重载
         _notify_daemon_restart()
 
         return config
