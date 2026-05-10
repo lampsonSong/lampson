@@ -48,16 +48,22 @@ Lamix 把这些能力拆成三层：
 
 ### macOS / Linux
 
+**1. 安装 ripgrep**
+
 ```bash
-# 安装
 brew install ripgrep        # macOS
 # sudo apt install ripgrep  # Ubuntu/Debian
+```
+
+**2. 克隆并安装**
+
+```bash
 git clone https://github.com/lampsonSong/lamix.git
 cd lamix
 pip install -e .
 ```
 
-安装完成后：
+**3. 启动**
 
 ```bash
 # 方式一：交互式 CLI
@@ -69,23 +75,23 @@ lamix gateway
 
 ### Windows
 
-**第一步：安装 Python**
+**1. 安装 Python**
 
 1. 访问 https://www.python.org/downloads/ 下载 3.11+
 2. 安装时**必须勾选**底部的 `Add python.exe to PATH`
 
-**第二步：安装 Git**
+**2. 安装 Git**
 
 1. 访问 https://git-scm.com/download/win 下载安装，默认选项即可
 2. 安装时确保勾选 "Add to PATH"（默认已勾选）。装完后打开 CMD 输入 `git --version` 验证
 
-**第三步：安装 ripgrep**
+**3. 安装 ripgrep**
 
 1. 从 https://github.com/BurntSushi/ripgrep/releases 下载 `ripgrep-x.x.x-x86_64-pc-windows-msvc.zip`
 2. 解压，将 `rg.exe` 放到固定目录（如 `C:\Tools\`）
 3. 将该目录加入系统 PATH：此电脑 → 属性 → 高级系统设置 → 环境变量 → 用户变量 `Path` → 新建
 
-**第四步：安装 Lamix**
+**4. 安装 Lamix**
 
 打开 CMD 或 PowerShell：
 
@@ -103,7 +109,7 @@ python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
 
 将输出的路径加入系统 PATH（此电脑 → 属性 → 高级系统设置 → 环境变量 → 用户变量 `Path` → 新建），然后重新打开 CMD 窗口即可。
 
-**（可选）注册开机自启**
+**5.（可选）注册开机自启**
 
 以管理员身份运行 PowerShell，执行安装脚本：
 
