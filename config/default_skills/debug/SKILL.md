@@ -1,6 +1,6 @@
 ---
 name: debug
-description: 调试代码、排查错误、诊断疑难问题。使用场景：报错、异常、bug、调试、traceback、诊断、性能回归、难以复现。定位到根因后加载 code-writing 执行修复。
+description: 调试代码、排查错误、诊断疑难问题。使用场景：报错、异常、bug、调试、traceback、诊断、性能回归、难以复现。
 triggers:
 - 报错
 - 异常
@@ -16,7 +16,7 @@ triggers:
 
 # Debug
 
-严格按阶段执行，不跳步。本 skill 只负责复现、定位、分析根因。修复代码交给 code-writing skill。
+严格按阶段执行，不跳步。
 
 ## 快速路径（已知报错）
 
@@ -34,11 +34,9 @@ triggers:
 - 必要时插入 print/logging 辅助排查
 - 只做只读探测（ls、cat、which、env），不要盲目全盘搜索
 
-### Phase 3 — 分析根因并交接
+### Phase 3 — 修复
 
-- 用一句话总结根因：什么文件、什么函数、什么逻辑错了
-- 加载 code-writing skill 执行修复，把根因描述传给它
-- 不要在本 skill 内直接改代码
+确认根因后修复 bug。根据修复内容判断需要加载哪个 skill（如 code-writing）。
 
 ## 深度诊断（疑难问题）
 
@@ -71,11 +69,9 @@ triggers:
 
 逐个验证假设。用 instrument（日志、断点、计数器）而非猜测。
 
-### Phase 5 — 分析根因并交接
+### Phase 5 — 修复
 
-- 确认根因，用一句话总结
-- 加载 code-writing skill 执行修复
-- 不要在本 skill 内直接改代码
+确认根因后修复 bug。根据修复内容判断需要加载哪个 skill（如 code-writing）。
 
 ## 收尾（两种路径都要做）
 
@@ -88,4 +84,3 @@ triggers:
 - 禁止用 workaround、临时 patch 掩盖症状
 - 同一任务连续失败 2 次以上，停下来分析根因
 - 必须找到根本原因后再动手修复
-- 禁止跳过 code-writing 直接改代码
