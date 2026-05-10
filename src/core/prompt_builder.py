@@ -30,7 +30,7 @@ INFO_DIR = LAMIX_DIR / "memory" / "info"
 
 # 配置文件默认模板路径（仓库内）
 _CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "config"
-_DEFAULT_IDENTITY_PATH = _CONFIG_DIR / "default_identity.md"
+_DEFAULT_IDENTITY_PATH = _CONFIG_DIR / "default_memory.md"
 _DEFAULT_USER_PATH = _CONFIG_DIR / "default_user.md"
 
 # ── Tool Guidance 常量 ────────────────────────────────────────────────────────
@@ -380,7 +380,7 @@ def _ensure_user_file() -> None:
 
 
 def load_identity() -> str:
-    """加载 ~/.lamix/MEMORY.md，不存在则用 config/default_identity.md。"""
+    """加载 ~/.lamix/MEMORY.md，不存在则用 config/default_memory.md。"""
     if MEMORY_PATH.exists():
         try:
             content = MEMORY_PATH.read_text(encoding="utf-8").strip()
