@@ -243,13 +243,60 @@ def run_gateway(args: argparse.Namespace) -> None:
 
 
 def run_model(args: argparse.Namespace) -> None:
-    """'lamix model' 子命令：模型管理（占位）。"""
-    print("模型管理功能开发中")
+    """'lamix model' 子命令：重新配置 LLM 模型。"""
+    print("进入模型配置向导...")
+    config = load_config()
+    if not is_config_complete(config):
+        print("Lamix 未配置，将进行首次配置。\n")
+    try:
+        run_setup_wizard(title="模型配置 - 重新选择 LLM 供应商和模型")
+    except (KeyboardInterrupt, EOFError):
+        print("\n配置已取消。")
+        return
+    except SystemExit:
+        return
+    print("模型配置完成。若 daemon 正在运行，配置将在 30 秒内自动热重载生效。")
 
 
 def run_update(args: argparse.Namespace) -> None:
-    """'lamix update' 子命令：自更新（占位）。"""
-    print("自更新功能开发中")
+    """'lamix update' 子命令：从 GitHub 拉取最新代码并重启 daemon。"""
+    import os
+    import signal
+    import subprocess
+    from pathlib import Path
+
+    project_root = Path(__file__).resolve().parent.parent
+    print("正在从 GitHub 拉取最新代码...")
+    try:
+        result = subprocess.run(
+            ["git", "pull"], cwd=str(project_root),
+            capture_output=True, text=True, check=True,
+        )
+        stdout, stderr = result.stdout.strip(), result.stderr.strip()
+        if stdout:
+            print(stdout)
+        if stderr:
+            print(stderr)
+    except subprocess.CalledProcessError as e:
+        print(f"Git 拉取失败: {e}")
+        return
+    except FileNotFoundError:
+        print("Git 未安装或未在 PATH 中。请手动执行 git pull 更新代码。")
+        return
+
+    # 检测 daemon 是否在运行，尝试优雅重启
+    daemon_pid_path = Path.home() / ".lamix" / "logs" / "daemon.pid"
+    if daemon_pid_path.exists():
+        try:
+            pid = int(daemon_pid_path.read_text().strip())
+            os.kill(pid, signal.SIGTERM)
+            print(f"已向 daemon (PID={pid}) 发送 SIGTERM，watchdog 将自动重启。")
+        except ProcessLookupError:
+            print("daemon 进程已不存在，watchdog 会自动拉起。")
+        except Exception as exc:
+            print(f"检测到 daemon 在运行，但发送信号失败 ({exc})。请手动重启 daemon。")
+    else:
+        print("未检测到运行中的 daemon。如需后台运行，请执行 lamix gateway。")
 
 
 def run_config(args: argparse.Namespace) -> None:
@@ -280,8 +327,8 @@ HELP_TEXT = textwrap.dedent("""\
     Commands:
       cli       启动交互式 CLI（含 daemon）
       gateway   仅启动 daemon（后台常驻）
-      model     模型管理
-      update    自更新
+      model     模型管理（重新配置 LLM）
+      update    自更新（拉取代码并重启）
       config    显示当前配置
 
     Options:
@@ -349,13 +396,13 @@ def main() -> None:
 
     # ── model ─────────────────────────────────────────────
     model_parser = subparsers.add_parser(
-        "model", help="模型管理",
+        "model", help="重新配置 LLM 模型",
     )
     model_parser.set_defaults(func=run_model)
 
     # ── update ────────────────────────────────────────────
     update_parser = subparsers.add_parser(
-        "update", help="自更新",
+        "update", help="拉取代码并重启 daemon",
     )
     update_parser.set_defaults(func=run_update)
 

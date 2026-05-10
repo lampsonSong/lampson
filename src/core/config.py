@@ -584,9 +584,10 @@ def _select(prompt_text: str, options: list[tuple[str, str]]) -> str | None:
     return result[0]
 
 
-def run_setup_wizard() -> dict[str, Any]:
+def run_setup_wizard(*, title: str | None = None) -> dict[str, Any]:
     """首次运行引导用户填写配置，返回配置字典。"""
-    print(f"\n{_bold('欢迎使用 Lamix！')}首次运行需要配置 LLM 供应商信息。\n")
+    _title = title or '欢迎使用 Lamix！首次运行需要配置 LLM 供应商信息。'
+    print(f"\n{_bold(_title)}\n")
 
     config = load_config()
 
