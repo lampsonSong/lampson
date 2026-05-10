@@ -92,9 +92,33 @@ class HeartbeatManager:
         tmp.replace(path)
         self._heartbeat_file = path
 
+    def _check_stop_flag(self) -> bool:
+        """检查外部停止信号（Windows 优雅终止机制）。
+
+        Returns:
+            True 表示检测到停止信号
+        """
+        flag_path = HEARTBEAT_DIR.parent / "stop.flag"
+        if flag_path.exists():
+            try:
+                # 检查 flag 文件中的 pid 是否匹配当前进程
+                content = flag_path.read_text(encoding="utf-8").strip()
+                if content.isdigit() and int(content) == self._pid:
+                    flag_path.unlink()
+                    return True
+            except (OSError, ValueError):
+                # 如果读取失败或 pid 不匹配，忽略
+                pass
+        return False
+
     def _loop(self) -> None:
         """心跳线程主循环。"""
         while not self._stopped.wait(HEARTBEAT_INTERVAL):
+            # 检查外部停止信号（Windows 优雅终止）
+            if self._check_stop_flag():
+                self.stop(user_initiated=False)
+                break
+
             try:
                 self._write()
             except Exception:

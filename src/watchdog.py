@@ -29,13 +29,12 @@ from src.core.heartbeat import (
     read_all_heartbeats,
     cleanup_stale_heartbeats,
     load_heartbeat,
-    is_process_alive,
 )
+from src.platforms.process_manager import get_process_manager
 
 HEARTBEAT_TIMEOUT = 30  # 秒，无心跳则认为死亡
 WATCHDOG_INTERVAL = 10  # 秒，检查频率
 LOG_DIR = LAMIX_DIR / "logs"
-DAEMON_LAUNCHCTL_LABEL = "com.lamix.gateway"
 
 
 def _log(msg: str) -> None:
@@ -65,31 +64,23 @@ def _load_config() -> dict:
         return {}
 
 
-def _restart_daemon() -> None:
-    """通过 launchctl 重启 daemon。"""
+def _restart_daemon(pm) -> None:
+    """通过 ProcessManager 重启 daemon。"""
     _log("尝试重启 daemon...")
     try:
-        # kill 旧进程（如果还在的话）
-        pid_path = LOG_DIR / "daemon.pid"
-        if pid_path.exists():
-            try:
-                old_pid = int(pid_path.read_text().strip())
-                os.kill(old_pid, signal.SIGTERM)
-                time.sleep(1)
-            except (ValueError, OSError):
-                pass
+        daemon_command = [sys.executable, "-m", "src.daemon"]
+        pid_file = LOG_DIR / "daemon.pid"
 
-        # launchctl 重启
-        result = subprocess.run(
-            ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{DAEMON_LAUNCHCTL_LABEL}"],
-            capture_output=True,
-            text=True,
-            timeout=10,
+        success = pm.restart_daemon(
+            daemon_command=daemon_command,
+            pid_file=pid_file,
+            log_dir=LOG_DIR,
         )
-        if result.returncode == 0:
+
+        if success:
             _log("daemon 重启请求已发送")
         else:
-            _log(f"launchctl kickstart 失败: {result.stderr}")
+            _log("daemon 重启失败")
     except Exception as e:
         _log(f"重启 daemon 失败: {e}")
 
@@ -100,6 +91,7 @@ class Watchdog:
     def __init__(self) -> None:
         self._shutdown = threading.Event()
         self._daemon_pid: int | None = None  # 监控的 daemon pid
+        self._pm = get_process_manager()  # 平台相关的进程管理器
 
     def _find_daemon_pid(self) -> int | None:
         """从进程列表中找到 daemon 的 pid。"""
@@ -108,27 +100,13 @@ class Watchdog:
         if pid_file.exists():
             try:
                 pid = int(pid_file.read_text().strip())
-                if is_process_alive(pid):
+                if self._pm.is_alive(pid):
                     return pid
             except (ValueError, OSError):
                 pass
 
         # 通过进程名找
-        try:
-            result = subprocess.run(
-                ["pgrep", "-f", "python.*src.daemon"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if result.returncode == 0:
-                pids = [int(p) for p in result.stdout.strip().split("\n") if p]
-                for pid in pids:
-                    if pid != os.getpid():
-                        return pid
-        except Exception:
-            pass
-        return None
+        return self._pm.find_process("src.daemon")
 
     def _check_daemon(self) -> None:
         """检查 daemon 心跳。"""
@@ -136,7 +114,7 @@ class Watchdog:
         pid = self._find_daemon_pid()
         if pid is None:
             _log("未找到 daemon 进程，尝试重启")
-            _restart_daemon()
+            _restart_daemon(self._pm)
             return
 
         if pid != self._daemon_pid:
@@ -147,13 +125,13 @@ class Watchdog:
         heartbeat_path = HEARTBEAT_DIR / f"{pid}.json"
         if not heartbeat_path.exists():
             _log(f"daemon ({pid}) 心跳文件不存在，尝试重启")
-            _restart_daemon()
+            _restart_daemon(self._pm)
             return
 
         rec = load_heartbeat(heartbeat_path)
         if rec is None:
             _log(f"daemon ({pid}) 心跳文件损坏，尝试重启")
-            _restart_daemon()
+            _restart_daemon(self._pm)
             return
 
         # 检查是否被用户主动停止
@@ -166,13 +144,13 @@ class Watchdog:
             last = datetime.fromisoformat(rec.last_heartbeat)
         except ValueError:
             _log(f"daemon ({pid}) 心跳时间格式错误，尝试重启")
-            _restart_daemon()
+            _restart_daemon(self._pm)
             return
 
         elapsed = (datetime.now() - last).total_seconds()
         if elapsed > HEARTBEAT_TIMEOUT:
             _log(f"daemon ({pid}) 心跳超时（{elapsed:.0f}s > {HEARTBEAT_TIMEOUT}s），尝试重启")
-            _restart_daemon()
+            _restart_daemon(self._pm)
         else:
             _log(f"daemon ({pid}) 心跳正常（{elapsed:.0f}s 前）")
 
