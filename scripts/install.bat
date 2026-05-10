@@ -5,6 +5,9 @@ echo  Lamix Windows 一键安装
 echo ========================================
 echo.
 
+REM 切换到项目根目录（install.bat 在 scripts/ 下）
+cd /d "%~dp0.."
+
 REM 检查 Python
 python --version >nul 2>&1
 if %errorlevel% neq 0 (
