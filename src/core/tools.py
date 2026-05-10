@@ -36,6 +36,53 @@ def _try_import(module_path: str, attr: str = ""):
         return None
 
 
+def _desktop_placeholder_schemas():
+    """desktop 模块不可用时的占位 schema。"""
+    placeholders = [
+        ("desktop_screenshot", "截取当前屏幕。"),
+        ("desktop_click", "在指定坐标点击鼠标。"),
+        ("desktop_type", "在当前焦点位置输入文本。"),
+        ("desktop_press", "按下按键。"),
+        ("desktop_hotkey", "按组合键。"),
+        ("desktop_scroll", "滚动鼠标。"),
+        ("desktop_query_ui", "查询应用中的 UI 元素。"),
+        ("desktop_info", "获取屏幕分辨率信息。"),
+        ("desktop_screenshot_region", "截取屏幕指定区域。"),
+    ]
+    schemas = []
+    for name, desc in placeholders:
+        schemas.append({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": desc,
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        })
+    return schemas
+
+
+def _desktop_placeholder_run(params: dict) -> str:
+    return ("桌面控制工具不可用：缺少依赖 pyautogui 或 Pillow。"
+            "请运行 pip install pyautogui Pillow 安装，并授予 Accessibility 权限。")
+
+
+def _vision_placeholder_schema():
+    return {
+        "type": "function",
+        "function": {
+            "name": "analyze_image",
+            "description": "分析截图或图片内容。",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    }
+
+
+def _vision_placeholder_run(params: dict) -> str:
+    return ("视觉分析工具不可用：缺少依赖 Pillow，或未配置视觉模型。"
+            "请运行 pip install Pillow 安装，并在 config.yaml 中配置视觉模型。")
+
+
 # ── 核心工具（缺了就起不来） ─────────────────────────────────────────────
 _register(shell_tool.SCHEMA, shell_tool.run)
 _register(search_tool.SEARCH_SCHEMA, search_tool.run)
@@ -60,14 +107,21 @@ if _ts:
     _register(_ts.LIST_TASKS_SCHEMA, _ts.run_list_tool)
     _register(_ts.CANCEL_TASK_SCHEMA, _ts.run_cancel_tool)
 
+# ── 桌面控制 + 视觉分析（默认安装，运行时检查权限和模型配置） ────────
 _desktop = _try_import("src.tools.desktop")
 if _desktop:
     for _name in _desktop.SCHEMAS:
         _register(_desktop.SCHEMAS[_name], lambda p, n=_name: _desktop.run(n, p))
+else:
+    # 模块导入失败时注册占位工具，调用时提示用户
+    for _schema in _desktop_placeholder_schemas():
+        _register(_schema, _desktop_placeholder_run)
 
 _vision = _try_import("src.tools.vision")
 if _vision:
     _register(_vision.SCHEMA, _vision.run)
+else:
+    _register(_vision_placeholder_schema(), _vision_placeholder_run)
 
 
 # ── learned_modules 延迟加载 ──────────────────────────────────────────────

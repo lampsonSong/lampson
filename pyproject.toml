@@ -16,11 +16,12 @@ dependencies = [
     "lark-oapi>=1.5.0",
     "jieba>=0.42.1",
     "APScheduler>=3.10.0",
+    "pyautogui>=0.9.54",
+    "Pillow>=10.0.0",
 ]
 
 [project.optional-dependencies]
-desktop = ["pyautogui>=0.9.54", "Pillow>=10.0.0"]
-all = ["lamix[desktop]"]
+all = ["lamix"]
 
 [project.scripts]
 lamix-cli = "src.cli:main"

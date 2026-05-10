@@ -16,7 +16,7 @@ import uuid
 from io import BytesIO
 from typing import Any, Optional
 
-import pyautogui
+import pyautogui  # 可选：截图和鼠标键盘控制
 
 # pyautogui 安全设置：失败时停止
 pyautogui.FAILSAFE = True

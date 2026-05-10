@@ -54,7 +54,6 @@ brew install ripgrep        # macOS
 git clone https://github.com/lampsonSong/lamix.git
 cd lamix
 pip install -e .
-# 如需桌面控制功能（截图、鼠标键盘），改为 pip install -e ".[all]"
 ```
 
 ### Windows
@@ -83,7 +82,6 @@ pip install -e .
 git clone https://github.com/lampsonSong/lamix.git
 cd lamix
 pip install -e .
-rem 如需桌面控制功能（截图、鼠标键盘），改为 pip install -e ".[all]"
 ```
 
 安装完成后，如果提示 ，说明 Python 的 Scripts 目录不在 PATH 中：
