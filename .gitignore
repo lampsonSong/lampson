@@ -8,3 +8,6 @@ build/
 .lampson/
 .env
 *.bak
+.coverage
+boot_tasks.json
+.cursorrules

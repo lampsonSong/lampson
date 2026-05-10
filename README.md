@@ -8,12 +8,12 @@
 
 ```mermaid
 graph TB
-    subgraph 用户
+    subgraph User
         FEISHU[飞书]
         CLI[CLI 终端]
     end
 
-    subgraph Lamix Daemon
+    subgraph Daemon["Lamix Daemon"]
         GW[消息网关<br/>platforms/manager.py]
         AGENT[Agent 核心<br/>core/agent.py]
         PB[Prompt 构建器<br/>core/prompt_builder.py]
@@ -23,14 +23,14 @@ graph TB
         TS[定时任务<br/>core/task_scheduler/]
     end
 
-    subgraph 知识系统 ~/.lamix/
+    subgraph Knowledge["知识系统"]
         SKILLS[Skills<br/>工作流]
         INFO[Info<br/>通用知识]
         PROJS[Projects<br/>项目上下文]
         LM[Learned Modules<br/>自学习模块]
     end
 
-    subgraph 进程守护
+    subgraph Guard["进程守护"]
         WD[Watchdog<br/>watchdog.py]
         DAEMON[Daemon<br/>daemon.py]
     end
