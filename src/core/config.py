@@ -673,7 +673,7 @@ def run_setup_wizard(*, title: str | None = None) -> dict[str, Any]:
             _install_feishu_skills()
 
         # 11. 用户画像引导
-        _setup_user_profile()
+        _ensure_user_md()
 
         # 12. 提示热重载
         _notify_daemon_restart()
