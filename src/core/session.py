@@ -182,9 +182,9 @@ class Session:
         # session 生命周期标识（JSONL 写入用）
         self.session_id: str = ""
         self._current_segment: int = 0
-        # SessionManager 引用（用于 start_feishu_listener 传给 FeishuListener）
+        # SessionManager 引用（用于 start_feishu_listener 传给 FeishuAdapter）
         self._session_manager: Any = None
-        self._feishu_listener: Any = None  # FeishuListener（若已启动长连接监听）
+        self._feishu_adapter: Any = None  # FeishuAdapter（若已启动长连接监听）
         # 上一次活动时间（秒时间戳），用于 idle 超时检测
         self.last_activity_at: float = 0.0
         # 渠道标识（cli/feishu 等）
@@ -308,6 +308,7 @@ class Session:
         包含：安装默认技能 → 加载记忆/技能 → 创建 LLM → 创建 Agent → 初始化飞书。
         """
         _install_default_skills()
+        _install_default_memory()
 
         skills = skills_mgr.load_all_skills()
 
@@ -849,22 +850,26 @@ class Session:
         if not app_id or not app_secret:
             raise RuntimeError("飞书未配置，请在 config.yaml 中填写 feishu.app_id 和 feishu.app_secret")
 
-        from src.feishu.listener import FeishuListener
+        # 飞书 skills 懒加载：首次启动时自动安装
+        from src.core.config import _install_feishu_skills
+        _install_feishu_skills()
+
+        from src.platforms.adapters.feishu import FeishuAdapter
 
         # 通过 SessionManager 启动，确保 feishu 消息路由到正确的 Session
         mgr = self._session_manager
         if mgr is None:
             raise RuntimeError("Session 未绑定到 SessionManager，无法启动飞书监听")
 
-        listener = FeishuListener(
+        adapter = FeishuAdapter(
             app_id=app_id,
             app_secret=app_secret,
             session_manager=mgr,
             safe_mode_callback=safe_mode_callback,
             shutdown_callback=shutdown_callback,
         )
-        self._feishu_listener = listener
-        listener.start()  # WebSocket 在后台线程运行，详见 FeishuListener.shutdown
+        self._feishu_adapter = adapter
+        adapter.start()  # WebSocket 在后台线程运行，详见 FeishuListener.shutdown
 
     # ── 命令路由 ──
 
@@ -1371,6 +1376,34 @@ def _install_default_skills() -> None:
         skills_mgr.install_default_skills(default_skills_dir)
     except Exception:
         pass
+
+
+def _install_default_memory() -> None:
+    """将默认 memory.md 和 user.md 复制到用户目录（首次运行）。"""
+    lamix_dir = Path.home() / ".lamix"
+    config_dir = Path(__file__).resolve().parent.parent.parent / "config"
+    
+    # 复制 MEMORY.md
+    memory_path = lamix_dir / "MEMORY.md"
+    default_memory = config_dir / "default_memory.md"
+    if not memory_path.exists() and default_memory.exists():
+        try:
+            shutil.copy2(str(default_memory), str(memory_path))
+        except Exception:
+            pass
+    
+    # 复制 USER.md（如果不存在或内容为空/不完整）
+    user_path = lamix_dir / "USER.md"
+    default_user = config_dir / "default_user.md"
+    needs_copy = (
+        not user_path.exists()
+        or user_path.stat().st_size < 50  # 不完整
+    )
+    if needs_copy and default_user.exists():
+        try:
+            shutil.copy2(str(default_user), str(user_path))
+        except Exception:
+            pass
 
 
 def _create_llm(config: dict[str, Any], channel: str = "cli") -> tuple[LLMClient, BaseModelAdapter]:

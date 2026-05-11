@@ -595,8 +595,11 @@ class FeishuAdapter(BasePlatformAdapter):
             self._dedup.mark_processed(message_id)
             if reply:
                 reply_msg_id = self._send_reply(chat_id, reply)
+                # 多轮结束时（有 tool_calls）打一次 MUSCLE emoji
                 if reply_msg_id:
-                    self._add_reaction(reply_msg_id, "OK")
+                    tool_call_count = len(result.tool_calls or [])
+                    if tool_call_count > 0:
+                        self._add_reaction(reply_msg_id, "MUSCLE")
 
             # 处理完毕后检查：如果 session 仍为空（无 user/assistant 消息），立即清理
             # 典型场景：daemon 重启后积压的 /resume /compaction 等命令，
