@@ -528,16 +528,8 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command is None:
-        # 双击 exe 或无参数时：
-        # 1. 检查 daemon 是否已在运行
-        # 2. 没有 → 后台启动 daemon（飞书监听、定时任务等）
-        # 3. 启动 CLI 交互（仅 REPL，不起飞书 adapter）
-        _ensure_daemon_running()
-        run_cli(argparse.Namespace(
-            query=None, query_c=None, memory=None, skills=None,
-            feishu=None, update=None, help_cmd=False,
-            _daemon_already_running=True,
-        ))
+        # 无参数时显示帮助
+        parser.print_help()
         return
 
     args.func(args)
