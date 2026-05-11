@@ -35,6 +35,7 @@ from lark_oapi.api.im.v1.model import (
 )
 
 from src.platforms.base import BasePlatformAdapter, PlatformMessage
+from src.core.adapters.base import LLMFatalError
 import logging
 logger = logging.getLogger(__name__)
 
@@ -603,7 +604,8 @@ class FeishuAdapter(BasePlatformAdapter):
                 reply_msg_id = self._send_reply(chat_id, reply)
                 # 多轮结束时（有 tool_calls）打一次 MUSCLE emoji
                 if reply_msg_id:
-                    tool_call_count = len(result.tool_calls or [])
+                    tool_calls = getattr(result, "tool_calls", None)
+                    tool_call_count = len(tool_calls) if tool_calls else 0
                     if tool_call_count > 0:
                         self._add_reaction(reply_msg_id, "MUSCLE")
 
@@ -620,3 +622,12 @@ class FeishuAdapter(BasePlatformAdapter):
 
         except Exception as e:
             logger.error(f"[feishu] _handle_dispatch 错误: {e}")
+            # LLM 全部失败时回复用户，而非静默吞掉
+            try:
+                if isinstance(e, LLMFatalError):
+                    self._send_reply(
+                        chat_id,
+                        f"抱歉，所有模型（含 fallback）均调用失败。\n\n错误信息: {str(e)[:200]}",
+                    )
+            except Exception:
+                pass

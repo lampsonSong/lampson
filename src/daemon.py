@@ -505,6 +505,14 @@ def _patch_websockets_ssl() -> None:
 
 def main() -> None:
     global _heartbeat_mgr, _scheduler
+    # 配置 logging：daemon 模式下输出 INFO 及以上级别到 stderr（launchd 重定向到 launchd.err.log）
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        stream=sys.stderr,
+    )
+
     # 强制 stdout/stderr 行缓冲：文件重定向时默认全缓冲，
     # 会导致日志丢失（进程崩溃时缓冲区内容不刷盘）。
     if hasattr(sys.stdout, "reconfigure"):

@@ -361,6 +361,20 @@ def _register_launchd_services(python_exe: str, project_dir: str) -> None:
     launch_agents = Path.home() / "Library" / "LaunchAgents"
     launch_agents.mkdir(parents=True, exist_ok=True)
 
+    # 检测 nvm 的 node bin 路径，launchd 默认 PATH 找不到它
+    _node_bin = ""
+    _nvm_node = Path.home() / ".nvm" / "versions" / "node"
+    if _nvm_node.exists():
+        versions = sorted(_nvm_node.iterdir(), reverse=True)
+        for v in versions:
+            bin_dir = v / "bin"
+            if (bin_dir / "node").exists():
+                _node_bin = str(bin_dir)
+                break
+    _launchd_path = "/usr/bin:/bin:/usr/sbin:/sbin"
+    if _node_bin:
+        _launchd_path = f"{_node_bin}:{_launchd_path}"
+
     gw_plist = {
         "Label": "com.lamix.gateway",
         "ProgramArguments": [python_exe, "-m", "src.daemon"],
@@ -372,6 +386,7 @@ def _register_launchd_services(python_exe: str, project_dir: str) -> None:
         "EnvironmentVariables": {
             "TERM": "xterm-256color",
             "PYTHONUNBUFFERED": "1",
+            "PATH": _launchd_path,
         },
     }
 
@@ -385,6 +400,7 @@ def _register_launchd_services(python_exe: str, project_dir: str) -> None:
         "StandardErrorPath": str(log_dir / "watchdog.err.log"),
         "EnvironmentVariables": {
             "PYTHONUNBUFFERED": "1",
+            "PATH": _launchd_path,
         },
     }
 
