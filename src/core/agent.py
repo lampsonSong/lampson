@@ -580,7 +580,16 @@ class Agent:
                     # 实时通知 listener：一个工具调用完成
                     self._on_tool_progress(round_num + 1, tc.name, tc.raw_arguments, result)
 
-                    tool_msg = self.adapter.format_tool_result(tc.id, result)
+                    # 截断超长 tool result，防止塞进 messages 后超出 context window
+                    _MAX_TOOL_RESULT_CHARS = 8000
+                    result_for_llm = result
+                    if len(result) > _MAX_TOOL_RESULT_CHARS:
+                        result_for_llm = (
+                            result[:_MAX_TOOL_RESULT_CHARS]
+                            + f"\n...[截断：原始结果 {len(result)} 字符，已省略 {len(result) - _MAX_TOOL_RESULT_CHARS} 字符]"
+                        )
+
+                    tool_msg = self.adapter.format_tool_result(tc.id, result_for_llm)
                     self.llm.messages.append(tool_msg)
 
                     # 检查中断（每个工具调用完成后）

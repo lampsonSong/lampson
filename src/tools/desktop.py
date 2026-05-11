@@ -26,19 +26,29 @@ pyautogui.PAUSE = 0.05  # 每次操作后暂停 50ms，避免太快
 # ─── 截图 ────────────────────────────────────────────────────────────────
 
 def take_screenshot() -> str:
-    """截取全屏，返回 base64 编码的 PNG（不含前缀）。"""
+    """截取全屏，保存为 PNG 文件并返回路径和尺寸信息。"""
     img = pyautogui.screenshot()
-    buf = BytesIO()
-    img.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode()
+    w, h = img.size
+    save_dir = os.path.expanduser("~/.lamix/screenshots")
+    os.makedirs(save_dir, exist_ok=True)
+    filename = f"screenshot_{uuid.uuid4().hex[:8]}.png"
+    filepath = os.path.join(save_dir, filename)
+    img.save(filepath, format="PNG")
+    file_size = os.path.getsize(filepath)
+    return f"截图已保存到 {filepath}（{w}x{h}，{file_size // 1024}KB）"
 
 
 def take_screenshot_region(x: int, y: int, width: int, height: int) -> str:
-    """截取屏幕指定区域，返回 base64 编码的 PNG。"""
+    """截取屏幕指定区域，保存为 PNG 文件并返回路径和尺寸信息。"""
     img = pyautogui.screenshot(region=(x, y, width, height))
-    buf = BytesIO()
-    img.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode()
+    w, h = img.size
+    save_dir = os.path.expanduser("~/.lamix/screenshots")
+    os.makedirs(save_dir, exist_ok=True)
+    filename = f"screenshot_region_{uuid.uuid4().hex[:8]}.png"
+    filepath = os.path.join(save_dir, filename)
+    img.save(filepath, format="PNG")
+    file_size = os.path.getsize(filepath)
+    return f"区域截图已保存到 {filepath}（{w}x{h}，{file_size // 1024}KB）"
 
 
 # ─── 鼠标操作 ────────────────────────────────────────────────────────────
@@ -246,7 +256,7 @@ SCHEMAS = {
         "type": "function",
         "function": {
             "name": "desktop_screenshot",
-            "description": "截取当前屏幕，返回 base64 PNG 编码。用于获取屏幕内容后配合视觉模型分析。",
+            "description": "截取当前屏幕，保存为 PNG 文件并返回路径。用于获取屏幕内容后配合视觉模型分析。",
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
@@ -254,7 +264,7 @@ SCHEMAS = {
         "type": "function",
         "function": {
             "name": "desktop_screenshot_region",
-            "description": "截取屏幕指定区域，返回 base64 PNG 编码。",
+            "description": "截取屏幕指定区域，保存为 PNG 文件并返回路径。",
             "parameters": {
                 "type": "object",
                 "properties": {
