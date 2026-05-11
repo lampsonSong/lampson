@@ -2,138 +2,6 @@
 
 自更新的 AI Agent daemon，和你一起探索这个世界的AI伙计。
 
-## 架构
-
-### 系统总览
-
-```mermaid
-graph TB
-    subgraph User
-        FEISHU[飞书]
-        CLI[CLI 终端]
-    end
-
-    subgraph Daemon["Lamix Daemon"]
-        GW[消息网关<br/>platforms/manager.py]
-        AGENT[Agent 核心<br/>core/agent.py]
-        PB[Prompt 构建器<br/>core/prompt_builder.py]
-        TOOLS[工具层<br/>tools/]
-        LLM[LLM 客户端<br/>core/llm.py]
-        SM[Session 管理<br/>core/session.py]
-        TS[定时任务<br/>core/task_scheduler/]
-    end
-
-    subgraph Knowledge["知识系统"]
-        SKILLS[Skills<br/>工作流]
-        INFO[Info<br/>通用知识]
-        PROJS[Projects<br/>项目上下文]
-        LM[Learned Modules<br/>自学习模块]
-    end
-
-    subgraph Guard["进程守护"]
-        WD[Watchdog<br/>watchdog.py]
-        DAEMON[Daemon<br/>daemon.py]
-    end
-
-    FEISHU -->|WebSocket| GW
-    CLI -->|REPL| GW
-    GW --> AGENT
-    AGENT --> PB
-    PB -->|L1-L5 分层构建| LLM
-    AGENT -->|tool_calls| TOOLS
-    AGENT -->|反思沉淀| SKILLS
-    AGENT -->|反思沉淀| INFO
-    AGENT -->|反思沉淀| PROJS
-    AGENT -->|注册工具| LM
-    SM -->|会话持久化| AGENT
-    TS -->|cron/interval/delayed| AGENT
-    WD -->|守护| DAEMON
-    DAEMON --> GW
-```
-
-### 消息处理流程
-
-```mermaid
-sequenceDiagram
-    participant U as 用户（飞书/CLI）
-    participant GW as 消息网关
-    participant SM as Session Manager
-    participant PB as Prompt Builder
-    participant LLM as LLM
-    participant T as 工具层
-
-    U->>GW: 发送消息
-    GW->>SM: 创建/恢复 session
-    SM->>PB: 构建 system prompt
-    Note over PB: L1 Identity → L2 Tools → L3 Projects → L4 Model → L5 Channel
-    PB->>LLM: 完整 prompt（system + history + user）
-    LLM->>GW: 回复或 tool_calls
-
-    loop Tool Loop（最多 N 轮）
-        GW->>T: 执行工具调用
-        T->>LLM: 返回工具结果
-        LLM->>GW: 继续调用或最终回复
-    end
-
-    GW->>U: 发送回复
-    GW->>SM: 持久化对话到 JSONL
-
-    Note over GW: 任务完成后可选：反思沉淀
-    GW->.GW: 判断是否值得沉淀为 Skill/Info/Project
-```
-
-### Prompt 分层构建
-
-```mermaid
-graph LR
-    subgraph L1["L1 Identity"]
-        M[MEMORY.md<br/>人格与行为准则]
-    end
-
-    subgraph L1_5["L1.5 User"]
-        U[USER.md<br/>用户画像与偏好]
-    end
-
-    subgraph L2["L2 Tool Guidance"]
-        SK[Skills 索引<br/>名称+描述]
-        TG[工具使用指引]
-    end
-
-    subgraph L3["L3 Project Index"]
-        PI[动态扫描<br/>projects/*.md]
-    end
-
-    subgraph L4["L4 Model Guidance"]
-        MG[模型适配<br/>如 GLM tool_calls]
-    end
-
-    subgraph L5["L5 Channel"]
-        CC[消息来源标识<br/>feishu / cli]
-    end
-
-    L1 --> L1_5 --> L2 --> L3 --> L4 --> L5
-```
-
-### 自学习循环
-
-```mermaid
-graph TB
-    INPUT[收到用户请求] --> EXEC[执行任务]
-    EXEC --> RESULT[任务完成]
-    RESULT --> JUDGE{值得沉淀？}
-
-    JUDGE -->|可复用工作流<br/>5+ 步骤| SKILL[写入 Skill<br/>~/.lamix/skills/]
-    JUDGE -->|通用知识| INFO[写入 Info<br/>~/.lamix/info/]
-    JUDGE -->|项目信息| PROJ[更新 Project<br/>~/.lamix/projects/]
-    JUDGE -->|固定任务模式| CODE[生成 Learned Module<br/>~/.lamix/learned_modules/]
-    JUDGE -->|无需沉淀| END[结束]
-
-    SKILL --> RELOAD[下次 Prompt 自动加载索引]
-    INFO --> RELOAD
-    PROJ --> RELOAD
-    CODE --> REG[下次启动自动注册为工具]
-```
-
 ## 为什么做 Lamix
 
 LLM 的核心能力是理解语言，但实际把一件事做成，还需要大量 LLM 自身不具备的能力：
@@ -157,6 +25,46 @@ Lamix 把这些能力拆成三层：
 其中反思不只是做对了才沉淀。被用户纠正的错误、过时的方案、不再适用的技能，同样是学习——更新比新增更重要。
 
 它不是一个聊天机器人，是一个会学习的执行者。每次完成任务后自主判断有没有值得记住的东西——新发现的工作流沉淀为 skill，项目相关的信息更新到 project，通用知识归档为 info。过时的知识主动淘汰，不让记忆变成负担。用得越久越懂你。
+
+<details>
+<summary><strong>架构</strong></summary>
+
+### 核心流程
+
+```mermaid
+graph LR
+    U[飞书 / CLI] -->|消息| GW[消息网关]
+    GW --> PB[Prompt Builder]
+    PB -->|L1 Identity → L2 Tools → L3 Projects → L4 Model → L5 Channel| LLM[LLM]
+    LLM -->|tool_calls| T[工具层]
+    T --> LLM
+    LLM -->|回复| GW
+    GW --> U
+```
+
+### 知识沉淀
+
+```mermaid
+graph TB
+    EXEC[执行任务] --> JUDGE{值得沉淀？}
+    JUDGE -->|可复用工作流| SKILL[Skill]
+    JUDGE -->|通用知识| INFO[Info]
+    JUDGE -->|项目信息| PROJ[Project]
+    JUDGE -->|固定模式| CODE[Learned Module]
+    JUDGE -->|不需要| END[结束]
+    SKILL & INFO & PROJ --> RELOAD[下次 Prompt 自动加载]
+    CODE --> REG[下次启动自动注册为工具]
+```
+
+| 组件 | 说明 |
+|------|------|
+| 消息网关 | 飞书 WebSocket + CLI，接收消息、分发回复 |
+| Prompt Builder | 5 层分层构建 system prompt |
+| Agent 核心 | Tool loop、上下文压缩、反思沉淀 |
+| 知识系统 | Skills + Info + Projects + Learned Modules |
+| 进程守护 | Watchdog + Daemon，自动重启 |
+
+</details>
 
 <details>
 <summary><strong>功能</strong></summary>
