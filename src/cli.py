@@ -191,14 +191,17 @@ def _init_platform(config: dict) -> None:
     _cli_loop_thread.start()
     pm.register(CliAdapter())
 
-    # 注册飞书 adapter（如果有配置）
+    # 注册并启动飞书 adapter（如果有配置）
     feishu_cfg = config.get("feishu", {})
     if feishu_cfg.get("app_id") and feishu_cfg.get("app_secret"):
         from src.platforms.adapters.feishu import FeishuAdapter
-        pm.register(FeishuAdapter({
+        feishu_adapter = FeishuAdapter({
             "app_id": feishu_cfg["app_id"],
             "app_secret": feishu_cfg["app_secret"],
-        }))
+        })
+        pm.register(feishu_adapter)
+        feishu_adapter.start()
+        print("[cli] 飞书 adapter 已启动", flush=True)
 
 
 # ── 子命令处理 ────────────────────────────────────────────
