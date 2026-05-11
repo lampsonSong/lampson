@@ -1,4 +1,9 @@
-"""视觉分析工具：通过 GLM-4.6V 分析截图。"""
+"""视觉分析工具：通过 GLM-4.6V 分析截图。
+
+支持两种输入方式：
+1. image_path: 传入图片文件路径（推荐，由 Python 层面处理读取和压缩）
+2. image_base64: 传入 base64 编码（向后兼容，不推荐大图片使用）
+"""
 
 from __future__ import annotations
 
@@ -41,6 +46,35 @@ TIMEOUT = _get_config_value("timeout", 60)
 MAX_BASE64_LENGTH = _get_config_value("max_base64_length", 4_000_000)
 
 
+def _load_and_compress_file(image_path: str, max_edge: int = 1920) -> str:
+    """从文件路径读取图片，压缩后返回 base64 编码。
+
+    Args:
+        image_path: 图片文件路径（支持 PNG、JPEG 等格式）
+        max_edge: 长边最大像素数，超过会等比缩放
+
+    Returns:
+        压缩后的 JPEG base64 字符串
+    """
+    path = Path(image_path).expanduser()
+    if not path.exists():
+        raise FileNotFoundError(f"图片文件不存在: {path}")
+
+    img = Image.open(path)
+
+    # 缩小到不超过 max_edge 长边
+    w, h = img.size
+    if max(w, h) > max_edge:
+        ratio = max_edge / max(w, h)
+        img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+
+    buf = io.BytesIO()
+    img = img.convert("RGB")
+    buf.seek(0)
+    img.save(buf, format="JPEG", quality=80)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
 def _compress_image(image_base64: str, max_length: int = MAX_BASE64_LENGTH) -> str:
     """如果 base64 过大，解码后压缩为 JPEG 再重新编码。"""
     if len(image_base64) <= max_length:
@@ -63,7 +97,7 @@ def _compress_image(image_base64: str, max_length: int = MAX_BASE64_LENGTH) -> s
 
 
 def analyze_image(image_base64: str, prompt: str = "描述这张图片的内容") -> str:
-    """用 GLM-4.6V 分析图片。
+    """用视觉模型分析图片。
 
     Args:
         image_base64: 图片的 base64 编码（不含 data:image/... 前缀）
@@ -72,7 +106,6 @@ def analyze_image(image_base64: str, prompt: str = "描述这张图片的内容"
     Returns:
         模型的文字回复
     """
-    # 检查配置是否存在
     if not API_KEY:
         return (
             "[配置错误] 未配置 vision API key。\n"
@@ -129,13 +162,21 @@ SCHEMA: dict[str, Any] = {
     "type": "function",
     "function": {
         "name": "vision_analyze",
-        "description": "用视觉模型分析一张图片。传入图片 base64 编码和问题，返回模型对图片的理解。",
+        "description": (
+            "用视觉模型分析一张图片。推荐传入 image_path（文件路径），"
+            "由 Python 层面处理读取和压缩。也可传入 image_base64（向后兼容，"
+            "大图片不推荐）。image_path 和 image_base64 二选一。"
+        ),
         "parameters": {
             "type": "object",
             "properties": {
+                "image_path": {
+                    "type": "string",
+                    "description": "图片文件路径，如 ~/.lamix/screenshots/screenshot_xxx.png（推荐）",
+                },
                 "image_base64": {
                     "type": "string",
-                    "description": "图片的 base64 编码字符串（不含 data:image/... 前缀）",
+                    "description": "图片的 base64 编码字符串（不含 data:image/... 前缀）。大图片请改用 image_path。",
                 },
                 "prompt": {
                     "type": "string",
@@ -143,15 +184,24 @@ SCHEMA: dict[str, Any] = {
                     "default": "描述这张图片的内容",
                 },
             },
-            "required": ["image_base64"],
         },
     },
 }
 
 
 def run(params: dict[str, Any]) -> str:
+    image_path = params.get("image_path", "")
     image_base64 = params.get("image_base64", "")
     prompt = params.get("prompt", "描述这张图片的内容")
-    if not image_base64:
-        return "[错误] image_base64 不能为空"
+
+    if image_path:
+        try:
+            image_base64 = _load_and_compress_file(image_path)
+        except FileNotFoundError as e:
+            return f"[错误] {e}"
+        except Exception as e:
+            return f"[错误] 读取图片文件失败：{e}"
+    elif not image_base64:
+        return "[错误] 必须提供 image_path 或 image_base64"
+
     return analyze_image(image_base64, prompt)
