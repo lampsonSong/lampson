@@ -49,7 +49,7 @@ COMPACTION_LOG = LAMIX_DIR / ".compaction_log.jsonl"
 
 # ── 配置 ──────────────────────────────────────────────────────────────────────
 
-STOP_REASONS = {"end_turn", "aborted"}
+STOP_REASONS = {"end_turn", "aborted", "stop", "stop_sequence"}
 END_THRESHOLD_PERCENT = 80.0
 DEFAULT_CONTEXT_WINDOW = 131_072
 DEFAULT_TRIGGER_THRESHOLD = 0.90
