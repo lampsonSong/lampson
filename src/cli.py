@@ -212,31 +212,44 @@ def _ensure_daemon_running() -> None:
     daemon_log = log_dir / "daemon.log"
 
     python_exe = sys.executable
-    # Windows 上用 pythonw.exe 避免弹窗
-    if sys.platform == "win32":
-        pythonw = python_exe.replace("python.exe", "pythonw.exe")
-        if Path(pythonw).exists():
-            python_exe = pythonw
+    # PyInstaller 打包后 sys.executable 是 lamix.exe，不能用 -m，
+    # 直接用 lamix gateway 子命令启动 daemon
+    import importlib.util
+    _is_frozen = getattr(sys, "frozen", False)
+
+    if _is_frozen:
+        daemon_cmd = [python_exe, "gateway"]
+    else:
+        # Windows 上用 pythonw.exe 避免弹窗
+        if sys.platform == "win32":
+            pythonw = python_exe.replace("python.exe", "pythonw.exe")
+            if Path(pythonw).exists():
+                python_exe = pythonw
+        daemon_cmd = [python_exe, "-m", "src.daemon"]
 
     try:
-        if sys.platform == "win32":
+        if sys.platform == "win32" and not _is_frozen:
             DETACHED_PROCESS = 0x00000008
             CREATE_NEW_PROCESS_GROUP = 0x00000200
             with open(daemon_log, "a", encoding="utf-8") as log_file:
                 subprocess.Popen(
-                    [python_exe, "-m", "src.daemon"],
+                    daemon_cmd,
                     stdout=log_file,
                     stderr=log_file,
                     creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
                     cwd=str(Path(__file__).resolve().parent.parent),
                 )
         else:
+            # frozen exe (PyInstaller) 或 macOS
+            kwargs = {}
+            if not _is_frozen and sys.platform != "win32":
+                kwargs["start_new_session"] = True
             subprocess.Popen(
-                [python_exe, "-m", "src.daemon"],
+                daemon_cmd,
                 stdout=open(daemon_log, "a"),
                 stderr=open(daemon_log, "a"),
-                start_new_session=True,
                 cwd=str(Path(__file__).resolve().parent.parent),
+                **kwargs,
             )
         print("[cli] daemon 已在后台启动")
     except Exception as e:
