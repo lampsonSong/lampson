@@ -1,12 +1,15 @@
 """Lamix 顶层命令分发器。
 
-lamix              → 显示帮助
+lamix              → 显示帮助（macOS/开发环境）/ 直接启动 CLI（Windows exe）
 lamix cli [query]  → 交互式 CLI（启动 daemon + REPL）
 lamix gateway      → 仅启动 daemon
 lamix model        → 模型管理（占位）
 lamix update       → 自更新（占位）
 lamix config       → 显示当前配置
 lamix -V/--version → 版本号
+
+Windows 上双击 lamix.exe（无参数）自动进入交互式 CLI 模式。
+macOS/Linux 上无参数时显示帮助信息。
 """
 
 from __future__ import annotations
@@ -650,7 +653,18 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command is None:
-        # 无参数时显示帮助
+        # PyInstaller 打包的 exe（Windows）：无参数时直接启动 CLI
+        if getattr(sys, "frozen", False):
+            # 构造 cli 子命令的默认参数
+            cli_args = argparse.Namespace(
+                command="cli",
+                query=None, query_c=None,
+                memory=None, skills=None, feishu=None, update=None,
+                help_cmd=False, func=run_cli,
+            )
+            run_cli(cli_args)
+            return
+        # 开发环境/其他系统：显示帮助
         parser.print_help()
         return
 
