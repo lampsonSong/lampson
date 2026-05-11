@@ -315,6 +315,28 @@ class FeishuAdapter(BasePlatformAdapter):
         except Exception:
             pass
 
+    def _maybe_save_owner_identity(self, open_id: str, chat_id: str) -> None:
+        """首次收到飞书消息时，自动保存 owner_open_id 和 owner_chat_id 到 config。
+
+        这样后续上线通知、boot_tasks、审计报告都能自动发到正确的地方。
+        """
+        try:
+            from src.core.config import load_config, save_config
+            config = load_config()
+            feishu_cfg = config.setdefault("feishu", {})
+            changed = False
+            if not feishu_cfg.get("owner_chat_id"):
+                feishu_cfg["owner_chat_id"] = chat_id
+                changed = True
+            if not feishu_cfg.get("user_open_id"):
+                feishu_cfg["user_open_id"] = open_id
+                changed = True
+            if changed:
+                save_config(config)
+                print(f"[feishu] 已自动保存 owner 身份: chat_id={chat_id}, open_id={open_id}", flush=True)
+        except Exception as e:
+            print(f"[feishu] 保存 owner 身份失败: {e}", flush=True)
+
     # ─── 消息处理 ───────────────────────────────────────────────────────
 
     def _handle_message(self, data) -> None:
@@ -330,6 +352,9 @@ class FeishuAdapter(BasePlatformAdapter):
 
             open_id = sender.sender_id.open_id if sender.sender_id else "unknown"
             chat_id = message.chat_id
+
+            # 自动保存 owner 身份到 config（首次收到消息时）
+            self._maybe_save_owner_identity(open_id, chat_id)
 
             # 过期消息丢弃（>5min）
             create_time_str = getattr(message, "create_time", None)
