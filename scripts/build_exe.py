@@ -91,7 +91,7 @@ def uninstall():
         print(f"配置目录：{data_dir}")
         print("  保留：下次安装可直接使用，配置、记忆、技能全部保留。")
         print("  删除：彻底清除所有个人数据。")
-        choice = input("\n是否删除配置目录？(y/N): ").strip().lower()
+        choice = input("\\n是否删除配置目录？(y/N): ").strip().lower()
         if choice in ("y", "yes"):
             try:
                 shutil.rmtree(data_dir)
@@ -112,7 +112,7 @@ if __name__ == "__main__":
         uninstall()
     except Exception as e:
         print(f"卸载出错：{e}")
-    input("\n按回车键退出...")
+    input("\\n按回车键退出...")
 """,
         encoding="utf-8",
     )
