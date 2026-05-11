@@ -12,6 +12,7 @@ lamix -V/--version → 版本号
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import textwrap
 
@@ -347,6 +348,9 @@ def run_cli(args: argparse.Namespace) -> None:
 
 def run_gateway(args: argparse.Namespace) -> None:
     """'lamix gateway' 子命令：启动 daemon。"""
+    import sys
+    # daemon.py 用 argparse 解析 sys.argv，需要清掉 'gateway' 子命令
+    sys.argv = [sys.argv[0]] if sys.argv else ["lamix"]
     from src.daemon import main as daemon_main
     daemon_main()
 
