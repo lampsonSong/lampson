@@ -75,6 +75,100 @@ def _refresh_skill_index() -> None:
         logger.warning('[反思] Skill 索引重建失败: %s', e)
 
 
+# ── 工具注册 ────────────────────────────────────────────────────────────────
+
+REFLECT_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "reflect_and_learn",
+        "description": (
+            "任务完成后反思沉淀知识。分析本轮对话内容，判断是否有值得持久化的知识"
+            "（skill、info、project、learned_module），并自动执行沉淀。"
+            "适用场景：(1) 任务完成后 (2) 激活了某个技能并发现可改进之处 "
+            "(3) 解决了复杂问题，过程中产生了可复用的方法或代码 "
+            "(4) 探索了新项目，发现了项目信息"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "goal": {
+                    "type": "string",
+                    "description": "本轮任务的简要描述（例如：'帮用户调试API接口'、'优化数据库查询性能'）",
+                },
+                "execution_summary": {
+                    "type": "string",
+                    "description": "执行过程摘要（包括主要步骤、遇到的问题、解决方案等）",
+                },
+                "skill_activated": {
+                    "type": "string",
+                    "description": "本轮激活的技能名（如果有）",
+                },
+            },
+            "required": ["goal", "execution_summary"],
+        },
+    },
+}
+
+
+def tool_reflect_runner(params: dict[str, Any]) -> str:
+    """反思工具的执行函数，供 tools.py 调用。
+
+    Args:
+        params: 包含 goal, execution_summary, skill_activated 的参数字典
+
+    Returns:
+        沉淀结果摘要
+    """
+    global _llm_client
+
+    if _llm_client is None:
+        return "[提示] 反思功能未初始化（LLM Client 未注入），跳过沉淀"
+
+    goal = params.get("goal", "")
+    execution_summary = params.get("execution_summary", "")
+    skill_activated = params.get("skill_activated")
+
+    if not goal or not execution_summary:
+        return "[提示] 反思参数不完整（goal 和 execution_summary 为必填），跳过沉淀"
+
+    try:
+        # 获取当前项目上下文（如果有）
+        active_project = ""
+        try:
+            from src.tools import session as session_tool
+            current_session = session_tool.get_current_session()
+            if current_session and hasattr(current_session, 'active_project'):
+                active_project = current_session.active_project or ""
+        except Exception:
+            pass
+
+        # 调用反思逻辑
+        learnings = reflect_and_learn(
+            goal=goal,
+            execution_summary=execution_summary,
+            llm_client=_llm_client,
+            skill_activated=skill_activated,
+            recent_context="",
+            active_project=active_project,
+        )
+
+        if not learnings:
+            return "✓ 反思完成：本轮任务无需沉淀新知识"
+
+        # 执行沉淀
+        hints = execute_learnings(learnings)
+
+        if hints:
+            summary = "\n".join(f"  - {h}" for h in hints)
+            return f"✓ 反思沉淀完成：\n{summary}"
+        else:
+            return "✓ 反思完成：沉淀操作已跳过（可能因为内容重复或不符合要求）"
+
+    except Exception as e:
+        logger.exception("反思工具执行异常")
+        return f"[错误] 反思沉淀失败: {e}"
+
+
 # ── 反思 Prompt ──────────────────────────────────────────────────────────────
 
 REFLECT_PROMPT = """你是一个知识管理助手。请分析这次任务执行过程，判断是否有值得持久化的知识。

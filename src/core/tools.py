@@ -13,6 +13,7 @@ from src.tools import search as search_tool
 from src.tools import session as session_tool
 from src.feishu import client as feishu_client
 from src.core import skills_tools
+from src.core import reflection
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,7 @@ _register(skills_tools.SKILL_SCHEMA, skills_tools.skill)
 _register(skills_tools.SEARCH_PROJECTS_SCHEMA, skills_tools.search_projects)
 _register(skills_tools.INFO_SCHEMA, skills_tools.info)
 _register(session_tool.SESSION_SCHEMA, session_tool.run)
+_register(reflection.REFLECT_TOOL_SCHEMA, reflection.tool_reflect_runner)
 
 # ── 可选工具（缺依赖只跳过，不阻止 daemon 启动） ──────────────────────────
 _web = _try_import("src.tools.web")
