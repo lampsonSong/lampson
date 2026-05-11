@@ -53,7 +53,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "feishu": {
         "app_id": "",
         "app_secret": "",
-        "chat_ids": [],
     },
     "memory_path": str(MEMORY_DIR),
     "skills_path": str(SKILLS_DIR),
