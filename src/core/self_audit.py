@@ -802,6 +802,7 @@ def run_audit(auto_fix: bool = True) -> AuditReport:
     findings.extend(scan_projects())
     findings.extend(scan_learned_modules())
     findings.extend(scan_user_patterns())
+    findings.extend(cleanup_stale_knowledge(auto_fix=auto_fix))
 
     duration = time.time() - start
 
@@ -855,3 +856,209 @@ def format_report_detail(report: AuditReport) -> str:
         lines.append("")
 
     return "\n".join(lines)
+
+
+# ── 基于使用频率的归档清理 ──────────────────────────────────────────────────
+
+def cleanup_stale_knowledge(auto_fix: bool = True) -> list[AuditFinding]:
+    """根据使用频率归档长期未用的 skill/info/project。
+
+    规则：
+    - 7天内有调用的，留着
+    - 7天内没调用，且总调用次数0次的，归档
+    - 7天内没调用，但总调用次数>0的，暂时留着
+    - 30天内没调用的，归档
+    """
+    from datetime import date, timedelta
+    import shutil
+
+    findings: list[AuditFinding] = []
+    today = date.today()
+    stale_7 = today - timedelta(days=7)
+    stale_30 = today - timedelta(days=30)
+
+    def _parse_date(s: str) -> date | None:
+        try:
+            return date.fromisoformat(str(s)[:10])
+        except (ValueError, TypeError):
+            return None
+
+    # ── Skills 清理 ──
+    if SKILLS_DIR.exists():
+        for skill_dir in SKILLS_DIR.iterdir():
+            if not skill_dir.is_dir() or skill_dir.name.startswith("."):
+                continue
+            skill_md = skill_dir / "SKILL.md"
+            if not skill_md.exists():
+                continue
+            try:
+                raw = skill_md.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", raw, re.DOTALL)
+            if not fm_match:
+                continue
+            try:
+                import yaml
+                meta = yaml.safe_load(fm_match.group(1)) or {}
+            except Exception:
+                continue
+
+            name = meta.get("name", skill_dir.name)
+            last_used = _parse_date(meta.get("last_used_at", ""))
+            created = _parse_date(meta.get("created_at", ""))
+            invocation_count = int(meta.get("invocation_count", 0))
+
+            # 判断是否应该归档
+            should_archive = False
+            reason = ""
+            anchor = last_used or created
+
+            if anchor and anchor <= stale_30:
+                should_archive = True
+                reason = f"30天未使用（最后使用: {anchor}）"
+            elif anchor and anchor <= stale_7 and invocation_count == 0:
+                should_archive = True
+                reason = f"7天未使用且从未被调用（创建于: {created}）"
+
+            if should_archive and auto_fix:
+                archive_dir = SKILLS_DIR / ".archived"
+                archive_dir.mkdir(parents=True, exist_ok=True)
+                dest = archive_dir / skill_dir.name
+                if dest.exists():
+                    import uuid
+                    dest = archive_dir / f"{skill_dir.name}_{uuid.uuid4().hex[:6]}"
+                shutil.move(str(skill_dir), str(dest))
+                findings.append(AuditFinding(
+                    severity="info",
+                    category="skill",
+                    target=name,
+                    message=f"已归档: {reason}",
+                    suggestion="如需恢复，从 .archived/ 目录移回",
+                    fixed=True,
+                    fix_detail=f"移至 {dest}",
+                ))
+            elif should_archive:
+                findings.append(AuditFinding(
+                    severity="warning",
+                    category="skill",
+                    target=name,
+                    message=f"建议归档: {reason}",
+                    suggestion="auto_fix=True 时自动归档",
+                ))
+
+    # ── Info 清理 ──
+    if PROJECTS_DIR.exists():
+        _info_dir = PROJECTS_DIR.parent / "info"
+    else:
+        from src.core.config import LAMIX_DIR
+        _info_dir = LAMIX_DIR / "memory" / "info"
+
+    if _info_dir.exists():
+        for info_file in _info_dir.glob("*.md"):
+            try:
+                raw = info_file.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", raw, re.DOTALL)
+            if not fm_match:
+                continue
+            try:
+                import yaml
+                meta = yaml.safe_load(fm_match.group(1)) or {}
+            except Exception:
+                continue
+
+            name = meta.get("name", info_file.stem)
+            last_used = _parse_date(meta.get("last_used_at", ""))
+            created = _parse_date(meta.get("created_at", ""))
+
+            should_archive = False
+            reason = ""
+            anchor = last_used or created
+
+            if anchor and anchor <= stale_30:
+                should_archive = True
+                reason = f"30天未使用（最后使用: {anchor}）"
+            elif anchor and anchor <= stale_7:
+                # info 没有 invocation_count，7天没用直接归档
+                should_archive = True
+                reason = f"7天未使用（最后使用: {anchor}）"
+
+            if should_archive and auto_fix:
+                archive_dir = _info_dir / ".archived"
+                archive_dir.mkdir(parents=True, exist_ok=True)
+                dest = archive_dir / info_file.name
+                if dest.exists():
+                    import uuid
+                    dest = archive_dir / f"{info_file.stem}_{uuid.uuid4().hex[:6]}.md"
+                shutil.move(str(info_file), str(dest))
+                findings.append(AuditFinding(
+                    severity="info",
+                    category="info",
+                    target=name,
+                    message=f"已归档: {reason}",
+                    fixed=True,
+                    fix_detail=f"移至 {dest}",
+                ))
+            elif should_archive:
+                findings.append(AuditFinding(
+                    severity="warning",
+                    category="info",
+                    target=name,
+                    message=f"建议归档: {reason}",
+                ))
+
+    # ── Projects 清理 ──
+    if PROJECTS_DIR.exists():
+        for proj_file in PROJECTS_DIR.glob("*.md"):
+            try:
+                raw = proj_file.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", raw, re.DOTALL)
+            if not fm_match:
+                continue
+            try:
+                import yaml
+                meta = yaml.safe_load(fm_match.group(1)) or {}
+            except Exception:
+                continue
+
+            name = meta.get("name", proj_file.stem)
+            last_used = _parse_date(meta.get("last_used_at", ""))
+            created = _parse_date(meta.get("created_at", ""))
+
+            should_archive = False
+            reason = ""
+            anchor = last_used or created
+
+            if anchor and anchor <= stale_30:
+                should_archive = True
+                reason = f"30天未使用（最后使用: {anchor}）"
+
+            if should_archive and auto_fix:
+                archive_dir = PROJECTS_DIR / ".archived"
+                archive_dir.mkdir(parents=True, exist_ok=True)
+                dest = archive_dir / proj_file.name
+                if dest.exists():
+                    import uuid
+                    dest = archive_dir / f"{proj_file.stem}_{uuid.uuid4().hex[:6]}.md"
+                shutil.move(str(proj_file), str(dest))
+                findings.append(AuditFinding(
+                    severity="info",
+                    category="project",
+                    target=name,
+                    message=f"已归档: {reason}",
+                    fixed=True,
+                    fix_detail=f"移至 {dest}",
+                ))
+            elif should_archive:
+                findings.append(AuditFinding(
+                    severity="warning",
+                    category="project",
+                    target=name,
+                    message=f"建议归档: {reason}",
+                ))
+
+    return findings

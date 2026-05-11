@@ -211,3 +211,21 @@ def cleanup_stale_heartbeats() -> list[int]:
             except OSError:
                 pass
     return cleaned
+
+
+def get_last_activity_time() -> datetime | None:
+    """获取用户最后一次活跃时间（所有心跳中最新的 last_heartbeat）。
+
+    用于审计判断：24小时未使用 / 最后使用后1小时。
+    """
+    records = read_all_heartbeats()
+    latest = None
+    for rec in records.values():
+        if rec.last_heartbeat:
+            try:
+                t = datetime.fromisoformat(rec.last_heartbeat)
+                if latest is None or t > latest:
+                    latest = t
+            except (ValueError, TypeError):
+                pass
+    return latest

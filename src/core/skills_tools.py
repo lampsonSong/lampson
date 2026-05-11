@@ -170,7 +170,8 @@ def project_context(params: dict[str, Any]) -> str:
 
 
 def _increment_invocation(skill_path: Path) -> int:
-    """递增 SKILL.md 的 invocation_count，保留正文；返回新计数。"""
+    """递增 SKILL.md 的 invocation_count 和 last_used_at，保留正文；返回新计数。"""
+    from datetime import date
     from src.core.prompt_builder import _parse_frontmatter, write_skill_with_frontmatter
 
     try:
@@ -183,6 +184,7 @@ def _increment_invocation(skill_path: Path) -> int:
     except (TypeError, ValueError):
         ic = 0
     meta["invocation_count"] = ic + 1
+    meta["last_used_at"] = str(date.today())
     write_skill_with_frontmatter(skill_path, meta, body)
     return int(meta["invocation_count"])
 
@@ -305,3 +307,139 @@ def search_projects(params: dict[str, Any]) -> str:
     if not results:
         return "未找到匹配的项目。"
     return "\n\n---\n\n".join(results)
+
+
+# ── 归档查询与恢复 ──────────────────────────────────────────────────────────
+
+ARCHIVED_SKILLS_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "list_archived",
+        "description": "列出所有已归档的 skills/info/projects。使用场景：查看归档内容、恢复前确认。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "enum": ["skill", "info", "project", "all"],
+                    "description": "要查看的类别，默认 all",
+                    "default": "all",
+                },
+            },
+            "required": [],
+        },
+    },
+}
+
+
+def list_archived(params: dict[str, Any]) -> str:
+    """列出所有已归档的 skills/info/projects。"""
+    from src.core.config import LAMIX_DIR
+    category = params.get("category", "all")
+
+    results = []
+
+    if category in ("skill", "all"):
+        archive_dir = SKILLS_DIR / ".archived"
+        if archive_dir.exists():
+            for d in sorted(archive_dir.iterdir()):
+                if d.is_dir():
+                    skill_md = d / "SKILL.md"
+                    if skill_md.exists():
+                        try:
+                            raw = skill_md.read_text(encoding="utf-8")
+                            fm = re.match(r"^---\s*\n(.*?)\n---\s*\n", raw, re.DOTALL)
+                            desc = ""
+                            if fm:
+                                import yaml
+                                meta = yaml.safe_load(fm.group(1)) or {}
+                                desc = meta.get("description", "")[:80]
+                            results.append(f"  📦 skill/{d.name}: {desc}")
+                        except OSError:
+                            results.append(f"  📦 skill/{d.name}")
+
+    if category in ("info", "all"):
+        info_archive = LAMIX_DIR / "memory" / "info" / ".archived"
+        if info_archive.exists():
+            for f in sorted(info_archive.glob("*.md")):
+                results.append(f"  📦 info/{f.stem}")
+
+    if category in ("project", "all"):
+        proj_archive = LAMIX_DIR / "memory" / "projects" / ".archived"
+        if proj_archive.exists():
+            for f in sorted(proj_archive.glob("*.md")):
+                results.append(f"  📦 project/{f.stem}")
+
+    if not results:
+        return "没有归档内容。"
+
+    return "归档列表：\n" + "\n".join(results)
+
+
+RESTORE_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "restore_archived",
+        "description": "从归档中恢复指定 skill/info/project。使用场景：恢复误归档或有用的知识。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "enum": ["skill", "info", "project"],
+                    "description": "类别",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "要恢复的名称",
+                },
+            },
+            "required": ["category", "name"],
+        },
+    },
+}
+
+
+def restore_archived(params: dict[str, Any]) -> str:
+    """从归档中恢复指定 skill/info/project。"""
+    import shutil
+    from src.core.config import LAMIX_DIR
+
+    category = params.get("category", "")
+    name = params.get("name", "").strip()
+    if not category or not name:
+        return "[错误] category 和 name 参数必填"
+
+    if category == "skill":
+        archive_dir = SKILLS_DIR / ".archived"
+        target_dir = SKILLS_DIR
+        # 查找归档（可能有后缀）
+        candidates = [d for d in archive_dir.iterdir() if d.is_dir() and d.name.startswith(name)]
+    elif category == "info":
+        archive_dir = LAMIX_DIR / "memory" / "info" / ".archived"
+        target_dir = LAMIX_DIR / "memory" / "info"
+        candidates = [f for f in archive_dir.glob(f"{name}*.md")]
+    elif category == "project":
+        archive_dir = LAMIX_DIR / "memory" / "projects" / ".archived"
+        target_dir = LAMIX_DIR / "memory" / "projects"
+        candidates = [f for f in archive_dir.glob(f"{name}*.md")]
+    else:
+        return f"[错误] 不支持的类别: {category}"
+
+    if not archive_dir.exists():
+        return f"[错误] {category} 归档目录不存在"
+
+    if not candidates:
+        return f"[错误] 归档中未找到: {category}/{name}"
+
+    if len(candidates) > 1:
+        names = [c.name for c in candidates]
+        return f"[错误] 匹配到多个: {names}，请更精确指定"
+
+    src = candidates[0]
+    dest = target_dir / src.name
+    if dest.exists():
+        return f"[错误] 目标已存在: {dest}，请先处理冲突"
+
+    shutil.move(str(src), str(dest))
+    return f"✓ 已恢复: {category}/{name} → {dest}"

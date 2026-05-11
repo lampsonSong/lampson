@@ -241,6 +241,19 @@ def build_project_index() -> str:
     return text
 
 
+def _update_project_last_used(path: Path, date_str: str) -> None:
+    """更新 project 文件的 last_used_at（写入第一行注释）。"""
+    try:
+        raw = path.read_text(encoding="utf-8")
+        meta, body = _parse_frontmatter(raw)
+        meta["last_used_at"] = date_str
+        import yaml
+        fm = yaml.dump(meta, allow_unicode=True, default_flow_style=False).strip()
+        path.write_text(f"---\n{fm}\n---\n\n{body}\n", encoding="utf-8")
+    except Exception:
+        pass
+
+
 def load_project_context(name: str) -> str:
     """加载指定项目的完整上下文（projects/xxx.md 内容）。"""
     if not name:
@@ -255,6 +268,9 @@ def load_project_context(name: str) -> str:
             try:
                 content = md_file.read_text(encoding="utf-8").strip()
                 if content:
+                    # 更新 last_used_at
+                    from datetime import date
+                    _update_project_last_used(md_file, str(date.today()))
                     return f"# {md_file.stem}\n\n{content}"
             except OSError:
                 pass
@@ -265,6 +281,8 @@ def load_project_context(name: str) -> str:
             try:
                 content = md_file.read_text(encoding="utf-8").strip()
                 if content:
+                    from datetime import date
+                    _update_project_last_used(md_file, str(date.today()))
                     return f"# {md_file.stem}\n\n{content}"
             except OSError:
                 pass
@@ -353,9 +371,20 @@ def load_info(name: str) -> str:
         if not content:
             return f"[info '{name}' 内容为空]"
         meta, body = _parse_frontmatter(content)
+        # 更新 last_used_at
+        from datetime import date
+        meta["last_used_at"] = str(date.today())
+        write_info_with_frontmatter(path, meta, body if body else content)
         return body.strip() if body.strip() else content
     except OSError as e:
         return f"[读取失败：{e}]"
+
+
+def write_info_with_frontmatter(path: Path, meta: dict, body: str) -> None:
+    """将 meta + body 写回 info 文件。"""
+    import yaml
+    fm = yaml.dump(meta, allow_unicode=True, default_flow_style=False).strip()
+    path.write_text(f"---\n{fm}\n---\n\n{body}\n", encoding="utf-8")
 
 
 # ── Identity & User 加载 ─────────────────────────────────────────────────────

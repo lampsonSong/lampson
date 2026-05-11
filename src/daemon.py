@@ -16,12 +16,15 @@ import argparse
 import asyncio
 import json
 import os
+import queue
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import threading
+import time
+from typing import Any
 from pathlib import Path
 
 from src.core.config import load_config, is_config_complete, LAMIX_DIR
@@ -75,16 +78,63 @@ def _notify_user(text: str, config: dict | None = None) -> None:
 
 
 def _self_audit_callback() -> None:
-    """每日自我审计任务。"""
-    config = load_config()
+    """审计任务：根据用户活跃度判断是否触发。
+
+    触发逻辑：
+    - 用户 24 小时没有使用 → 触发审计
+    - 用户有使用 → 等最后一次使用 1 小时后触发
+    - 发过一次审计后，重新开始计时
+    """
+    from datetime import datetime, timedelta
+    from src.core.heartbeat import get_last_activity_time
+
+    now = datetime.now()
+    last_activity = get_last_activity_time()
+    last_audit_file = LAMIX_DIR / "logs" / ".last_audit_time"
+
+    # 读取上次审计时间
+    last_audit_time = None
+    try:
+        if last_audit_file.exists():
+            ts = last_audit_file.read_text().strip()
+            last_audit_time = datetime.fromisoformat(ts)
+    except Exception:
+        pass
+
+    # 判断是否应该触发
+    should_run = False
+    reason = ""
+
+    if last_activity is None:
+        # 没有活动记录（刚启动），跳过
+        return
+    elif now - last_activity >= timedelta(hours=24):
+        # 24 小时没有使用
+        if last_audit_time and now - last_audit_time < timedelta(hours=24):
+            return  # 24小时内已审计过，跳过
+        should_run = True
+        reason = "用户24小时未使用"
+    elif now - last_activity >= timedelta(hours=1):
+        # 有使用，但最后使用已过 1 小时
+        if last_audit_time and last_audit_time > last_activity:
+            return  # 上次审计在最后活动之后，跳过
+        should_run = True
+        reason = "用户最后使用后1小时"
+
+    if not should_run:
+        return
+
     try:
         report = run_audit()
-        content = format_report_detail(report)
-        if len(content) > 4000:
-            content = content[:4000] + "\n\n...（报告过长已截断）"
-        _audit_log(f"[self_audit] 审计完成，开始发送报告")
-        _notify_user(f"🕐 Lamix 自我审计报告\n\n{content}")
-        print("[self_audit] 审计完成并已发送", flush=True)
+        report_content = format_report_detail(report)
+        if len(report_content) > 4000:
+            report_content = report_content[:4000] + "\n\n...（报告过长已截断）"
+        _audit_log(f"[self_audit] 审计完成（{reason}），开始发送报告")
+        _notify_user(f"🕐 Lamix 自我审计报告\n\n{report_content}")
+        print(f"[self_audit] 审计完成（{reason}）", flush=True)
+        # 记录审计时间
+        last_audit_file.parent.mkdir(parents=True, exist_ok=True)
+        last_audit_file.write_text(now.isoformat(), encoding="utf-8")
     except Exception as e:
         print(f"[self_audit] 执行失败: {e}", flush=True)
 
@@ -98,17 +148,19 @@ def _register_tasks(session=None) -> None:
         set_session(session)
     scheduler_start()
 
-    # 自我审计：每天固定时间
+    # 自我审计：每 4 小时检查一次是否需要执行审计
+    # 审计触发逻辑在 _self_audit_callback 内部判断：
+    #   - 用户 24 小时没有使用 → 触发审计
+    #   - 用户有使用 → 等最后一次使用 1 小时后触发
     schedule(TaskConfig(
-        task_id="self_audit",
-        task_type=TaskType.CRON,
-        cron_hour=DEFAULT_AUDIT_HOUR,
-        cron_minute=DEFAULT_AUDIT_MINUTE,
+        task_id="self_audit_check",
+        task_type=TaskType.INTERVAL,
+        interval_seconds=14400,  # 4 小时检查一次
         func=_self_audit_callback,
-        description="每日自我审计（凌晨 4 点）",
+        description="审计检查（每4小时）",
     ))
 
-    print("[daemon] 任务调度器已启动（自我审计）", flush=True)
+    print("[daemon] 任务调度器已启动（审计检查）", flush=True)
 
 
 # ── 信号与退出 ───────────────────────────────────────────────────────────────
@@ -275,6 +327,7 @@ def _get_boot_tasks_session(mgr, config: dict):
 def _inject_boot_tasks(session, tasks: list[dict], config: dict | None = None) -> None:
     """将 boot_tasks 注入 session 并主动执行一轮 agent。"""
     _feishu_sender = None
+    _progress_queue: queue.Queue[dict[str, Any]] | None = None
 
     # 飞书 session 需要 partial_sender 才能把回复发出去
     if config and session.channel == "feishu":
@@ -289,6 +342,70 @@ def _inject_boot_tasks(session, tasks: list[dict], config: dict | None = None) -
             )
             session.partial_sender = _feishu_sender
             session._reply_callback = _feishu_sender
+
+            # ─── 进度卡片 worker（通过 adapter 抽象层，支持多渠道扩展）───
+            from src.platforms.adapters.feishu import FeishuAdapter
+            _progress_adapter = FeishuAdapter({
+                "app_id": app_id,
+                "app_secret": app_secret,
+            })
+            _progress_queue = queue.Queue()
+            _progress_done = threading.Event()
+
+            def _progress_worker() -> None:
+                progress_lines: list[str] = []
+                last_update_ts = 0.0
+                update_interval = 1.5
+                progress_msg_id: str | None = None
+                _fail_count = 0
+                while True:
+                    try:
+                        event = _progress_queue.get(timeout=0.5)  # type: ignore
+                    except queue.Empty:
+                        if _progress_done.is_set():
+                            if progress_lines and _fail_count < 3:
+                                try:
+                                    if progress_msg_id is None:
+                                        progress_msg_id = _progress_adapter._send_progress_card(owner_chat_id, progress_lines, finished=True)
+                                    else:
+                                        _progress_adapter._update_progress_card(progress_msg_id, progress_lines, finished=True)
+                                except Exception:
+                                    pass
+                            return
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    if event.get("type") == "model_switch":
+                        progress_lines.append(f"**[模型切换]** {event.get('message', '')}")
+                    elif event.get("type") == "tool_progress":
+                        round_n = event["round"]
+                        tool = event["tool"]
+                        args_p = event["args_preview"]
+                        result_p = event["result_preview"]
+                        is_error = result_p.startswith("[错误]") or result_p.startswith("[网络错误]")
+                        icon = "x" if is_error else ">"
+                        progress_lines.append(f"**{round_n}.** `{tool}`({args_p})\n  {icon} {result_p}")
+                    now = time.monotonic()
+                    if now - last_update_ts >= update_interval and _fail_count < 3 and progress_lines:
+                        try:
+                            if progress_msg_id is None:
+                                progress_msg_id = _progress_adapter._send_progress_card(owner_chat_id, progress_lines)
+                                if progress_msg_id is None:
+                                    _fail_count += 1
+                            else:
+                                _progress_adapter._update_progress_card(progress_msg_id, progress_lines)
+                        except Exception:
+                            _fail_count += 1
+                        last_update_ts = time.monotonic()
+
+            _pw = threading.Thread(target=_progress_worker, daemon=True, name="boot-progress")
+            _pw.start()
+
+            def _progress_cb(event: dict) -> None:
+                _progress_queue.put(event)  # type: ignore
+
+            session.agent.progress_callback = _progress_cb
+            session.agent.interim_sender = _feishu_sender
 
     lines = ["[系统] 你刚完成重启，有以下待办任务需要执行："]
     for i, t in enumerate(tasks, 1):
@@ -319,6 +436,16 @@ def _inject_boot_tasks(session, tasks: list[dict], config: dict | None = None) -
                 _feishu_sender(f"⚠️ 启动待办任务执行失败：{e}")
             except Exception:
                 pass
+    finally:
+        # 清理进度回调
+        if _progress_queue is not None:
+            _progress_done.set()  # type: ignore
+            try:
+                _pw.join(timeout=3.0)  # type: ignore
+            except Exception:
+                pass
+            session.agent.progress_callback = None
+            session.agent.interim_sender = None
 
 def _patch_websockets_ssl() -> None:
     """Monkey-patch websockets.connect 使用 certifi CA 证书。

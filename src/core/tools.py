@@ -13,6 +13,10 @@ from src.tools import search as search_tool
 from src.tools import session as session_tool
 from src.feishu import client as feishu_client
 from src.core import skills_tools
+from src.core.skills_tools import (
+    ARCHIVED_SKILLS_SCHEMA, RESTORE_SCHEMA,
+    list_archived as _list_archived, restore_archived as _restore_archived,
+)
 from src.core import reflection
 
 logger = logging.getLogger(__name__)
@@ -40,6 +44,10 @@ _register(skills_tools.SEARCH_PROJECTS_SCHEMA, skills_tools.search_projects)
 _register(skills_tools.INFO_SCHEMA, skills_tools.info)
 _register(session_tool.SESSION_SCHEMA, session_tool.run)
 _register(reflection.REFLECT_TOOL_SCHEMA, reflection.tool_reflect_runner)
+# 归档查询与恢复
+_register(ARCHIVED_SKILLS_SCHEMA, _list_archived)
+_register(RESTORE_SCHEMA, _restore_archived)
+
 
 # ── 可选工具：schema 硬编码（无外部依赖），runner 延迟导入 ───────────────
 # 注册时只写 schema，runner 在 dispatch() 首次调用时才 import

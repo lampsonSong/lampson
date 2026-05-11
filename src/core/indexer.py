@@ -282,6 +282,9 @@ class SkillIndex:
         return get_skills_management_config(load_config())
 
     def _maybe_cleanup(self) -> None:
+        """归档逻辑已移到 self_audit.cleanup_stale_knowledge，这里不再处理。"""
+        return
+        # 以下代码保留但不会执行
         cfg = self._cleanup_config()
         max_skills = cfg["cleanup_max_skills"]
         if len(self._entries) < max_skills:
