@@ -820,10 +820,12 @@ class Session:
                     tc_id = tc_data.get("id", "")
                     tc_name = tc_data.get("name", "")
                     tc_args = tc_data.get("arguments", {})
+                    # jsonl 里 arguments 可能已经是 JSON string，避免双重编码
+                    args_str = tc_args if isinstance(tc_args, str) else json.dumps(tc_args, ensure_ascii=False)
                     tool_calls_group.append({
                         "id": tc_id,
                         "type": "function",
-                        "function": {"name": tc_name, "arguments": json.dumps(tc_args, ensure_ascii=False)},
+                        "function": {"name": tc_name, "arguments": args_str},
                     })
                     tc_ids.append(tc_id)
                     tc_names_list.append(tc_name)
@@ -844,10 +846,12 @@ class Session:
                     tr_data = ordered[i]["data"]
                     tr_id = tr_data.get("id", "")
                     if tr_id in tc_ids:
+                        # result_inline 可能是 null（key 存在但值为 None），确保转为 string
+                        tr_content = tr_data.get("result_inline") or ""
                         inject_msgs.append({
                             "role": "tool",
                             "tool_call_id": tr_id,
-                            "content": tr_data.get("result_inline", ""),
+                            "content": tr_content,
                         })
                         result_ids_seen.add(tr_id)
                     i += 1
@@ -879,10 +883,11 @@ class Session:
             elif item["kind"] == "tool_result":
                 # 孤立的 tool_result（没有前面的 tool_call），直接作为 tool 消息
                 tr_data = item["data"]
+                tr_content = tr_data.get("result_inline") or ""
                 inject_msgs.append({
                     "role": "tool",
                     "tool_call_id": tr_data.get("id", ""),
-                    "content": tr_data.get("result_inline", ""),
+                    "content": tr_content,
                 })
                 i += 1
 

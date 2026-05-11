@@ -253,9 +253,12 @@ class Agent:
             elif msg.get("role") == "tool":
                 result_ids.add(msg.get("tool_call_id") or "")
 
-        # 找出缺失的 tool_call_id
+        # 找出缺失的 tool_call_id（有 call 无 result）
         missing_ids = tool_call_ids - result_ids
-        if not missing_ids:
+        # 找出孤立的 tool 消息（有 result 无对应的 assistant(tool_calls)）
+        orphan_ids = result_ids - tool_call_ids
+
+        if not missing_ids and not orphan_ids:
             logger.info(f"[_sanitize_tool_messages] 无需清理（tool_call_ids={tool_call_ids}, result_ids={result_ids}）")
             return
 
@@ -268,6 +271,14 @@ class Agent:
             })
 
         logger.info(f"[_sanitize_tool_messages] 补全了 {len(missing_ids)} 个缺失的 tool_result，IDs: {missing_ids}")
+
+        # 删除孤立的 tool 消息（没有对应 assistant(tool_calls) 的）
+        if orphan_ids:
+            before = len(msgs)
+            self.llm.messages = [m for m in msgs if not (m.get("role") == "tool" and (m.get("tool_call_id") or "") in orphan_ids)]
+            removed = before - len(self.llm.messages)
+            logger.info(f"[_sanitize_tool_messages] 删除了 {removed} 条孤立 tool 消息（无对应 assistant(tool_calls)），IDs: {orphan_ids}")
+
         logger.info(f"[_sanitize_tool_messages] 消息列表状态：")
         for i, m in enumerate(msgs):
             if m.get("role") in ("assistant", "tool", "user"):
