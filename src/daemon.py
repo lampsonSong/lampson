@@ -450,8 +450,9 @@ def _inject_boot_tasks(session, tasks: list[dict], config: dict | None = None) -
 def _patch_websockets_ssl() -> None:
     """Monkey-patch websockets.connect 使用 certifi CA 证书。
 
-    launchd 环境下 Python 默认 SSL context 可能缺少中间 CA（尤其有 VPN/代理时），
-    导致飞书 WebSocket 长连接 SSL 握手失败。用 certifi 的 CA bundle 更可靠。
+    macOS launchd / Windows 环境下 Python 默认 SSL context 可能缺少中间 CA
+    （尤其有 VPN/代理时），导致飞书 WebSocket 长连接 SSL 握手失败。
+    用 certifi 的 CA bundle 更可靠。
     """
     try:
         import ssl
@@ -485,9 +486,8 @@ def main() -> None:
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(line_buffering=True)
 
-    # 修复 macOS launchd 环境下飞书 WebSocket SSL 证书验证失败
-    if sys.platform == "darwin":
-        _patch_websockets_ssl()
+    # 修复飞书 WebSocket SSL 证书验证失败（macOS launchd / Windows 均可能出现）
+    _patch_websockets_ssl()
 
     parser = argparse.ArgumentParser(
         prog="python -m src.daemon",

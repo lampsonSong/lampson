@@ -42,11 +42,16 @@ echo.
 echo [3/3] 完成！
 echo.
 if exist dist\lamix.exe (
-    echo 双击这些文件即可使用：
     echo   dist\lamix.exe
-    echo   dist\lamix-uninstall.exe
-    echo.
-    echo 可以把它们复制到桌面。
+    if exist dist\lamix-uninstall.exe (
+        echo   dist\lamix-uninstall.exe
+        echo.
+        echo 可以把它们复制到桌面。
+    ) else (
+        echo.
+        echo 注意：lamix-uninstall.exe 未生成，但不影响使用。
+        echo 如需卸载，请手动删除 ~/.lamix 目录和任务计划。
+    )
 ) else (
     echo 构建失败，请检查上方错误信息。
 )
