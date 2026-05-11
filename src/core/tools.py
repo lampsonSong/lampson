@@ -27,63 +27,6 @@ def _register(schema: dict[str, Any], runner: ToolRunner) -> None:
     _REGISTRY[name] = (schema, runner)
 
 
-def _try_import(module_path: str, attr: str = ""):
-    """尝试 import 模块，失败时 warn 并返回 None。可选提取子属性。"""
-    try:
-        mod = __import__(module_path, fromlist=[attr] if attr else [""])
-        return getattr(mod, attr) if attr else mod
-    except ImportError as e:
-        logger.warning(f"可选工具模块 {module_path} 导入失败（缺少依赖: {e}），已跳过")
-        return None
-
-
-def _desktop_placeholder_schemas():
-    """desktop 模块不可用时的占位 schema。"""
-    placeholders = [
-        ("desktop_screenshot", "截取当前屏幕。"),
-        ("desktop_click", "在指定坐标点击鼠标。"),
-        ("desktop_type", "在当前焦点位置输入文本。"),
-        ("desktop_press", "按下按键。"),
-        ("desktop_hotkey", "按组合键。"),
-        ("desktop_scroll", "滚动鼠标。"),
-        ("desktop_query_ui", "查询应用中的 UI 元素。"),
-        ("desktop_info", "获取屏幕分辨率信息。"),
-        ("desktop_screenshot_region", "截取屏幕指定区域。"),
-    ]
-    schemas = []
-    for name, desc in placeholders:
-        schemas.append({
-            "type": "function",
-            "function": {
-                "name": name,
-                "description": desc,
-                "parameters": {"type": "object", "properties": {}, "required": []},
-            },
-        })
-    return schemas
-
-
-def _desktop_placeholder_run(params: dict) -> str:
-    return ("桌面控制工具不可用：缺少依赖 pyautogui 或 Pillow。"
-            "请运行 pip install pyautogui Pillow 安装，并授予 Accessibility 权限。")
-
-
-def _vision_placeholder_schema():
-    return {
-        "type": "function",
-        "function": {
-            "name": "analyze_image",
-            "description": "分析截图或图片内容。",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    }
-
-
-def _vision_placeholder_run(params: dict) -> str:
-    return ("视觉分析工具不可用：缺少依赖 Pillow，或未配置视觉模型。"
-            "请运行 pip install Pillow 安装，并在 config.yaml 中配置视觉模型。")
-
-
 # ── 核心工具（缺了就起不来） ─────────────────────────────────────────────
 _register(shell_tool.SCHEMA, shell_tool.run)
 _register(search_tool.SEARCH_SCHEMA, search_tool.run)
@@ -98,32 +41,187 @@ _register(skills_tools.INFO_SCHEMA, skills_tools.info)
 _register(session_tool.SESSION_SCHEMA, session_tool.run)
 _register(reflection.REFLECT_TOOL_SCHEMA, reflection.tool_reflect_runner)
 
-# ── 可选工具（缺依赖只跳过，不阻止 daemon 启动） ──────────────────────────
-_web = _try_import("src.tools.web")
-if _web:
-    _register(_web.SCHEMA, _web.run)
+# ── 可选工具：schema 硬编码（无外部依赖），runner 延迟导入 ───────────────
+# 注册时只写 schema，runner 在 dispatch() 首次调用时才 import
+# 这样新用户 `pip install -e .` 时不会有任何 warning
 
-_ts = _try_import("src.tools.task_scheduler_tool")
-if _ts:
-    _register(_ts.SCHEDULE_SCHEMA, _ts.run_dispatch)
-    _register(_ts.LIST_TASKS_SCHEMA, _ts.run_list_tool)
-    _register(_ts.CANCEL_TASK_SCHEMA, _ts.run_cancel_tool)
 
-# ── 桌面控制 + 视觉分析（默认安装，运行时检查权限和模型配置） ────────
-_desktop = _try_import("src.tools.desktop")
-if _desktop:
-    for _name in _desktop.SCHEMAS:
-        _register(_desktop.SCHEMAS[_name], lambda p, n=_name: _desktop.run(n, p))
-else:
-    # 模块导入失败时注册占位工具，调用时提示用户
-    for _schema in _desktop_placeholder_schemas():
-        _register(_schema, _desktop_placeholder_run)
+def _run_web(params: dict) -> str:
+    from src.tools.web import run as _run
+    return _run(params)
 
-_vision = _try_import("src.tools.vision")
-if _vision:
-    _register(_vision.SCHEMA, _vision.run)
-else:
-    _register(_vision_placeholder_schema(), _vision_placeholder_run)
+
+def _run_schedule(params: dict) -> str:
+    from src.tools.task_scheduler_tool import run_dispatch as _run
+    return _run(params)
+
+
+def _run_list_tasks(params: dict) -> str:
+    from src.tools.task_scheduler_tool import run_list_tool as _run
+    return _run(params)
+
+
+def _run_cancel_task(params: dict) -> str:
+    from src.tools.task_scheduler_tool import run_cancel_tool as _run
+    return _run(params)
+
+
+def _run_desktop(name: str, params: dict) -> str:
+    from src.tools.desktop import run as _run
+    return _run(name, params)
+
+
+def _run_vision(params: dict) -> str:
+    from src.tools.vision import run as _run
+    return _run(params)
+
+
+# web_search
+_register(
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "搜索互联网，返回相关网页标题、链接和摘要。适用于查找最新信息、技术文档等。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "搜索关键词或问题"},
+                    "max_results": {
+                        "type": "integer",
+                        "description": "最多返回几条结果，默认 5",
+                        "default": 5,
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    _run_web,
+)
+
+# task_schedule / task_list / task_cancel
+_register(
+    {
+        "type": "function",
+        "function": {
+            "name": "task_schedule",
+            "description": (
+                "动态注册定时任务。支持 interval（固定间隔）、cron（定时）、delayed（一次性延迟）。"
+                "执行方式：用 prompt（自然语言，推荐）指定任务内容，或用 module 引用 learned_modules。"
+                "注册后立即生效，无需重启。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["schedule", "cancel", "list"],
+                        "description": "操作类型：schedule 注册任务、cancel 取消任务、list 查看所有任务",
+                    },
+                    "task_id": {"type": "string", "description": "任务 ID（schedule 时必填，cancel 时必填）"},
+                    "task_type": {
+                        "type": "string",
+                        "enum": ["interval", "cron", "delayed"],
+                        "description": "触发类型（schedule 时必填）",
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "自然语言任务描述。触发时注入 agent session 由 LLM 用工具执行。推荐用于大多数场景。",
+                    },
+                    "module": {"type": "string", "description": "learned_modules 下的模块名（如 'self_audit'）。与 prompt 二选一。"},
+                    "func_name": {"type": "string", "description": "模块中要调用的函数名（默认 'run'）"},
+                    "func_args": {"type": "object", "description": "传给函数的额外参数（可选）"},
+                    "interval_seconds": {"type": "integer", "description": "interval 模式的间隔秒数"},
+                    "cron_hour": {"type": "integer", "description": "cron 模式的小时（0-23）"},
+                    "cron_minute": {"type": "integer", "description": "cron 模式的分钟（0-59）"},
+                    "cron_day_of_week": {"type": "string", "description": "cron 模式的星期（如 'mon-fri'）"},
+                    "delay_seconds": {"type": "integer", "description": "delayed 模式的延迟秒数"},
+                    "description": {"type": "string", "description": "任务描述（显示在 list 中）"},
+                },
+                "required": ["action"],
+            },
+        },
+    },
+    _run_schedule,
+)
+
+_register(
+    {
+        "type": "function",
+        "function": {
+            "name": "task_list",
+            "description": "查看当前所有已注册的定时任务，包括下次触发时间。",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    _run_list_tasks,
+)
+
+_register(
+    {
+        "type": "function",
+        "function": {
+            "name": "task_cancel",
+            "description": "取消一个已注册的定时任务。",
+            "parameters": {
+                "type": "object",
+                "properties": {"task_id": {"type": "string", "description": "要取消的任务 ID"}},
+                "required": ["task_id"],
+            },
+        },
+    },
+    _run_cancel_task,
+)
+
+# desktop_* 工具
+_desktop_schemas = [
+    ("desktop_screenshot", "截取当前屏幕，保存为 PNG 文件并返回路径。用于获取屏幕内容后配合视觉模型分析。", {}),
+    (
+        "desktop_screenshot_region",
+        "截取屏幕指定区域，保存为 PNG 文件并返回路径。",
+        {"x": {"type": "integer", "description": "左上角 X 坐标（像素）"}, "y": {"type": "integer", "description": "左上角 Y 坐标（像素）"}, "width": {"type": "integer", "description": "区域宽度（像素）"}, "height": {"type": "integer", "description": "区域高度（像素）"}},
+        ["x", "y", "width", "height"],
+    ),
+    ("desktop_click", "在指定坐标点击鼠标左键。", {"x": {"type": "integer", "description": "X 坐标"}, "y": {"type": "integer", "description": "Y 坐标"}}, ["x", "y"]),
+    ("desktop_type", "在当前焦点位置输入文本。", {"text": {"type": "string", "description": "要输入的文本"}}, ["text"]),
+    ("desktop_press", "按下按键，如 enter, esc, space, tab, delete, cmd, shift, ctrl, alt", {"key": {"type": "string", "description": "按键名称"}}, ["key"]),
+    ("desktop_hotkey", "按组合键，如 cmd+c, cmd+v, cmd+w, cmd+tab, ctrl+c 等", {"keys": {"type": "array", "items": {"type": "string"}, "description": "按键列表，如 ['cmd', 'c'] 表示 Cmd+C"}}, ["keys"]),
+    ("desktop_scroll", "滚动鼠标。正数向上，负数向下。", {"clicks": {"type": "integer", "description": "滚动格数，正=上，负=下"}}, ["clicks"]),
+    ("desktop_query_ui", "查询应用中的 UI 元素（需要应用开启 Accessibility 权限）。返回匹配元素的角色、名称、位置和大小。macOS 和 Windows 均支持。", {"app_name": {"type": "string", "description": "应用名称，如 Firefox, Google Chrome, Safari, Finder"}, "element_role": {"type": "string", "description": "元素角色，如 button, textfield, statictext, checkbox, menuitem"}, "element_title": {"type": "string", "description": "元素标题关键词（模糊匹配）"}}, ["app_name"]),
+    ("desktop_info", "获取屏幕分辨率和鼠标位置等基本信息。", {}, []),
+]
+
+for _name, _desc, _props, *_required in _desktop_schemas:
+    _reqs = _required[0] if _required else []
+    _schema = {
+        "type": "function",
+        "function": {"name": _name, "description": _desc, "parameters": {"type": "object", "properties": _props, "required": _reqs}},
+    }
+    _register(_schema, lambda p, n=_name: _run_desktop(n, p))
+
+# vision_analyze
+_register(
+    {
+        "type": "function",
+        "function": {
+            "name": "vision_analyze",
+            "description": (
+                "用视觉模型分析一张图片。推荐传入 image_path（文件路径），由 Python 层面处理读取和压缩。"
+                "也可传入 image_base64（向后兼容，不推荐大图片使用）。image_path 和 image_base64 二选一。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "image_path": {"type": "string", "description": "图片文件路径，如 ~/.lamix/screenshots/screenshot_xxx.png（推荐）"},
+                    "image_base64": {"type": "string", "description": "图片的 base64 编码字符串（不含 data:image/... 前缀）。大图片请改用 image_path。"},
+                    "prompt": {"type": "string", "description": "对图片的提问，例如 '屏幕上有哪些按钮？' 或 '描述当前桌面'", "default": "描述这张图片的内容"},
+                },
+            },
+        },
+    },
+    _run_vision,
+)
 
 
 # ── learned_modules 延迟加载 ──────────────────────────────────────────────
@@ -182,12 +280,7 @@ def _ensure_feishu_client() -> bool:
 
 
 def validate_tool_schema(schema: dict[str, Any]) -> list[str]:
-    """校验工具 schema 格式，返回错误列表（空列表 = 通过）。
-
-    OpenAI function calling 要求:
-      - type: "function"
-      - function: { name: str, parameters: dict, ... }
-    """
+    """校验工具 schema 格式，返回错误列表（空列表 = 通过）。"""
     errors: list[str] = []
     if schema.get("type") != "function":
         errors.append(f"缺少或错误的 type 字段: {schema.get('type')!r}, 期望 'function'")
@@ -226,16 +319,15 @@ def dispatch(tool_name: str, arguments_raw: str | dict[str, Any]) -> str:
     _, runner = _REGISTRY[tool_name]
     try:
         return runner(params)
+    except ImportError as e:
+        logger.warning(f"可选工具 {tool_name} 运行时导入失败（缺少依赖: {e}），已跳过")
+        return f"[错误] 工具 {tool_name} 缺少依赖：{e}。请安装相关依赖后重试。"
     except Exception as e:
         return f"[错误] 工具 {tool_name} 执行异常：{e}"
 
 
 def register_external(schema: dict[str, Any], runner: ToolRunner) -> bool:
-    """注册外部工具（供飞书、自更新等模块动态注册）。
-
-    Returns:
-        True 注册成功，False schema 校验失败被跳过。
-    """
+    """注册外部工具（供飞书、自更新等模块动态注册）。"""
     errors = validate_tool_schema(schema)
     if errors:
         name_hint = schema.get("function", {}).get("name", "<未知>")
