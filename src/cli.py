@@ -176,7 +176,74 @@ def _run_repl(config: dict) -> None:
         print("再见！")
 
 
-def _init_platform(config: dict) -> None:
+def _ensure_daemon_running() -> None:
+    """检查 daemon 是否在运行，没有则在后台启动。"""
+    import subprocess
+    from pathlib import Path
+
+    pid_path = Path.home() / ".lamix" / "logs" / "daemon.pid"
+    if pid_path.exists():
+        try:
+            pid = int(pid_path.read_text().strip())
+            # 检查进程是否存活
+            try:
+                if sys.platform == "win32":
+                    import ctypes
+                    kernel32 = ctypes.windll.kernel32
+                    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+                    if handle:
+                        kernel32.CloseHandle(handle)
+                        print(f"[cli] daemon 已在运行 (PID={pid})")
+                        return
+                else:
+                    os.kill(pid, 0)  # 不发信号，只检查进程存在
+                    print(f"[cli] daemon 已在运行 (PID={pid})")
+                    return
+            except (ProcessLookupError, OSError):
+                pass  # 进程不存在，继续启动
+        except (ValueError, OSError):
+            pass
+
+    # 启动 daemon
+    print("[cli] daemon 未运行，正在后台启动...")
+    log_dir = Path.home() / ".lamix" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    daemon_log = log_dir / "daemon.log"
+
+    python_exe = sys.executable
+    # Windows 上用 pythonw.exe 避免弹窗
+    if sys.platform == "win32":
+        pythonw = python_exe.replace("python.exe", "pythonw.exe")
+        if Path(pythonw).exists():
+            python_exe = pythonw
+
+    try:
+        if sys.platform == "win32":
+            DETACHED_PROCESS = 0x00000008
+            CREATE_NEW_PROCESS_GROUP = 0x00000200
+            with open(daemon_log, "a", encoding="utf-8") as log_file:
+                subprocess.Popen(
+                    [python_exe, "-m", "src.daemon"],
+                    stdout=log_file,
+                    stderr=log_file,
+                    creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+                    cwd=str(Path(__file__).resolve().parent.parent),
+                )
+        else:
+            subprocess.Popen(
+                [python_exe, "-m", "src.daemon"],
+                stdout=open(daemon_log, "a"),
+                stderr=open(daemon_log, "a"),
+                start_new_session=True,
+                cwd=str(Path(__file__).resolve().parent.parent),
+            )
+        print("[cli] daemon 已在后台启动")
+    except Exception as e:
+        print(f"[cli] daemon 启动失败: {e}")
+
+
+def _init_platform(config: dict, start_feishu: bool = True) -> None:
     """初始化 PlatformManager（多平台网关 + 后台任务支持）。"""
     import asyncio
     import threading
@@ -191,17 +258,18 @@ def _init_platform(config: dict) -> None:
     _cli_loop_thread.start()
     pm.register(CliAdapter())
 
-    # 注册并启动飞书 adapter（如果有配置）
-    feishu_cfg = config.get("feishu", {})
-    if feishu_cfg.get("app_id") and feishu_cfg.get("app_secret"):
-        from src.platforms.adapters.feishu import FeishuAdapter
-        feishu_adapter = FeishuAdapter({
-            "app_id": feishu_cfg["app_id"],
-            "app_secret": feishu_cfg["app_secret"],
-        })
-        pm.register(feishu_adapter)
-        feishu_adapter.start()
-        print("[cli] 飞书 adapter 已启动", flush=True)
+    # 注册并启动飞书 adapter（仅当 daemon 未运行时）
+    if start_feishu:
+        feishu_cfg = config.get("feishu", {})
+        if feishu_cfg.get("app_id") and feishu_cfg.get("app_secret"):
+            from src.platforms.adapters.feishu import FeishuAdapter
+            feishu_adapter = FeishuAdapter({
+                "app_id": feishu_cfg["app_id"],
+                "app_secret": feishu_cfg["app_secret"],
+            })
+            pm.register(feishu_adapter)
+            feishu_adapter.start()
+            print("[cli] 飞书 adapter 已启动", flush=True)
 
 
 # ── 子命令处理 ────────────────────────────────────────────
@@ -245,7 +313,9 @@ def run_cli(args: argparse.Namespace) -> None:
             print("API Key 未填写，无法启动。")
             sys.exit(1)
 
-    _init_platform(config)
+    # daemon 已在运行时不再重复起飞书 adapter（daemon 负责）
+    _daemon_running = getattr(args, "_daemon_already_running", False)
+    _init_platform(config, start_feishu=not _daemon_running)
 
     # 非交互模式
     if non_interactive_input is not None:
@@ -441,10 +511,15 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command is None:
-        # 双击 exe 或无参数时，默认启动交互式 CLI
+        # 双击 exe 或无参数时：
+        # 1. 检查 daemon 是否已在运行
+        # 2. 没有 → 后台启动 daemon（飞书监听、定时任务等）
+        # 3. 启动 CLI 交互（仅 REPL，不起飞书 adapter）
+        _ensure_daemon_running()
         run_cli(argparse.Namespace(
             query=None, query_c=None, memory=None, skills=None,
             feishu=None, update=None, help_cmd=False,
+            _daemon_already_running=True,
         ))
         return
 
