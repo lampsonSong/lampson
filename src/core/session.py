@@ -1381,6 +1381,7 @@ def _install_default_skills() -> None:
 def _install_default_memory() -> None:
     """将默认 memory.md 和 user.md 复制到用户目录（首次运行）。"""
     lamix_dir = Path.home() / ".lamix"
+    import shutil
     config_dir = Path(__file__).resolve().parent.parent.parent / "config"
     
     # 复制 MEMORY.md
