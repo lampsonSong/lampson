@@ -143,15 +143,15 @@ class FeishuAdapter(BasePlatformAdapter):
         text = re.sub(r'<think>[\s\S]*?</think>', '', text)
         return text.strip()
 
-    def _send_reply(self, chat_id: str, text: str) -> None:
-        """发送最终回复，自动判断用卡片还是文本。"""
+    def _send_reply(self, chat_id: str, text: str) -> str | None:
+        """发送最终回复，自动判断用卡片还是文本。返回回复消息的 message_id。"""
         text = self._strip_think_tags(text)
         if not text:
-            return
+            return None
         if self._should_use_card(text):
-            self._send_reply_as_card(chat_id, text)
+            return self._send_reply_as_card(chat_id, text)
         else:
-            self._send_reply_as_text(chat_id, text)
+            return self._send_reply_as_text(chat_id, text)
 
     @staticmethod
     def _should_use_card(text: str) -> bool:
@@ -171,11 +171,12 @@ class FeishuAdapter(BasePlatformAdapter):
             if m:
                 title = m.group(1).strip()
             card = client.build_md_card(title=title, content=text, header_template="green")
-            client.send_card(receive_id=chat_id, card=card, receive_id_type="chat_id")
+            data = client.send_card(receive_id=chat_id, card=card, receive_id_type="chat_id")
             print("[feishu] 卡片消息发送成功", flush=True)
+            return data.get("data", {}).get("message_id") if isinstance(data, dict) else None
         except Exception as e:
             print(f"[feishu] 卡片发送失败({e})，降级为文本", flush=True)
-            self._send_text_sync(chat_id, text)
+            return self._send_reply_as_text(chat_id, text)
 
     def _send_reply_as_text(self, chat_id: str, text: str) -> None:
         """发送纯文本消息。"""
@@ -194,8 +195,10 @@ class FeishuAdapter(BasePlatformAdapter):
         resp = self._lark_client.im.v1.message.create(request)
         if not resp.success():
             print(f"[feishu] 发送消息失败: code={resp.code} msg={resp.msg}", flush=True)
+            return None
         else:
             print(f"[feishu] 消息发送成功 to={chat_id}", flush=True)
+            return getattr(resp.data, "message_id", None)
 
     def _send_text_sync(self, chat_id: str, text: str) -> None:
         """同步发送文本（在线程池中执行）。"""
@@ -566,7 +569,9 @@ class FeishuAdapter(BasePlatformAdapter):
             self._remove_reaction(message_id, reaction_id or "")
             self._dedup.mark_processed(message_id)
             if reply:
-                self._send_reply(chat_id, reply)
+                reply_msg_id = self._send_reply(chat_id, reply)
+                if reply_msg_id:
+                    self._add_reaction(reply_msg_id, "OK")
 
             # 处理完毕后检查：如果 session 仍为空（无 user/assistant 消息），立即清理
             # 典型场景：daemon 重启后积压的 /resume /compaction 等命令，
