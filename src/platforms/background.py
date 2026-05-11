@@ -13,6 +13,8 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING
+import logging
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from src.core.agent import Agent
@@ -180,7 +182,7 @@ class BackgroundTask:
         mgr = PlatformManager.instance()
         adapter = mgr._adapters.get(self.platform)
         if adapter is None:
-            print(f"[background] 无法推送结果：找不到 {self.platform} adapter", flush=True)
+            logger.info(f"[background] 无法推送结果：找不到 {self.platform} adapter")
             return
 
         header = (

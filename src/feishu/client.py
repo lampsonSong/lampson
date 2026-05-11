@@ -323,7 +323,7 @@ def tool_feishu_send(params: dict[str, Any]) -> str:
             text = params.get("text", "").strip()
             if not text:
                 return "[错误] 消息内容不能为空。"
-            print(f"[tool] feishu_send(text): receive_id={receive_id}", flush=True)
+            _logger.info(f"[tool] feishu_send(text): receive_id={receive_id}")
             client.send_message(receive_id=receive_id, text=text, receive_id_type=receive_id_type)
             return f"消息已发送给 {receive_id}：{text}"
 
@@ -333,7 +333,7 @@ def tool_feishu_send(params: dict[str, Any]) -> str:
             header_template = params.get("header_template", "blue")
             fields = params.get("fields", [])
             content = params.get("content", "")
-            print(f"[tool] feishu_send(card): receive_id={receive_id}, card_type={card_type}", flush=True)
+            _logger.info(f"[tool] feishu_send(card): receive_id={receive_id}, card_type={card_type}")
 
             if card_type == "form":
                 card = client.build_form_card(title=title, fields=fields, header_template=header_template)

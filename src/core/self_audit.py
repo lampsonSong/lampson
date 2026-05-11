@@ -31,7 +31,7 @@ AUDIT_LOG_PATH = AUDIT_LOG_DIR / "self_audit.log"
 
 def _audit_log(msg: str) -> None:
     """写入审计专用日志文件（同时输出到 stdout）。"""
-    print(msg, flush=True)
+    logger.info(msg)
     try:
         AUDIT_LOG_DIR.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

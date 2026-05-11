@@ -1361,7 +1361,7 @@ class Session:
                     import shutil
                     shutil.copy2(memory_path, memory_path.with_suffix(".md.bak"))
                 memory_path.write_text(result.strip(), encoding="utf-8")
-                print(f"[MEMORY.md] 已更新（archive={archive_count}, 距上次 {hours_since_update:.0f}h）")
+                logger.info(f"[MEMORY.md] 已更新（archive={archive_count}, 距上次 {hours_since_update:.0f}h）")
         except Exception as e:
             logger.warning(f"core.md 更新失败: {e}")
 

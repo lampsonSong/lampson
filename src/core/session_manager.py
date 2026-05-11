@@ -19,6 +19,8 @@ from __future__ import annotations
 import time
 import threading
 from typing import TYPE_CHECKING
+import logging
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from src.core.session import Session
@@ -116,7 +118,7 @@ class SessionManager:
                 session_id = si.session_id
                 break
             except Exception as e:
-                print(f"[session_manager] create_session 失败 (attempt {attempt+1}/3): {e}", flush=True)
+                logger.error(f"[session_manager] create_session 失败 (attempt {attempt+1}/3): {e}")
                 if attempt < 2:
                     time.sleep(0.5 * (attempt + 1))
 
@@ -125,7 +127,7 @@ class SessionManager:
             session.session_id = session_id
             session.agent.session_id = session_id
         else:
-            print("[session_manager] 警告: session_id 为空，SQLite 索引将不可用", flush=True)
+            logger.warning("[session_manager] 警告: session_id 为空，SQLite 索引将不可用")
         session._session_manager = self
         session.last_activity_at = time.time()
 
@@ -147,14 +149,14 @@ class SessionManager:
 
         old_id = old_session.session_id
 
-        print(f"[session_manager] Session {old_id} 重置", flush=True)
+        logger.info(f"[session_manager] Session {old_id} 重置")
 
         # 结束旧 session（不生成 summary）
         if old_id:
             try:
                 ss.end_session(old_id)
             except Exception as e:
-                print(f"[session_manager] end_session 失败: {e}", flush=True)
+                logger.error(f"[session_manager] end_session 失败: {e}")
 
         # 创建新 session（空白，不注入任何旧信息）
         new_session = self._create_session(channel=channel, sender_id=sender_id)
@@ -165,9 +167,8 @@ class SessionManager:
         else:
             self._sessions[sender_id] = new_session
 
-        print(
-            f"[session_manager] 新 session {new_session.session_id} 已创建",
-            flush=True,
+        logger.info(
+            f"[session_manager] 新 session {new_session.session_id} 已创建"
         )
 
     def reset_session(self, channel: str, sender_id: str) -> "Session":
@@ -186,14 +187,14 @@ class SessionManager:
                 try:
                     ss.end_session(old_id)
                 except Exception as e:
-                    print(f"[session_manager] end_session 失败: {e}", flush=True)
-            print(f"[session_manager] Session {old_id} 重置", flush=True)
+                    logger.error(f"[session_manager] end_session 失败: {e}")
+            logger.info(f"[session_manager] Session {old_id} 重置")
             new_session = self._create_session(channel=channel, sender_id=sender_id)
             if is_cli:
                 self._cli_session = new_session
             else:
                 self._sessions[key] = new_session
-            print(f"[session_manager] 新 session {new_session.session_id} 已创建", flush=True)
+            logger.info(f"[session_manager] 新 session {new_session.session_id} 已创建")
             return new_session
 
     # ── 生命周期 ───────────────────────────────────────────────────────
@@ -215,9 +216,9 @@ class SessionManager:
         if sid:
             try:
                 ss.purge_session(sid)
-                print(f"[session_manager] 已清理空 session {sid}", flush=True)
+                logger.info(f"[session_manager] 已清理空 session {sid}")
             except Exception as e:
-                print(f"[session_manager] 清理空 session {sid} 失败: {e}", flush=True)
+                logger.error(f"[session_manager] 清理空 session {sid} 失败: {e}")
 
     def close_all(self) -> None:
         """关闭所有 Session（进程退出时调用）。"""

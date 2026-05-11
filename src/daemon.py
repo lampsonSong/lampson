@@ -39,6 +39,8 @@ from src.core.self_audit import (
 )
 from src.core.task_scheduler import TaskScheduler, TaskType, TaskConfig, schedule, start as scheduler_start, shutdown as scheduler_shutdown
 from src.core.tools import load_learned_modules
+import logging
+logger = logging.getLogger(__name__)
 
 LOG_DIR = LAMIX_DIR / "logs"
 _BOOT_TASKS_PATH = LAMIX_DIR / "boot_tasks.json"
@@ -131,12 +133,12 @@ def _self_audit_callback() -> None:
             report_content = report_content[:4000] + "\n\n...（报告过长已截断）"
         _audit_log(f"[self_audit] 审计完成（{reason}），开始发送报告")
         _notify_user(f"🕐 Lamix 自我审计报告\n\n{report_content}")
-        print(f"[self_audit] 审计完成（{reason}）", flush=True)
+        logger.info(f"[self_audit] 审计完成（{reason}）")
         # 记录审计时间
         last_audit_file.parent.mkdir(parents=True, exist_ok=True)
         last_audit_file.write_text(now.isoformat(), encoding="utf-8")
     except Exception as e:
-        print(f"[self_audit] 执行失败: {e}", flush=True)
+        logger.error(f"[self_audit] 执行失败: {e}")
 
 
 def _register_tasks(session=None) -> None:
@@ -160,14 +162,14 @@ def _register_tasks(session=None) -> None:
         description="审计检查（每4小时）",
     ))
 
-    print("[daemon] 任务调度器已启动（审计检查）", flush=True)
+    logger.info("[daemon] 任务调度器已启动（审计检查）")
 
 
 # ── 信号与退出 ───────────────────────────────────────────────────────────────
 
 
 def _signal_handler(signum: int, _frame: object | None) -> None:
-    print(f"\n[daemon] 收到信号 {signum}，准备退出...", flush=True)
+    logger.info(f"\n[daemon] 收到信号 {signum}，准备退出...")
     _shutdown.set()
 
 
@@ -185,7 +187,7 @@ def _send_boot_notification(config: dict, pid: int) -> None:
     app_secret = config.get("feishu", {}).get("app_secret", "").strip()
 
     if not app_id or not app_secret:
-        print("[daemon] 飞书凭证未配置，跳过上线通知", flush=True)
+        logger.warning("[daemon] 飞书凭证未配置，跳过上线通知")
         return
 
     try:
@@ -201,7 +203,7 @@ def _send_boot_notification(config: dict, pid: int) -> None:
             targets.append((owner_chat_id, "chat_id"))
 
         if not targets:
-            print("[daemon] 未配置 feishu.user_open_id 或 feishu.owner_chat_id，跳过上线通知", flush=True)
+            logger.warning("[daemon] 未配置 feishu.user_open_id 或 feishu.owner_chat_id，跳过上线通知")
             return
 
         for receive_id, receive_id_type in targets:
@@ -212,15 +214,15 @@ def _send_boot_notification(config: dict, pid: int) -> None:
                         text=text,
                         receive_id_type=receive_id_type,
                     )
-                    print(f"[daemon] 上线通知已发送 (via {receive_id_type})", flush=True)
+                    logger.info(f"[daemon] 上线通知已发送 (via {receive_id_type})")
                     return
                 except Exception as e:
                     if attempt == 0:
-                        print(f"[daemon] 上线通知发送失败（{receive_id_type}），重试: {e}", flush=True)
+                        logger.error(f"[daemon] 上线通知发送失败（{receive_id_type}），重试: {e}")
                     else:
-                        print(f"[daemon] 上线通知发送失败（{receive_id_type}）: {e}", flush=True)
+                        logger.error(f"[daemon] 上线通知发送失败（{receive_id_type}）: {e}")
     except Exception as e:
-        print(f"[daemon] 上线通知异常: {e}", flush=True)
+        logger.error(f"[daemon] 上线通知异常: {e}")
 
 
 def _notify_boot_tasks_running(config: dict, tasks: list[dict]) -> None:
@@ -259,7 +261,7 @@ def _notify_boot_tasks_running(config: dict, tasks: list[dict]) -> None:
                         text=message,
                         receive_id_type=receive_id_type,
                     )
-                    print(f"[daemon] boot_tasks 运行提示已发送到飞书 (via {receive_id_type})", flush=True)
+                    logger.info(f"[daemon] boot_tasks 运行提示已发送到飞书 (via {receive_id_type})")
                     sent = True
                     break
                 except Exception:
@@ -267,7 +269,7 @@ def _notify_boot_tasks_running(config: dict, tasks: list[dict]) -> None:
             if sent:
                 return
         except Exception as e:
-            print(f"[daemon] 飞书发送失败，fallback 到 _notify_user: {e}", flush=True)
+            logger.error(f"[daemon] 飞书发送失败，fallback 到 _notify_user: {e}")
 
     # Fallback: session 可能已经存在的情况
     _notify_user(message)
@@ -305,19 +307,19 @@ def _load_and_clear_boot_tasks() -> list[dict] | None:
     except json.JSONDecodeError:
         bad_path = tasks_path.with_suffix(".json.bad")
         shutil.move(str(tasks_path), str(bad_path))
-        print(f"[daemon] boot_tasks.json 损坏，已备份到 {bad_path.name}", flush=True)
+        logger.warning(f"[daemon] boot_tasks.json 损坏，已备份到 {bad_path.name}")
         return None
 
     if not isinstance(tasks, list) or not tasks:
         return None
 
     if len(tasks) > _MAX_TASKS:
-        print(f"[daemon] boot_tasks 共 {len(tasks)} 条，截断为 {_MAX_TASKS} 条", flush=True)
+        logger.warning(f"[daemon] boot_tasks 共 {len(tasks)} 条，截断为 {_MAX_TASKS} 条")
         tasks = tasks[:_MAX_TASKS]
 
     total = len(json.dumps(tasks, ensure_ascii=False).encode("utf-8"))
     if total > _MAX_TOTAL_BYTES:
-        print(f"[daemon] boot_tasks 总长 {total}B 超过 {_MAX_TOTAL_BYTES}B，截断", flush=True)
+        logger.warning(f"[daemon] boot_tasks 总长 {total}B 超过 {_MAX_TOTAL_BYTES}B，截断")
         while tasks and len(json.dumps(tasks, ensure_ascii=False).encode("utf-8")) > _MAX_TOTAL_BYTES:
             tasks.pop()
 
@@ -327,7 +329,7 @@ def _load_and_clear_boot_tasks() -> list[dict] | None:
             f.write("[]")
         os.replace(tmp_path, str(tasks_path))
     except Exception as e:
-        print(f"[daemon] 清空 boot_tasks.json 失败: {e}", flush=True)
+        logger.error(f"[daemon] 清空 boot_tasks.json 失败: {e}")
 
     return tasks
 
@@ -342,10 +344,10 @@ def _get_boot_tasks_session(mgr, config: dict):
     owner_open_id = config.get("feishu", {}).get("user_open_id", "").strip()
     if owner_open_id:
         session = mgr.get_or_create("feishu", owner_open_id)
-        print(f"[daemon] boot_tasks 将在飞书 session 上执行 (owner_open_id={owner_open_id})", flush=True)
+        logger.info(f"[daemon] boot_tasks 将在飞书 session 上执行 (owner_open_id={owner_open_id})")
         return session
 
-    print("[daemon] 未配置 feishu.user_open_id，boot_tasks 将在 CLI session 上执行", flush=True)
+    logger.warning("[daemon] 未配置 feishu.user_open_id，boot_tasks 将在 CLI session 上执行")
     return mgr.get_or_create("cli", "default")
 
 
@@ -442,11 +444,11 @@ def _inject_boot_tasks(session, tasks: list[dict], config: dict | None = None) -
     try:
         result = session.handle_input(prompt)
         if result.reply:
-            print(f"[daemon] boot_tasks 执行完成: {result.reply[:100]}", flush=True)
+            logger.info(f"[daemon] boot_tasks 执行完成: {result.reply[:100]}")
         else:
             # 空结果也通知用户
             msg = "boot_tasks 执行完成但返回为空，可能 context 过长导致 LLM 无法响应。"
-            print(f"[daemon] {msg}", flush=True)
+            logger.info(f"[daemon] {msg}")
             if _feishu_sender:
                 try:
                     _feishu_sender(msg)
@@ -454,7 +456,7 @@ def _inject_boot_tasks(session, tasks: list[dict], config: dict | None = None) -
                     pass
     except Exception as e:
         err_msg = f"boot_tasks 执行失败: {e}"
-        print(f"[daemon] {err_msg}", flush=True)
+        logger.info(f"[daemon] {err_msg}")
         # 失败时通知用户
         if _feishu_sender:
             try:
@@ -495,11 +497,11 @@ def _patch_websockets_ssl() -> None:
         # 保留原始签名属性，避免 websockets 内部检查报错
         _patched_connect.__wrapped__ = _original_connect  # type: ignore[attr-defined]
         websockets.connect = _patched_connect
-        print("[daemon] websockets SSL patch 已应用 (certifi CA)", flush=True)
+        logger.info("[daemon] websockets SSL patch 已应用 (certifi CA)")
     except ImportError:
-        print("[daemon] certifi 未安装，跳过 websockets SSL patch", flush=True)
+        logger.warning("[daemon] certifi 未安装，跳过 websockets SSL patch")
     except Exception as e:
-        print(f"[daemon] websockets SSL patch 失败: {e}", flush=True)
+        logger.error(f"[daemon] websockets SSL patch 失败: {e}")
 
 
 def main() -> None:
@@ -524,7 +526,7 @@ def main() -> None:
     if not is_config_complete(config):
         if sys.stdin.isatty():
             # 有交互终端：走安装引导
-            print("[daemon] LLM 未配置，启动安装引导...", flush=True)
+            logger.warning("[daemon] LLM 未配置，启动安装引导...")
             _write_daemon_pid()
             _heartbeat_mgr = HeartbeatManager(task_id="daemon")
             _heartbeat_mgr.start()
@@ -532,19 +534,19 @@ def main() -> None:
                 from src.core.config import run_setup_wizard
                 config = run_setup_wizard()
             except (KeyboardInterrupt, EOFError, SystemExit):
-                print("\n[daemon] 配置已取消，退出。", flush=True)
+                logger.info("\n[daemon] 配置已取消，退出。")
                 _heartbeat_mgr.stop(user_initiated=True)
                 return
             if not is_config_complete(config):
-                print("[daemon] API Key 未填写，无法启动，退出。", flush=True)
+                logger.info("[daemon] API Key 未填写，无法启动，退出。")
                 _heartbeat_mgr.stop(user_initiated=True)
                 return
-            print("[daemon] 安装引导完成，继续启动...", flush=True)
+            logger.info("[daemon] 安装引导完成，继续启动...")
             _heartbeat_mgr.stop(user_initiated=True)
             _heartbeat_mgr = None
         else:
             # 无交互终端（被 launchd 调用）：空转等配置变更
-            print("[daemon] LLM 未配置，等待配置完成（可通过 'lamix cli' 或 'lamix model' 配置）...", flush=True)
+            logger.warning("[daemon] LLM 未配置，等待配置完成（可通过 'lamix cli' 或 'lamix model' 配置）...")
             _write_daemon_pid()
             _heartbeat_mgr = HeartbeatManager(task_id="daemon")
             _heartbeat_mgr.start()
@@ -573,24 +575,24 @@ def main() -> None:
         feishu_adapter._shutdown_callback = lambda: _shutdown.set()
         pm.register(feishu_adapter)
         feishu_adapter.start()
-        print("[daemon] 飞书 adapter 已启动", flush=True)
+        logger.info("[daemon] 飞书 adapter 已启动")
 
     # ── 写 pid ───────────────────────────────────────────────────────────
     pid = os.getpid()
     _write_daemon_pid()
-    print(f"[daemon] Lamix daemon 已启动 (PID={pid})", flush=True)
+    logger.info(f"[daemon] Lamix daemon 已启动 (PID={pid})")
 
     # ── 启动心跳 ──────────────────────────────────────────────────────────
     _heartbeat_mgr = HeartbeatManager(task_id="daemon")
     _heartbeat_mgr.start()
-    print("[daemon] 心跳已启动", flush=True)
+    logger.info("[daemon] 心跳已启动")
 
     # ── 任务调度器（自我审计）──────────────────────────────────────────
     _register_tasks(session)
 
     # ── 加载 learned_modules（延迟，避免循环导入）──────────────────────
     load_learned_modules()
-    print("[daemon] learned_modules 已加载", flush=True)
+    logger.info("[daemon] learned_modules 已加载")
 
     # ── 上线通知 ─────────────────────────────────────────────────────────
     _send_boot_notification(config, pid)
@@ -598,7 +600,7 @@ def main() -> None:
     # ── boot_tasks ──────────────────────────────────────────────────────
     tasks = _load_and_clear_boot_tasks()
     if tasks:
-        print(f"[daemon] 发现 {len(tasks)} 条 boot_tasks，开始执行", flush=True)
+        logger.info(f"[daemon] 发现 {len(tasks)} 条 boot_tasks，开始执行")
         # 飞书提示用户有 boot task 正在执行
         _notify_boot_tasks_running(config, tasks)
         boot_session = _get_boot_tasks_session(mgr, config)
@@ -611,22 +613,22 @@ def main() -> None:
     try:
         asyncio.run(pm.run())
     except KeyboardInterrupt:
-        print("[daemon] 收到 KeyboardInterrupt", flush=True)
+        logger.info("[daemon] 收到 KeyboardInterrupt")
 
     # ── 优雅退出 ─────────────────────────────────────────────────────────
     if _heartbeat_mgr is not None:
         _heartbeat_mgr.stop(user_initiated=True)
-        print("[daemon] 心跳已停止", flush=True)
+        logger.info("[daemon] 心跳已停止")
 
     if _scheduler is not None:
         scheduler_shutdown()
         _scheduler = None
-        print("[daemon] 任务调度器已停止", flush=True)
+        logger.info("[daemon] 任务调度器已停止")
 
     try:
         mgr.close_all()
     except Exception as e:
-        print(f"[daemon] 保存会话时出错: {e}", flush=True)
+        logger.error(f"[daemon] 保存会话时出错: {e}")
 
     if _DAEMON_PID_PATH.exists():
         try:
@@ -634,7 +636,7 @@ def main() -> None:
         except OSError:
             pass
 
-    print("[daemon] 已退出。", flush=True)
+    logger.info("[daemon] 已退出。")
 
 
 # ── Safe Mode 切换 ─────────────────────────────────────────────────────────
@@ -680,13 +682,13 @@ def _start_config_watcher(pm, config: dict) -> None:
                 # 只在飞书凭证变更时才触发热重载
                 new_creds = _get_feishu_credentials(CONFIG_PATH)
                 if new_creds == last_creds:
-                    print("[daemon] 配置文件已变更，但飞书凭证未变，跳过热重载", flush=True)
+                    logger.warning("[daemon] 配置文件已变更，但飞书凭证未变，跳过热重载")
                     continue
                 last_creds = new_creds
-                print("[daemon] 飞书凭证已变更，热重载飞书 adapter...", flush=True)
+                logger.info("[daemon] 飞书凭证已变更，热重载飞书 adapter...")
                 _reload_feishu_adapter(pm)
             except Exception as e:
-                print(f"[daemon] config watcher 异常: {e}", flush=True)
+                logger.error(f"[daemon] config watcher 异常: {e}")
 
     t = threading.Thread(target=_watcher, daemon=True, name="config-watcher")
     t.start()
@@ -708,9 +710,9 @@ def _reload_feishu_adapter(pm) -> None:
         try:
             old_adapter._stopped = True
             del pm._adapters["feishu"]
-            print("[daemon] 旧飞书 adapter 已标记为 stopped", flush=True)
+            logger.info("[daemon] 旧飞书 adapter 已标记为 stopped")
         except Exception as e:
-            print(f"[daemon] 标记旧飞书 adapter 失败: {e}", flush=True)
+            logger.error(f"[daemon] 标记旧飞书 adapter 失败: {e}")
 
     # 2. 读新配置
     new_config = load_config()
@@ -719,7 +721,7 @@ def _reload_feishu_adapter(pm) -> None:
     app_secret = feishu_cfg.get("app_secret", "").strip()
 
     if not app_id or not app_secret:
-        print("[daemon] 新配置中无飞书凭证，不启动 adapter", flush=True)
+        logger.info("[daemon] 新配置中无飞书凭证，不启动 adapter")
         return
 
     # 3. 创建并启动新的
@@ -732,47 +734,47 @@ def _reload_feishu_adapter(pm) -> None:
         new_adapter.session_manager = mgr
         pm.register(new_adapter)
         new_adapter.start()
-        print("[daemon] 新飞书 adapter 已启动，热重载完成", flush=True)
+        logger.info("[daemon] 新飞书 adapter 已启动，热重载完成")
     except Exception as e:
-        print(f"[daemon] 热重载飞书 adapter 失败: {e}", flush=True)
+        logger.error(f"[daemon] 热重载飞书 adapter 失败: {e}")
 
 
 def _trigger_safe_mode(pm, mgr) -> None:
     """由 FeishuAdapter 触发：切换到 safe_mode 后再恢复 daemon。"""
-    print("[daemon] 切换到 Safe Mode...", flush=True)
+    logger.info("[daemon] 切换到 Safe Mode...")
 
     if _heartbeat_mgr is not None:
         try:
             _heartbeat_mgr.stop(user_initiated=True)
-            print("[daemon] 心跳已停止", flush=True)
+            logger.info("[daemon] 心跳已停止")
         except Exception as e:
-            print(f"[daemon] 停止心跳出错: {e}", flush=True)
+            logger.error(f"[daemon] 停止心跳出错: {e}")
 
     global _scheduler
     if _scheduler is not None:
         scheduler_shutdown()
         _scheduler = None
-        print("[daemon] 任务调度器已停止", flush=True)
+        logger.info("[daemon] 任务调度器已停止")
 
     # 停止所有 adapter
     import asyncio
     for adapter in list(pm._adapters.values()):
         try:
             asyncio.run(adapter.shutdown())
-            print(f"[daemon] {adapter.platform} adapter 已关闭", flush=True)
+            logger.info(f"[daemon] {adapter.platform} adapter 已关闭")
         except Exception as e:
-            print(f"[daemon] 关闭 {adapter.platform} 失败: {e}", flush=True)
+            logger.error(f"[daemon] 关闭 {adapter.platform} 失败: {e}")
 
     # 保存 session
     try:
         mgr.close_all()
-        print("[daemon] Session 已保存", flush=True)
+        logger.info("[daemon] Session 已保存")
     except Exception as e:
-        print(f"[daemon] 保存会话出错: {e}", flush=True)
+        logger.error(f"[daemon] 保存会话出错: {e}")
 
     # 启动 safe_mode.py（独立进程，阻塞等待它结束）
     if SAFE_MODE_SCRIPT.exists():
-        print(f"[daemon] 启动 safe_mode: {SAFE_MODE_SCRIPT}", flush=True)
+        logger.info(f"[daemon] 启动 safe_mode: {SAFE_MODE_SCRIPT}")
         try:
             proc = subprocess.Popen(
                 [sys.executable, str(SAFE_MODE_SCRIPT)],
@@ -780,16 +782,16 @@ def _trigger_safe_mode(pm, mgr) -> None:
                 stdout=open(LOG_DIR / "safe_mode.log", "a", encoding="utf-8"),
                 stderr=open(LOG_DIR / "safe_mode.err.log", "a", encoding="utf-8"),
             )
-            print(f"[daemon] safe_mode 进程已启动 (PID={proc.pid})", flush=True)
+            logger.info(f"[daemon] safe_mode 进程已启动 (PID={proc.pid})")
             proc.wait()
-            print(f"[daemon] safe_mode 已退出 (code={proc.returncode})", flush=True)
+            logger.info(f"[daemon] safe_mode 已退出 (code={proc.returncode})")
         except Exception as e:
-            print(f"[daemon] safe_mode 启动失败: {e}", flush=True)
+            logger.error(f"[daemon] safe_mode 启动失败: {e}")
     else:
-        print(f"[daemon] safe_mode 脚本不存在: {SAFE_MODE_SCRIPT}", flush=True)
+        logger.warning(f"[daemon] safe_mode 脚本不存在: {SAFE_MODE_SCRIPT}")
 
     # safe_mode 结束，恢复 daemon
-    print("[daemon] Safe Mode 退出，重启 daemon...", flush=True)
+    logger.info("[daemon] Safe Mode 退出，重启 daemon...")
     _restore_daemon(pm, mgr)
 
 
@@ -799,7 +801,7 @@ def _restore_daemon(pm, mgr) -> None:
 
     config = load_config()
     if not is_config_complete(config):
-        print("[daemon] 恢复失败：配置不完整", flush=True)
+        logger.error("[daemon] 恢复失败：配置不完整")
         _shutdown.set()
         return
 
@@ -821,20 +823,20 @@ def _restore_daemon(pm, mgr) -> None:
         pm.register(feishu_adapter)
         try:
             feishu_adapter.start()
-            print("[daemon] 飞书 adapter 已恢复", flush=True)
+            logger.info("[daemon] 飞书 adapter 已恢复")
         except Exception as e:
-            print(f"[daemon] 恢复飞书 adapter 失败: {e}", flush=True)
+            logger.error(f"[daemon] 恢复飞书 adapter 失败: {e}")
 
     # 恢复心跳
     global _heartbeat_mgr, _scheduler
     _heartbeat_mgr = HeartbeatManager(task_id="daemon")
     _heartbeat_mgr.start()
-    print("[daemon] 心跳已恢复", flush=True)
+    logger.info("[daemon] 心跳已恢复")
 
     # 恢复任务调度器
     _register_tasks(session)
     load_learned_modules()
-    print("[daemon] learned_modules 已加载", flush=True)
+    logger.info("[daemon] learned_modules 已加载")
 
     # 上线通知
     from src.feishu.client import FeishuClient

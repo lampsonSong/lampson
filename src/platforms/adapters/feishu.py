@@ -35,6 +35,8 @@ from lark_oapi.api.im.v1.model import (
 )
 
 from src.platforms.base import BasePlatformAdapter, PlatformMessage
+import logging
+logger = logging.getLogger(__name__)
 
 
 class MessageDeduplicator:
@@ -117,7 +119,7 @@ class FeishuAdapter(BasePlatformAdapter):
                     try:
                         fn()
                     except Exception as e:
-                        print(f"[feishu] shutdown {name}: {e}", flush=True)
+                        logger.info(f"[feishu] shutdown {name}: {e}")
                     break
         th = self._ws_thread
         if th is not None and th.is_alive():
@@ -173,10 +175,10 @@ class FeishuAdapter(BasePlatformAdapter):
                 title = m.group(1).strip()
             card = client.build_md_card(title=title, content=text, header_template="green")
             data = client.send_card(receive_id=chat_id, card=card, receive_id_type="chat_id")
-            print("[feishu] 卡片消息发送成功", flush=True)
+            logger.info("[feishu] 卡片消息发送成功")
             return data.get("data", {}).get("message_id") if isinstance(data, dict) else None
         except Exception as e:
-            print(f"[feishu] 卡片发送失败({e})，降级为文本", flush=True)
+            logger.error(f"[feishu] 卡片发送失败({e})，降级为文本")
             return self._send_reply_as_text(chat_id, text)
 
     def _send_reply_as_text(self, chat_id: str, text: str) -> None:
@@ -195,10 +197,10 @@ class FeishuAdapter(BasePlatformAdapter):
         )
         resp = self._lark_client.im.v1.message.create(request)
         if not resp.success():
-            print(f"[feishu] 发送消息失败: code={resp.code} msg={resp.msg}", flush=True)
+            logger.error(f"[feishu] 发送消息失败: code={resp.code} msg={resp.msg}")
             return None
         else:
-            print(f"[feishu] 消息发送成功 to={chat_id}", flush=True)
+            logger.info(f"[feishu] 消息发送成功 to={chat_id}")
             return getattr(resp.data, "message_id", None)
 
     def _send_text_sync(self, chat_id: str, text: str) -> None:
@@ -212,9 +214,9 @@ class FeishuAdapter(BasePlatformAdapter):
         try:
             client = FeishuClient(self.app_id, self.app_secret)
             client.send_card(receive_id=chat_id, card=card, receive_id_type="chat_id")
-            print(f"[feishu] 卡片发送成功 to={chat_id}", flush=True)
+            logger.info(f"[feishu] 卡片发送成功 to={chat_id}")
         except Exception as e:
-            print(f"[feishu] 卡片发送失败: {e}，降级为文本", flush=True)
+            logger.error(f"[feishu] 卡片发送失败: {e}，降级为文本")
             self._send_text_sync(
                 chat_id,
                 card.get("body", {}).get("elements", [{}])[0].get("content", str(card)),
@@ -248,15 +250,15 @@ class FeishuAdapter(BasePlatformAdapter):
         from src.feishu.client import FeishuClient
 
         card = self._make_progress_card(lines, finished=finished)
-        print(f"[feishu] _send_progress_card: lines={len(lines)}, finished={finished}", flush=True)
+        logger.info(f"[feishu] _send_progress_card: lines={len(lines)}, finished={finished}")
         try:
             client = FeishuClient(self.app_id, self.app_secret)
             data = client.send_card(receive_id=chat_id, card=card, receive_id_type="chat_id")
-            print(f"[feishu] progress card sent ok", flush=True)
+            logger.info(f"[feishu] progress card sent ok")
             return data.get("data", {}).get("message_id")
         except Exception as e:
             resp_body = getattr(getattr(e, "response", None), "text", "N/A")
-            print(f"[feishu] 发送进度卡片失败: {e}\n  response: {resp_body[:500]}", flush=True)
+            logger.error(f"[feishu] 发送进度卡片失败: {e}\n  response: {resp_body[:500]}")
             try:
                 client = FeishuClient(self.app_id, self.app_secret)
                 status = "已完成" if finished else "处理中"
@@ -265,7 +267,7 @@ class FeishuAdapter(BasePlatformAdapter):
                     text_lines.append(line[:150])
                 client.send_text(receive_id=chat_id, text="\n".join(text_lines), receive_id_type="chat_id")
             except Exception as e2:
-                print(f"[feishu] 进度文本 fallback 也失败: {e2}", flush=True)
+                logger.error(f"[feishu] 进度文本 fallback 也失败: {e2}")
             return None
 
     def _update_progress_card(self, message_id: str, lines: list[str], finished: bool = False) -> None:
@@ -278,7 +280,7 @@ class FeishuAdapter(BasePlatformAdapter):
             client.update_message(message_id=message_id, card=card)
         except Exception as e:
             resp_body = getattr(getattr(e, "response", None), "text", "N/A")
-            print(f"[feishu] 更新进度卡片失败: {e}\n  response: {resp_body[:500]}", flush=True)
+            logger.error(f"[feishu] 更新进度卡片失败: {e}\n  response: {resp_body[:500]}")
             raise
 
     # ─── Reaction ─────────────────────────────────────────────────────────
@@ -334,9 +336,9 @@ class FeishuAdapter(BasePlatformAdapter):
                 changed = True
             if changed:
                 save_config(config)
-                print(f"[feishu] 已自动保存 owner 身份: chat_id={chat_id}, open_id={open_id}", flush=True)
+                logger.info(f"[feishu] 已自动保存 owner 身份: chat_id={chat_id}, open_id={open_id}")
         except Exception as e:
-            print(f"[feishu] 保存 owner 身份失败: {e}", flush=True)
+            logger.error(f"[feishu] 保存 owner 身份失败: {e}")
 
     # ─── 消息处理 ───────────────────────────────────────────────────────
 
@@ -351,7 +353,7 @@ class FeishuAdapter(BasePlatformAdapter):
 
             sender_type = getattr(sender, "sender_type", None)
             if sender_type == "app":
-                print("[feishu] 收到机器人自己的消息，跳过", flush=True)
+                logger.warning("[feishu] 收到机器人自己的消息，跳过")
                 return
 
             open_id = sender.sender_id.open_id if sender.sender_id else "unknown"
@@ -395,7 +397,7 @@ class FeishuAdapter(BasePlatformAdapter):
             self._executor.submit(self._deliver_to_platform, msg, reaction_id)
 
         except Exception as e:
-            print(f"[feishu] _handle_message 错误: {e}", flush=True)
+            logger.error(f"[feishu] _handle_message 错误: {e}")
 
     def _deliver_to_platform(self, msg: PlatformMessage, reaction_id: str | None) -> None:
         """在线程池中执行：调用 on_message + 处理结果发送。"""
@@ -403,7 +405,7 @@ class FeishuAdapter(BasePlatformAdapter):
             self.on_message(msg)
             self._dedup.mark_processed(msg.message_id)
         except Exception as e:
-            print(f"[feishu] on_message 错误: {e}", flush=True)
+            logger.error(f"[feishu] on_message 错误: {e}")
 
     def _extract_text(self, raw_content: str) -> str:
         """从消息 content 中提取纯文本。"""
@@ -444,7 +446,7 @@ class FeishuAdapter(BasePlatformAdapter):
     ) -> None:
         """在线程池中执行：session.handle_input + 进度卡片 + 发送回复。"""
         if self.session_manager is None:
-            print("[feishu] session_manager 未设置，无法处理消息", flush=True)
+            logger.info("[feishu] session_manager 未设置，无法处理消息")
             return
 
         try:
@@ -468,7 +470,7 @@ class FeishuAdapter(BasePlatformAdapter):
                 while True:
                     try:
                         event = _progress_queue.get(timeout=0.5)
-                        print(f"[feishu] progress_worker received: type={event.get('type') if isinstance(event, dict) else 'non-dict'}", flush=True)
+                        logger.info(f"[feishu] progress_worker received: type={event.get('type') if isinstance(event, dict) else 'non-dict'}")
                     except queue.Empty:
                         if _progress_done.is_set():
                             if progress_lines and _card_fail_count < _MAX_CARD_FAILS:
@@ -543,7 +545,7 @@ class FeishuAdapter(BasePlatformAdapter):
             _worker.start()
 
             def _progress_cb(event: dict) -> None:
-                print(f"[feishu] _progress_cb: event_type={event.get('type')}", flush=True)
+                logger.info(f"[feishu] _progress_cb: event_type={event.get('type')}")
                 _progress_queue.put(event)
 
             session.set_message_context(message_id=message_id, chat_id=chat_id)
@@ -566,7 +568,7 @@ class FeishuAdapter(BasePlatformAdapter):
                 and not result.is_safe_mode
             ):
                 self._dedup.mark_processed(message_id)
-                print(f"[feishu] 消息已入队，等待当前任务中断后处理", flush=True)
+                logger.info(f"[feishu] 消息已入队，等待当前任务中断后处理")
                 return
 
             # /exit 命令
@@ -592,9 +594,9 @@ class FeishuAdapter(BasePlatformAdapter):
 
             reply = result.reply
             if result.compaction_msg:
-                print(f"[feishu] {result.compaction_msg}", flush=True)
+                logger.info(f"[feishu] {result.compaction_msg}")
 
-            print(f"[feishu] 回复: {reply}", flush=True)
+            logger.info(f"[feishu] 回复: {reply}")
             self._remove_reaction(message_id, reaction_id or "")
             self._dedup.mark_processed(message_id)
             if reply:
@@ -617,4 +619,4 @@ class FeishuAdapter(BasePlatformAdapter):
                     pass
 
         except Exception as e:
-            print(f"[feishu] _handle_dispatch 错误: {e}", flush=True)
+            logger.error(f"[feishu] _handle_dispatch 错误: {e}")

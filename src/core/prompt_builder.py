@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+import logging
+logger = logging.getLogger(__name__)
 
 
 LAMIX_DIR = Path.home() / ".lamix"
@@ -461,7 +463,7 @@ def _notify_user_md_oversize(length: int) -> None:
             return
     except Exception:
         pass
-    print(warning, flush=True)
+    logger.warning(warning)
 
 
 # ── Model Guidance ────────────────────────────────────────────────────────────

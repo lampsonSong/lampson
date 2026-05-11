@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 from src.platforms.base import BasePlatformAdapter, PlatformMessage
 from src.platforms.background import BackgroundTaskManager
 from src.core.session_manager import get_session_manager
+import logging
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     pass
@@ -50,7 +52,7 @@ class PlatformManager:
         """
         adapter = self._adapters.get(msg.platform)
         if adapter is None:
-            print(f"[manager] 无 {msg.platform} adapter，跳过消息", flush=True)
+            logger.warning(f"[manager] 无 {msg.platform} adapter，跳过消息")
             return
 
         # 调用 adapter 的完整调度入口（含进度卡片、命令处理、回复发送）
@@ -86,7 +88,7 @@ class PlatformManager:
             except (ValueError, OSError, NotImplementedError):
                 pass  # Windows/macOS 部分场景不支持
 
-        print("[manager] 所有平台 adapter 已启动", flush=True)
+        logger.info("[manager] 所有平台 adapter 已启动")
 
         # 主循环
         try:
@@ -97,7 +99,7 @@ class PlatformManager:
                 try:
                     await adapter.shutdown()
                 except Exception as e:
-                    print(f"[manager] 关闭 {adapter.platform} 失败: {e}", flush=True)
+                    logger.error(f"[manager] 关闭 {adapter.platform} 失败: {e}")
 
     async def _start_adapter_with_retry(self, adapter: BasePlatformAdapter) -> None:
         """带指数退避重连的 adapter 启动（1s → 2s → 4s → 60s cap）。"""
@@ -106,20 +108,19 @@ class PlatformManager:
         while True:
             try:
                 adapter.start()
-                print(f"[manager] adapter {adapter.platform} 启动成功", flush=True)
+                logger.info(f"[manager] adapter {adapter.platform} 启动成功")
                 return
             except Exception as e:
-                print(
+                logger.warning(
                     f"[manager] adapter {adapter.platform} 启动失败: {e}，"
-                    f"{retry_interval}s 后重试...",
-                    flush=True,
+                    f"{retry_interval}s 后重试..."
                 )
                 await asyncio.sleep(retry_interval)
                 retry_interval = min(retry_interval * 2, max_interval)
 
     def _on_shutdown(self, sig: signal.Signals) -> None:
         """信号处理：优雅退出。"""
-        print(f"[manager] 收到信号 {sig.name}，准备退出...", flush=True)
+        logger.info(f"[manager] 收到信号 {sig.name}，准备退出...")
         self._running = False
 
     def schedule_async(self, coro) -> None:
@@ -129,7 +130,7 @@ class PlatformManager:
         避免在线程中 asyncio.run() 导致的事件循环嵌套崩溃。
         """
         if self._loop is None:
-            print("[manager] 主事件循环未初始化，无法调度协程", flush=True)
+            logger.info("[manager] 主事件循环未初始化，无法调度协程")
             return
         asyncio.run_coroutine_threadsafe(coro, self._loop)
 
@@ -142,5 +143,5 @@ class PlatformManager:
             from src.platforms.adapters.cli import CliAdapter
             return CliAdapter(cfg)
         else:
-            print(f"[manager] 未知平台: {platform}，跳过", flush=True)
+            logger.warning(f"[manager] 未知平台: {platform}，跳过")
             return None

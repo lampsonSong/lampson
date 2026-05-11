@@ -409,7 +409,7 @@ def _notify_user(message: str) -> None:
     except Exception:
         pass
     # Fallback: print
-    print(f"[反思] {message}", flush=True)
+    logger.info(f"[反思] {message}")
 
 
 # ── 沉淀执行 ─────────────────────────────────────────────────────────────────
