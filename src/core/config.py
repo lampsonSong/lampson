@@ -308,12 +308,19 @@ def load_config() -> dict[str, Any]:
         data = yaml.safe_load(f) or {}
     merged = _deep_merge(dict(DEFAULT_CONFIG), data)
     expanded = _expand_config(merged)
+    # 清理已废弃的 chat_ids 字段（WebSocket 自动接收所有会话，无需配置）
+    if "chat_ids" in expanded.get("feishu", {}):
+        del expanded["feishu"]["chat_ids"]
     return expanded
 
 
 def save_config(config: dict[str, Any]) -> None:
     """将配置写入磁盘。"""
     ensure_dirs()
+    # 清理已废弃的字段
+    config.pop("chat_ids", None)
+    if "feishu" in config:
+        config["feishu"].pop("chat_ids", None)
     with CONFIG_PATH.open("w", encoding="utf-8") as f:
         yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
 
