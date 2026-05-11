@@ -34,8 +34,7 @@ from src.platforms.process_manager import get_process_manager
 import logging
 logger = logging.getLogger(__name__)
 
-HEARTBEAT_TIMEOUT = 30  # 秒，无心跳则认为死亡
-WATCHDOG_INTERVAL = 10  # 秒，检查频率
+from src.core.constants import HEARTBEAT_TIMEOUT, WATCHDOG_INTERVAL
 LOG_DIR = LAMIX_DIR / "logs"
 
 

@@ -33,10 +33,9 @@ from src.core.session_manager import get_session_manager
 from src.core.self_audit import (
     run_audit,
     format_report_detail,
-    DEFAULT_AUDIT_HOUR,
-    DEFAULT_AUDIT_MINUTE,
     _audit_log,
 )
+from src.core.constants import DEFAULT_AUDIT_HOUR, DEFAULT_AUDIT_MINUTE, AUDIT_CHECK_INTERVAL, REPORT_MAX_LENGTH
 from src.core.task_scheduler import TaskScheduler, TaskType, TaskConfig, schedule, start as scheduler_start, shutdown as scheduler_shutdown
 from src.core.tools import load_learned_modules
 import logging
@@ -129,8 +128,8 @@ def _self_audit_callback() -> None:
     try:
         report = run_audit()
         report_content = format_report_detail(report)
-        if len(report_content) > 4000:
-            report_content = report_content[:4000] + "\n\n...（报告过长已截断）"
+        if len(report_content) > REPORT_MAX_LENGTH:
+            report_content = report_content[:REPORT_MAX_LENGTH] + "\n\n...（报告过长已截断）"
         _audit_log(f"[self_audit] 审计完成（{reason}），开始发送报告")
         _notify_user(f"🕐 Lamix 自我审计报告\n\n{report_content}")
         logger.info(f"[self_audit] 审计完成（{reason}）")
@@ -157,7 +156,7 @@ def _register_tasks(session=None) -> None:
     schedule(TaskConfig(
         task_id="self_audit_check",
         task_type=TaskType.INTERVAL,
-        interval_seconds=14400,  # 4 小时检查一次
+        interval_seconds=AUDIT_CHECK_INTERVAL,  # 4 小时检查一次
         func=_self_audit_callback,
         description="审计检查（每4小时）",
     ))

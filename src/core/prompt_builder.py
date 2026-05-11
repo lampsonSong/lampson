@@ -23,12 +23,10 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-LAMIX_DIR = Path.home() / ".lamix"
+from src.core.config import LAMIX_DIR, SKILLS_DIR, PROJECTS_DIR, INFO_DIR
+
 MEMORY_PATH = LAMIX_DIR / "MEMORY.md"
 USER_PATH = LAMIX_DIR / "USER.md"
-SKILLS_DIR = LAMIX_DIR / "memory" / "skills"
-PROJECTS_DIR = LAMIX_DIR / "memory" / "projects"
-INFO_DIR = LAMIX_DIR / "memory" / "info"
 
 # 配置文件默认模板路径（仓库内）
 _CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "config"

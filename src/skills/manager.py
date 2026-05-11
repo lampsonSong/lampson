@@ -21,7 +21,7 @@ from typing import Any
 import yaml
 
 
-SKILLS_DIR = Path.home() / ".lamix" / "memory" / "skills"
+from src.core.config import SKILLS_DIR
 BASE_SKILLS_DIR = Path(__file__).resolve().parent.parent.parent / "config" / "default_skills"
 
 # SKILL.md frontmatter 解析正则

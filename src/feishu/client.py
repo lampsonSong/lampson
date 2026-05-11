@@ -14,7 +14,7 @@ import httpx
 
 
 FEISHU_BASE = "https://open.feishu.cn/open-apis"
-TOKEN_TTL = 7000  # token 有效期（秒），官方 7200，留 200s 余量
+from src.core.constants import FEISHU_TOKEN_TTL as TOKEN_TTL
 
 _logger = logging.getLogger(__name__)
 

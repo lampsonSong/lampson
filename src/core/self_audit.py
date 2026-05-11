@@ -21,6 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 from src.core.config import LAMIX_DIR, SKILLS_DIR, PROJECTS_DIR, load_config
+from src.core.constants import DEFAULT_AUDIT_HOUR, DEFAULT_AUDIT_MINUTE
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +41,6 @@ def _audit_log(msg: str) -> None:
     except Exception:
         pass
 
-# 默认审计时间（本地时间）
-DEFAULT_AUDIT_HOUR = 4  # 凌晨 4 点
-DEFAULT_AUDIT_MINUTE = 0
 
 
 

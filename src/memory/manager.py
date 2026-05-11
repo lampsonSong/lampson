@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 from datetime import datetime
-from pathlib import Path
 
+from src.core.config import LAMIX_DIR
+from src.core.constants import MEMORY_SIZE_LIMIT
 
-LAMIX_DIR = Path.home() / ".lamix"
 MEMORY_FILE = LAMIX_DIR / "MEMORY.md"
 SESSIONS_DIR = LAMIX_DIR / "memory" / "sessions"
-MEMORY_SIZE_LIMIT = 500  # 500 字符
 
 
 def _ensure_dirs() -> None:

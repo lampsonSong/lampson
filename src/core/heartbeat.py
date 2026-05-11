@@ -18,7 +18,7 @@ from typing import Any
 from src.core.config import LAMIX_DIR
 
 HEARTBEAT_DIR = LAMIX_DIR / "heartbeat"
-HEARTBEAT_INTERVAL = 10  # 秒
+from src.core.constants import HEARTBEAT_INTERVAL
 
 
 class HeartbeatRecord:

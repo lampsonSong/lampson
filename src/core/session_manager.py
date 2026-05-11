@@ -28,8 +28,7 @@ if TYPE_CHECKING:
 
 # ── 常量 ────────────────────────────────────────────────────────────────
 
-IDLE_TIMEOUT_MINUTES = 180  # 3 小时无活动则重置 session
-_IDLE_TIMEOUT_SECONDS = IDLE_TIMEOUT_MINUTES * 60
+from src.core.constants import IDLE_TIMEOUT_MINUTES, IDLE_TIMEOUT_SECONDS as _IDLE_TIMEOUT_SECONDS
 
 
 class SessionManager:
