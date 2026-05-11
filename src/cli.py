@@ -417,10 +417,29 @@ def run_gateway(args: argparse.Namespace) -> None:
 
     macOS 上自动注册 launchd 服务（KeepAlive 自动重启 + watchdog 心跳监控）。
     Linux/Windows 上使用传统方式启动。
+    如果 LLM 未配置，先走安装引导再启动。
     """
     import subprocess
     import time
     from pathlib import Path
+
+    # 启动前检查配置，未配置则走安装引导
+    config = load_config()
+    if not is_config_complete(config):
+        if not sys.stdin.isatty():
+            print("[gateway] LLM 未配置，但当前无交互终端（被 launchd 调用？），跳过引导。")
+            print("[gateway] 请手动运行 'lamix cli' 完成初始配置。")
+        else:
+            print("[gateway] LLM 未配置，启动安装引导...\n")
+            try:
+                config = run_setup_wizard()
+            except (KeyboardInterrupt, EOFError):
+                print("\n配置已取消，退出。")
+                return
+            if not is_config_complete(config):
+                print("API Key 未填写，无法启动。")
+                return
+            print("\n[gateway] 安装引导完成，启动 daemon...\n")
 
     if sys.platform == "darwin":
         # macOS: 注册 launchd 服务（daemon + watchdog），自动管理生命周期

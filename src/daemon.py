@@ -522,13 +522,35 @@ def main() -> None:
 
     config = load_config()
     if not is_config_complete(config):
-        print("[daemon] LLM 未配置，请运行 lamix cli 完成初始配置后重启 daemon。", flush=True)
-        _write_daemon_pid()
-        _heartbeat_mgr = HeartbeatManager(task_id="daemon")
-        _heartbeat_mgr.start()
-        _shutdown.wait()
-        _heartbeat_mgr.stop(user_initiated=True)
-        return
+        if sys.stdin.isatty():
+            # 有交互终端：走安装引导
+            print("[daemon] LLM 未配置，启动安装引导...", flush=True)
+            _write_daemon_pid()
+            _heartbeat_mgr = HeartbeatManager(task_id="daemon")
+            _heartbeat_mgr.start()
+            try:
+                from src.core.config import run_setup_wizard
+                config = run_setup_wizard()
+            except (KeyboardInterrupt, EOFError, SystemExit):
+                print("\n[daemon] 配置已取消，退出。", flush=True)
+                _heartbeat_mgr.stop(user_initiated=True)
+                return
+            if not is_config_complete(config):
+                print("[daemon] API Key 未填写，无法启动，退出。", flush=True)
+                _heartbeat_mgr.stop(user_initiated=True)
+                return
+            print("[daemon] 安装引导完成，继续启动...", flush=True)
+            _heartbeat_mgr.stop(user_initiated=True)
+            _heartbeat_mgr = None
+        else:
+            # 无交互终端（被 launchd 调用）：空转等配置变更
+            print("[daemon] LLM 未配置，等待配置完成（可通过 'lamix cli' 或 'lamix model' 配置）...", flush=True)
+            _write_daemon_pid()
+            _heartbeat_mgr = HeartbeatManager(task_id="daemon")
+            _heartbeat_mgr.start()
+            _shutdown.wait()
+            _heartbeat_mgr.stop(user_initiated=True)
+            return
 
     # ── 初始化 SessionManager ──────────────────────────────────────────────
     mgr = get_session_manager(config)
