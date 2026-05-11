@@ -775,10 +775,22 @@ class Session:
         inject_msgs: list[dict] = []
         content_lines: list[str] = []
         for msg in messages:
+            msg_type = msg.get("type", "")
             role = msg.get("role", "")
-            if role not in ("user", "assistant"):
+
+            if msg_type == "tool_result":
+                entry: dict[str, Any] = {
+                    "role": "tool",
+                    "tool_call_id": msg.get("id", ""),
+                    "content": msg.get("result_inline", ""),
+                }
+                inject_msgs.append(entry)
                 continue
-            entry: dict[str, Any] = {"role": role}
+
+            if msg_type in ("tool_call",) or role not in ("user", "assistant"):
+                continue
+
+            entry = {"role": role}
             content = msg.get("content", "")
             if role == "assistant" and msg.get("tool_calls"):
                 entry["content"] = content or ""

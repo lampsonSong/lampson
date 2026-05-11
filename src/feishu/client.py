@@ -357,7 +357,7 @@ def tool_feishu_send(params: dict[str, Any]) -> str:
 def tool_feishu_read(params: dict[str, Any]) -> str:
     """工具实现：读取飞书消息。"""
     container_id = params.get("container_id", "").strip()
-    container_id_type = params.get("container_id_type", "chat_id")
+    container_id_type = params.get("container_id_type", "chat")
     page_size = int(params.get("page_size", 5))
 
     if not container_id:
@@ -470,8 +470,8 @@ FEISHU_READ_SCHEMA: dict[str, Any] = {
                 },
                 "container_id_type": {
                     "type": "string",
-                    "description": "会话 ID 类型，默认 chat_id",
-                    "enum": ["chat_id"],
+                    "description": "会话 ID 类型，默认 chat",
+                    "enum": ["chat"],
                 },
                 "page_size": {
                     "type": "integer",
