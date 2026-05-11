@@ -178,14 +178,12 @@ def _write_daemon_pid() -> None:
 
 
 def _send_boot_notification(config: dict, pid: int) -> None:
-    """常驻上线通知：直接调飞书 HTTP API 发消息，不走 LLM。"""
+    """常驻上线通知：优先发 open_id 私聊，失败则发 owner_chat_id 群聊。"""
     owner_chat_id = config.get("feishu", {}).get("owner_chat_id", "").strip()
+    user_open_id = config.get("feishu", {}).get("user_open_id", "").strip()
     app_id = config.get("feishu", {}).get("app_id", "").strip()
     app_secret = config.get("feishu", {}).get("app_secret", "").strip()
 
-    if not owner_chat_id:
-        print("[daemon] 未配置 feishu.owner_chat_id，跳过上线通知", flush=True)
-        return
     if not app_id or not app_secret:
         print("[daemon] 飞书凭证未配置，跳过上线通知", flush=True)
         return
@@ -195,20 +193,32 @@ def _send_boot_notification(config: dict, pid: int) -> None:
         client = FeishuClient(app_id=app_id, app_secret=app_secret)
         text = f"Lamix 已上线 (PID={pid})"
 
-        for attempt in range(2):
-            try:
-                client.send_message(
-                    receive_id=owner_chat_id,
-                    text=text,
-                    receive_id_type="chat_id",
-                )
-                print(f"[daemon] 上线通知已发送", flush=True)
-                return
-            except Exception as e:
-                if attempt == 0:
-                    print(f"[daemon] 上线通知发送失败，重试: {e}", flush=True)
-                else:
-                    print(f"[daemon] 上线通知发送失败: {e}", flush=True)
+        # 优先尝试 user_open_id 私聊（一定可以发），再试 owner_chat_id 群聊
+        targets = []
+        if user_open_id:
+            targets.append((user_open_id, "open_id"))
+        if owner_chat_id:
+            targets.append((owner_chat_id, "chat_id"))
+
+        if not targets:
+            print("[daemon] 未配置 feishu.user_open_id 或 feishu.owner_chat_id，跳过上线通知", flush=True)
+            return
+
+        for receive_id, receive_id_type in targets:
+            for attempt in range(2):
+                try:
+                    client.send_message(
+                        receive_id=receive_id,
+                        text=text,
+                        receive_id_type=receive_id_type,
+                    )
+                    print(f"[daemon] 上线通知已发送 (via {receive_id_type})", flush=True)
+                    return
+                except Exception as e:
+                    if attempt == 0:
+                        print(f"[daemon] 上线通知发送失败（{receive_id_type}），重试: {e}", flush=True)
+                    else:
+                        print(f"[daemon] 上线通知发送失败（{receive_id_type}）: {e}", flush=True)
     except Exception as e:
         print(f"[daemon] 上线通知异常: {e}", flush=True)
 
@@ -227,20 +237,35 @@ def _notify_boot_tasks_running(config: dict, tasks: list[dict]) -> None:
     # 优先直接用飞书 API 发送（解决 daemon 启动早期没有 session 的问题）
     feishu_cfg = (config or {}).get("feishu", {}) or {}
     owner_chat_id = feishu_cfg.get("owner_chat_id", "").strip()
+    user_open_id = feishu_cfg.get("user_open_id", "").strip()
     app_id = feishu_cfg.get("app_id", "").strip()
     app_secret = feishu_cfg.get("app_secret", "").strip()
 
-    if owner_chat_id and app_id and app_secret:
+    if app_id and app_secret:
         try:
             from src.feishu.client import FeishuClient
             client = FeishuClient(app_id=app_id, app_secret=app_secret)
-            client.send_message(
-                receive_id=owner_chat_id,
-                text=message,
-                receive_id_type="chat_id",
-            )
-            print(f"[daemon] boot_tasks 运行提示已发送到飞书", flush=True)
-            return
+            # 优先 open_id 私聊
+            sent = False
+            for receive_id, receive_id_type in [
+                (user_open_id, "open_id"),
+                (owner_chat_id, "chat_id"),
+            ]:
+                if not receive_id:
+                    continue
+                try:
+                    client.send_message(
+                        receive_id=receive_id,
+                        text=message,
+                        receive_id_type=receive_id_type,
+                    )
+                    print(f"[daemon] boot_tasks 运行提示已发送到飞书 (via {receive_id_type})", flush=True)
+                    sent = True
+                    break
+                except Exception:
+                    continue
+            if sent:
+                return
         except Exception as e:
             print(f"[daemon] 飞书发送失败，fallback 到 _notify_user: {e}", flush=True)
 
@@ -593,15 +618,32 @@ def main() -> None:
 # ── Safe Mode 切换 ─────────────────────────────────────────────────────────
 
 
+def _get_feishu_credentials(config_path) -> tuple[str, str]:
+    """从配置文件读取飞书凭证（app_id, app_secret），用于变更比较。"""
+    try:
+        import yaml
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        feishu_cfg = cfg.get("feishu", {}) or {}
+        return (
+            feishu_cfg.get("app_id", "").strip(),
+            feishu_cfg.get("app_secret", "").strip(),
+        )
+    except Exception:
+        return ("", "")
+
+
 def _start_config_watcher(pm, config: dict) -> None:
     """启动 config.yaml 热重载检测线程。
 
-    每 30 秒检查 config.yaml 的 mtime，变了就重新加载飞书 adapter。
+    每 30 秒检查 config.yaml，只在飞书凭证（app_id/app_secret）变更时触发热重载。
+    owner 身份等字段变更不触发（不需要重连 WS）。
     """
     from src.core.config import CONFIG_PATH
 
     def _watcher():
         last_mtime = CONFIG_PATH.stat().st_mtime if CONFIG_PATH.exists() else 0
+        last_creds = _get_feishu_credentials(CONFIG_PATH)
         while not _shutdown.is_set():
             _shutdown.wait(30)
             if _shutdown.is_set():
@@ -613,7 +655,13 @@ def _start_config_watcher(pm, config: dict) -> None:
                 if mtime == last_mtime:
                     continue
                 last_mtime = mtime
-                print("[daemon] 检测到配置变更，热重载飞书 adapter...", flush=True)
+                # 只在飞书凭证变更时才触发热重载
+                new_creds = _get_feishu_credentials(CONFIG_PATH)
+                if new_creds == last_creds:
+                    print("[daemon] 配置文件已变更，但飞书凭证未变，跳过热重载", flush=True)
+                    continue
+                last_creds = new_creds
+                print("[daemon] 飞书凭证已变更，热重载飞书 adapter...", flush=True)
                 _reload_feishu_adapter(pm)
             except Exception as e:
                 print(f"[daemon] config watcher 异常: {e}", flush=True)
@@ -623,22 +671,24 @@ def _start_config_watcher(pm, config: dict) -> None:
 
 
 def _reload_feishu_adapter(pm) -> None:
-    """热重载飞书 adapter：关闭旧的，创建新的。"""
-    import asyncio
+    """热重载飞书 adapter：标记旧 adapter 为 stopped，创建新的替换。
+
+    不关闭旧 WS client（lark SDK 内部用 asyncio.get_event_loop()，
+    在新线程里 run_until_complete 会跟已有 running loop 冲突导致崩溃）。
+    旧 adapter 被 _stopped=True 标记后不再处理新消息，自然被 GC 回收。
+    """
     from src.core.config import load_config
     from src.platforms.adapters.feishu import FeishuAdapter
 
-    # 1. 关闭旧的飞书 adapter
+    # 1. 标记旧 adapter 为 stopped（不关闭 WS，避免 event loop 冲突）
     old_adapter = pm._adapters.get("feishu")
     if old_adapter is not None:
         try:
-            # shutdown 是 async，需要在事件循环里跑
-            if pm._loop is not None and pm._loop.is_running():
-                asyncio.run_coroutine_threadsafe(old_adapter.shutdown(), pm._loop).result(timeout=10)
+            old_adapter._stopped = True
             del pm._adapters["feishu"]
-            print("[daemon] 旧飞书 adapter 已关闭", flush=True)
+            print("[daemon] 旧飞书 adapter 已标记为 stopped", flush=True)
         except Exception as e:
-            print(f"[daemon] 关闭旧飞书 adapter 失败: {e}", flush=True)
+            print(f"[daemon] 标记旧飞书 adapter 失败: {e}", flush=True)
 
     # 2. 读新配置
     new_config = load_config()

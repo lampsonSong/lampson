@@ -73,6 +73,7 @@ class FeishuAdapter(BasePlatformAdapter):
         self._dedup = MessageDeduplicator()
         self._ws_client: Any | None = None
         self._ws_thread: threading.Thread | None = None
+        self._stopped: bool = False  # 热重载时标记为 True，不再处理新消息
         self._lark_client = (
             lark.Client.builder()
             .app_id(self.app_id)
@@ -341,6 +342,9 @@ class FeishuAdapter(BasePlatformAdapter):
 
     def _handle_message(self, data) -> None:
         """WebSocket 收到消息，转换为 PlatformMessage 后推给 PlatformManager。"""
+        # 热重载后旧 adapter 不再处理新消息
+        if self._stopped:
+            return
         try:
             sender = data.event.sender
             message = data.event.message

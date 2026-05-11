@@ -346,13 +346,116 @@ def run_cli(args: argparse.Namespace) -> None:
     _run_repl(config)
 
 
+def _register_launchd_services(python_exe: str, project_dir: str) -> None:
+    """生成并注册 macOS launchd 服务（gateway + watchdog）。"""
+    import plistlib
+    import subprocess
+    from pathlib import Path
+
+    log_dir = Path.home() / ".lamix" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    launch_agents = Path.home() / "Library" / "LaunchAgents"
+    launch_agents.mkdir(parents=True, exist_ok=True)
+
+    gw_plist = {
+        "Label": "com.lamix.gateway",
+        "ProgramArguments": [python_exe, "-m", "src.daemon"],
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "WorkingDirectory": project_dir,
+        "StandardOutPath": str(log_dir / "launchd.log"),
+        "StandardErrorPath": str(log_dir / "launchd.err.log"),
+        "EnvironmentVariables": {
+            "TERM": "xterm-256color",
+            "PYTHONUNBUFFERED": "1",
+        },
+    }
+
+    wd_plist = {
+        "Label": "com.lamix.watchdog",
+        "ProgramArguments": [python_exe, "-m", "src.watchdog"],
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "WorkingDirectory": project_dir,
+        "StandardOutPath": str(log_dir / "watchdog.log"),
+        "StandardErrorPath": str(log_dir / "watchdog.err.log"),
+        "EnvironmentVariables": {
+            "PYTHONUNBUFFERED": "1",
+        },
+    }
+
+    gw_path = launch_agents / "com.lamix.gateway.plist"
+    wd_path = launch_agents / "com.lamix.watchdog.plist"
+
+    # 写入 plist
+    for path, data in [(gw_path, gw_plist), (wd_path, wd_plist)]:
+        with open(path, "wb") as f:
+            plistlib.dump(data, f)
+
+    # 先 unload（如果已注册，静默忽略失败）
+    for path in [wd_path, gw_path]:
+        subprocess.run(
+            ["launchctl", "unload", str(path)],
+            capture_output=True, timeout=10,
+        )
+
+    # load（watchdog 先，gateway 后）
+    for path in [wd_path, gw_path]:
+        result = subprocess.run(
+            ["launchctl", "load", "-w", str(path)],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            print(f"[gateway] launchctl load {path.name} 失败: {result.stderr.strip()}")
+
+    print("[gateway] launchd 服务已注册 (daemon + watchdog)")
+
+
 def run_gateway(args: argparse.Namespace) -> None:
-    """'lamix gateway' 子命令：启动 daemon。"""
-    import sys
-    # daemon.py 用 argparse 解析 sys.argv，需要清掉 'gateway' 子命令
-    sys.argv = [sys.argv[0]] if sys.argv else ["lamix"]
-    from src.daemon import main as daemon_main
-    daemon_main()
+    """'lamix gateway' 子命令：后台启动 daemon，显示日志后守护运行。
+
+    macOS 上自动注册 launchd 服务（KeepAlive 自动重启 + watchdog 心跳监控）。
+    Linux/Windows 上使用传统方式启动。
+    """
+    import subprocess
+    import time
+    from pathlib import Path
+
+    if sys.platform == "darwin":
+        # macOS: 注册 launchd 服务（daemon + watchdog），自动管理生命周期
+        python_exe = sys.executable
+        project_dir = str(Path(__file__).resolve().parent.parent)
+        log_dir = Path.home() / ".lamix" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        daemon_log = log_dir / "launchd.log"
+
+        _register_launchd_services(python_exe, project_dir)
+
+        # 等待 daemon 启动并显示日志
+        print("[gateway] 等待 daemon 启动...")
+        time.sleep(3)
+
+        if daemon_log.exists():
+            print("\n" + "=" * 50)
+            print("[gateway] 启动日志:")
+            print("=" * 50)
+            log_content = daemon_log.read_text(encoding="utf-8", errors="replace")
+            for line in log_content.split("\n")[-30:]:
+                if line.strip():
+                    print(line)
+            print("=" * 50)
+            print(f"\n[gateway] daemon 已在后台运行")
+            print(f"[gateway] 持续监控日志: tail -f {daemon_log}")
+            print("[gateway] 停止: launchctl bootout gui/$(id -u)/com.lamix.gateway")
+        else:
+            print("[gateway] daemon 启动完成，但日志文件未找到")
+    else:
+        # Linux/Windows: 直接启动 daemon
+        import sys as _sys
+        _sys.argv = [_sys.argv[0]] if _sys.argv else ["lamix"]
+        from src.daemon import main as daemon_main
+        daemon_main()
 
 
 def run_model(args: argparse.Namespace) -> None:
