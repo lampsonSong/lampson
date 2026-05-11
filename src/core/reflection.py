@@ -201,7 +201,7 @@ REFLECT_PROMPT = """你是一个知识管理助手。请分析这次任务执行
 判断标准：
 - project_create: 首次发现某个项目，记录基本信息（路径、技术栈、入口、配置）。仅当已有 Projects 列表中无该项目时使用
 - project_update: 在已有项目中发现了新信息（新模块、新配置）或需要修正过时内容。仅当已有 Projects 列表中已有该项目时使用
-- skill_create: 发现了一种可复用的操作方法，当前 skills 里没有覆盖的
+- skill_create: 发现了一种可复用的操作方法，当前 skills 里没有覆盖的。要求：5+ 步骤的可复用工作流，包含明确的步骤编号、决策点和踩坑记录。简单的 API 调用方式、单次操作技巧、3 步以内的流程不算
 - skill_update: 执行过程中发现某个已有 skill 的步骤不够、有错误，需要修正或补充
 - info_create: 发现了通用的、项目无关的知识信息（如服务地址、工具用法、API文档），当前 info 中没有的
 - info_update: 已有 info 需要修正或补充
@@ -506,14 +506,31 @@ def _update_info(target: str, content: str, reason: str) -> str | None:
 def _create_skill(
     target: str, content: str, reason: str
 ) -> str | None:
-    """创建新的 skill 目录和 SKILL.md。"""
+    """创建新的 skill 目录和 SKILL.md。带格式校验。"""
     if not target or not content:
+        return None
+
+    # 内容至少 300 字符
+    if len(content.strip()) < 300:
+        logger.info(f"Skill {target} 内容过短（{len(content.strip())}字符 < 300），跳过创建")
+        return None
+
+    # 至少包含 3 个编号步骤或标题步骤
+    numbered_steps = len(re.findall(r'^\s*\d+[.、）)]', content, re.MULTILINE))
+    heading_steps = len(re.findall(r'^\s*##\s+步骤|^\s*##\s+Step|^\s*###\s+\d', content, re.MULTILINE))
+    if numbered_steps + heading_steps < 3:
+        logger.info(f"Skill {target} 步骤不足（{numbered_steps + heading_steps} < 3），跳过创建")
+        return None
+
+    # 名称校验：小写英文开头+小写字母/数字/连字符
+    if not re.match(r'^[a-z][a-z0-9-]*$', target):
+        logger.info(f"Skill 名称不规范: {target}，跳过创建")
         return None
 
     skill_dir = SKILLS_DIR / target
     skill_dir.mkdir(parents=True, exist_ok=True)
 
-    frontmatter = f"---\ncreated_at: '{date.today()}'\ndescription: {content[:200]}\n---\n\n{content}"
+    frontmatter = f"---\ncreated_at: \'{date.today()}\'\ndescription: {content[:200]}\n---\n\n{content}"
     skill_file = skill_dir / "SKILL.md"
     skill_file.write_text(frontmatter, encoding="utf-8")
     logger.info(f"已创建技能: {target} ({reason})")
