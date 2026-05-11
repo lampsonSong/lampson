@@ -784,6 +784,7 @@ class Agent:
                 session_id=session_id,
                 session_store=session_store,
                 progress_callback=progress_callback,
+                fallback_llms=self.fallback_models,
             )
         except Exception as e:
             logger.warning(f"压缩异常: {e}")
@@ -827,6 +828,7 @@ class Agent:
                     session_store=session_store,
                     force=True,
                     progress_callback=progress_callback,
+                    fallback_llms=self.fallback_models,
                 )
             except Exception as e:
                 logger.warning(f"手动压缩异常: {e}")

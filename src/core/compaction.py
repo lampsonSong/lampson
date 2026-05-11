@@ -157,9 +157,11 @@ _TASK_CONTEXT_PROMPT = """你是一个任务进度摘要助手。以下是一段
 class Compactor:
     """归档压缩器：Classify → Read → Integrate 三步流水线。"""
 
-    def __init__(self, llm: Any, config: CompactionConfig | None = None) -> None:
+    def __init__(self, llm: Any, config: CompactionConfig | None = None, fallback_llms: list[tuple[Any, Any]] | None = None) -> None:
         self.llm = llm
         self.config = config or CompactionConfig()
+        # fallback LLM 列表：主模型失败时依次尝试 [(llm_client, adapter), ...]
+        self.fallback_llms: list[tuple[Any, Any]] = fallback_llms or []
 
     def compact(
         self,
@@ -206,7 +208,7 @@ class Compactor:
         if later_half:
             try:
                 # 【修复】对最近对话截断时取尾部（最新），而非头部（最旧）
-                result = _classify_messages(later_half, existing_files, self.llm, prefer_tail=True)
+                result = _classify_messages(later_half, existing_files, self.llm, prefer_tail=True, fallback_llms=self.fallback_llms)
                 all_decisions.extend(result.get("decisions", []))
                 all_tool_refs.update(result.get("tool_refs", {}))
             except Exception as e:
@@ -217,7 +219,7 @@ class Compactor:
         if earlier_half:
             try:
                 # 早期对话截断取头部即可（都是较旧的）
-                result = _classify_messages(earlier_half, existing_files, self.llm, prefer_tail=False)
+                result = _classify_messages(earlier_half, existing_files, self.llm, prefer_tail=False, fallback_llms=self.fallback_llms)
                 all_decisions.extend(result.get("decisions", []))
                 all_tool_refs.update(result.get("tool_refs", {}))
             except Exception as e:
@@ -248,6 +250,9 @@ class Compactor:
                 archive_targets=[],
                 config=self.config,
             )
+            # Fallback 也需要写 segment_boundary，否则 resume 会重新加载全部历史
+            if session_store is not None and session_id:
+                _write_segment_boundary(messages, [], session_id, session_store)
             return CompactionResult(
                 success=True,
                 messages_kept=recent_msgs,
@@ -471,12 +476,14 @@ def _classify_messages(
     existing_files: dict[str, str],
     llm: Any,
     prefer_tail: bool = False,
+    fallback_llms: list[tuple[Any, Any]] | None = None,
 ) -> dict[str, Any]:
     """Step 1：LLM 分类，不做写入。
 
     Args:
         prefer_tail: True 时截断取尾部（最新消息），False 时取头部（最旧消息）。
             对最近对话应传 True，对早期对话应传 False。
+        fallback_llms: 主模型失败时的 fallback LLM 列表 [(llm_client, adapter), ...]。
     """
     # 动态缩减 batch：从 MAX_CLASSIFY_BATCH 开始，逐步减半直到 prompt 在预算内
     batch_size = min(len(messages), MAX_CLASSIFY_BATCH)
@@ -520,16 +527,37 @@ def _classify_messages(
         direction = "尾部" if prefer_tail else "头部"
         logger.info(f"classify batch 截断（{direction}）: {len(messages)} → {len(selected)}")
 
-    # 调用 LLM
-    temp_client = _make_temp_client(llm)
-    temp_client.messages = []
-    temp_client.messages = [{"role": "system", "content": _CLASSIFY_SYSTEM}]
-    temp_client.add_user_message(prompt)
+    # 调用 LLM（主模型失败时尝试 fallback）
+    def _call_llm_for_classify(target_llm: Any) -> Any:
+        tc = _make_temp_client(target_llm)
+        tc.messages = [{"role": "system", "content": _CLASSIFY_SYSTEM}]
+        tc.add_user_message(prompt)
+        return tc.chat()
 
+    response = None
+    last_error: Exception | None = None
+
+    # 先尝试主模型
     try:
-        response = temp_client.chat()
+        response = _call_llm_for_classify(llm)
     except Exception as e:
-        raise RuntimeError(f"LLM 调用失败: {e}") from e
+        last_error = e
+        logger.warning(f"Compaction classify 主模型失败: {e}")
+
+    # 主模型失败，依次尝试 fallback
+    if response is None and fallback_llms:
+        for fb_llm, _fb_adapter in fallback_llms:
+            try:
+                logger.info(f"Compaction classify 尝试 fallback 模型: {getattr(fb_llm, 'model', '?')}")
+                response = _call_llm_for_classify(fb_llm)
+                last_error = None
+                break
+            except Exception as e:
+                logger.warning(f"Compaction classify fallback 失败: {e}")
+                last_error = e
+
+    if response is None:
+        raise RuntimeError(f"LLM 调用失败（含 fallback）: {last_error}") from last_error
 
     raw = (response.choices[0].message.content or "").strip()
     if not raw:
@@ -893,6 +921,7 @@ def apply_compaction(
     *,
     force: bool = False,
     progress_callback: Callable[[str], None] | None = None,
+    fallback_llms: list[tuple[Any, Any]] | None = None,
 ) -> CompactionResult | None:
     """检查并执行压缩。
 
@@ -925,7 +954,7 @@ def apply_compaction(
     # 单次压缩，不依赖 bytes/4 估算判断成功与否
     # bytes/4 在 context overflow 后 last_prompt_tokens=0 时严重不准
     # 压缩是否足够，由 _run_tool_loop 重新调用 LLM 来验证（靠实际错误判断）
-    compactor = Compactor(llm=agent_llm, config=config)
+    compactor = Compactor(llm=agent_llm, config=config, fallback_llms=fallback_llms)
     result = compactor.compact(
         messages,
         session_store=session_store,

@@ -771,48 +771,123 @@ class Session:
             return f"Session {session_id} 没有消息记录。"
 
         # 构建注入消息 + 返回值内容
+        # 完整重建 OpenAI messages 结构：
+        # user → assistant(tool_calls) → tool → assistant → ...
+        # jsonl 中的顺序：tool_call, tool_result 交替，assistant 只有最终回复
+        # 需要把连续的 tool_call 归组为带 tool_calls 的 assistant 消息
         llm = self.agent.llm
         inject_msgs: list[dict] = []
         content_lines: list[str] = []
+
+        # 第一步：预处理——把连续的 tool_call 归组为 assistant 消息
+        # 先按序收集所有有意义的行，跳过 system_prompt / llm_call / llm_error 等元数据
+        ordered: list[dict[str, Any]] = []
         for msg in messages:
             msg_type = msg.get("type", "")
             role = msg.get("role", "")
+            if msg_type == "user" or role == "user":
+                ordered.append({"kind": "user", "data": msg})
+            elif msg_type == "assistant" or role == "assistant":
+                ordered.append({"kind": "assistant", "data": msg})
+            elif msg_type == "tool_call":
+                ordered.append({"kind": "tool_call", "data": msg})
+            elif msg_type == "tool_result":
+                ordered.append({"kind": "tool_result", "data": msg})
+            # 其他类型（system_prompt, llm_call, llm_error, segment_boundary 等）跳过
 
-            if msg_type == "tool_result":
-                entry: dict[str, Any] = {
-                    "role": "tool",
-                    "tool_call_id": msg.get("id", ""),
-                    "content": msg.get("result_inline", ""),
+        # 第二步：归组——连续的 tool_call + 后续的 tool_result 归为一个 assistant(tool_calls) 消息
+        i = 0
+        while i < len(ordered):
+            item = ordered[i]
+
+            if item["kind"] == "user":
+                content = item["data"].get("content", "")
+                inject_msgs.append({"role": "user", "content": content})
+                if isinstance(content, str) and content:
+                    content_lines.append(f"[用户] {content}")
+                elif isinstance(content, list):
+                    texts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+                    content_lines.append(f"[用户] {' '.join(texts)}")
+                i += 1
+
+            elif item["kind"] == "tool_call":
+                # 收集连续的 tool_call
+                tool_calls_group: list[dict[str, Any]] = []
+                tc_ids: list[str] = []
+                tc_names_list: list[str] = []
+                while i < len(ordered) and ordered[i]["kind"] == "tool_call":
+                    tc_data = ordered[i]["data"]
+                    tc_id = tc_data.get("id", "")
+                    tc_name = tc_data.get("name", "")
+                    tc_args = tc_data.get("arguments", {})
+                    tool_calls_group.append({
+                        "id": tc_id,
+                        "type": "function",
+                        "function": {"name": tc_name, "arguments": json.dumps(tc_args, ensure_ascii=False)},
+                    })
+                    tc_ids.append(tc_id)
+                    tc_names_list.append(tc_name)
+                    i += 1
+
+                # 构建 assistant 消息（带 tool_calls）
+                assistant_entry: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": tool_calls_group,
                 }
+                inject_msgs.append(assistant_entry)
+                content_lines.append(f"  [Lamix tool_calls: {', '.join(tc_names_list)}]")
+
+                # 收集后续的 tool_result（按 id 匹配）
+                result_ids_seen: set[str] = set()
+                while i < len(ordered) and ordered[i]["kind"] == "tool_result":
+                    tr_data = ordered[i]["data"]
+                    tr_id = tr_data.get("id", "")
+                    if tr_id in tc_ids:
+                        inject_msgs.append({
+                            "role": "tool",
+                            "tool_call_id": tr_id,
+                            "content": tr_data.get("result_inline", ""),
+                        })
+                        result_ids_seen.add(tr_id)
+                    i += 1
+
+                # 补充缺失的 tool_result（session 中途关闭等导致 tool_call 无对应 result）
+                for missing_id in tc_ids:
+                    if missing_id not in result_ids_seen:
+                        inject_msgs.append({
+                            "role": "tool",
+                            "tool_call_id": missing_id,
+                            "content": "[工具结果缺失]",
+                        })
+
+            elif item["kind"] == "assistant":
+                # 最终回复 assistant 消息（无 tool_calls）
+                content = item["data"].get("content", "")
+                entry = {"role": "assistant", "content": content}
+                # 如果 jsonl 里有 tool_calls 字段也带上（兼容已有数据）
+                if item["data"].get("tool_calls"):
+                    entry["tool_calls"] = item["data"]["tool_calls"]
                 inject_msgs.append(entry)
-                continue
+                if isinstance(content, str) and content:
+                    content_lines.append(f"[Lamix] {content}")
+                elif isinstance(content, list):
+                    texts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+                    content_lines.append(f"[Lamix] {' '.join(texts)}")
+                i += 1
 
-            if msg_type in ("tool_call",) or role not in ("user", "assistant"):
-                continue
+            elif item["kind"] == "tool_result":
+                # 孤立的 tool_result（没有前面的 tool_call），直接作为 tool 消息
+                tr_data = item["data"]
+                inject_msgs.append({
+                    "role": "tool",
+                    "tool_call_id": tr_data.get("id", ""),
+                    "content": tr_data.get("result_inline", ""),
+                })
+                i += 1
 
-            entry = {"role": role}
-            content = msg.get("content", "")
-            if role == "assistant" and msg.get("tool_calls"):
-                entry["content"] = content or ""
-                entry["tool_calls"] = msg["tool_calls"]
             else:
-                entry["content"] = content
-            inject_msgs.append(entry)
-
-            # 构建返回值展示
-            label = "用户" if role == "user" else "Lamix"
-            if isinstance(content, str) and content:
-                content_lines.append(f"[{label}] {content}")
-            elif isinstance(content, list):
-                # 多段 content（text blocks）
-                texts = []
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        texts.append(block.get("text", ""))
-                content_lines.append(f"[{label}] {' '.join(texts)}")
-            if msg.get("tool_calls"):
-                tc_names = [tc.get("function", {}).get("name", "?") for tc in msg["tool_calls"]]
-                content_lines.append(f"  [tool_calls: {', '.join(tc_names)}]")
+                i += 1
 
         if not inject_msgs:
             return f"Session {session_id} 没有可加载的对话消息。"
