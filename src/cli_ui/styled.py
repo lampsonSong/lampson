@@ -11,7 +11,7 @@ console = Console()
 class C:
     PROMPT = "bold ansigreen"
     USER_INPUT = "bold cyan"
-    BOT = "bold ansibrightgreen"
+    BOT = "bold green"
     COMMAND = "bold yellow"
     INFO = "blue"
     SUCCESS = "green"
@@ -82,7 +82,6 @@ def create_progress() -> Progress:
             console=console,
         )
     except ImportError:
-        # 旧版 rich 没有 TaskProgressColumn
         return Progress(
             SpinnerColumn(),
             TextColumn("[{task.description}]"),
@@ -101,6 +100,6 @@ def print_banner() -> None:
 ║   ███████╗██║███████╗███████║    ██║ ╚═╝ ██║███████╗   ║
 ║   ╚══════╝╚═╝╚══════╝╚══════╝    ╚═╝     ╚═╝╚══════╝   ║
 ║                                                          ║
-║   [green]一起认识这个世界的 AI 伙计[/green]                        ║
+║   [green]LAMIX[/green]                                          ║
 ╚══════════════════════════════════════════════════════════╝[/bold cyan]"""
     console.print(banner)
