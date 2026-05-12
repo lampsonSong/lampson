@@ -27,12 +27,30 @@ LAMIX_DIR = Path.home() / ".lamix"
 CONFIG_PATH = LAMIX_DIR / "config.yaml"
 BACKUP_DIR = LAMIX_DIR / "backups"
 LAMIX_ROOT = Path(__file__).resolve().parent.parent  # ~/lamix
-DAEMON_ENTRY = f"{sys.executable} -m src.daemon"
+
 DAEMON_LOG = LAMIX_DIR / "logs" / "daemon.log"
 DAEMON_ERR_LOG = LAMIX_DIR / "logs" / "daemon.err.log"
 
 # 需要恢复的关键目录（排除 venv/logs 等）
 CRITICAL_DIRS = ["memory"]
+
+
+def _resolve_daemon_cmd() -> list[str]:
+    """解析 daemon 启动命令，优先使用 lamix 命令。"""
+    import shutil
+    import sysconfig
+
+    lamix = shutil.which("lamix")
+    if lamix:
+        return [lamix, "gateway"]
+
+    scripts = sysconfig.get_path("scripts")
+    for name in ["lamix", "lamix.exe", "lamix.bat", "lamix-script.py"]:
+        path = os.path.join(scripts, name)
+        if os.path.exists(path):
+            return [path, "gateway"]
+
+    return [sys.executable, "-m", "src.daemon"]
 
 # ─── 配置读取 ────────────────────────────────────────────────────────────────
 
@@ -378,7 +396,7 @@ def restart_daemon() -> None:
     try:
         # 启动 daemon（不等待）
         subprocess.Popen(
-            DAEMON_ENTRY.split(),
+            _resolve_daemon_cmd(),
             cwd=str(LAMIX_ROOT),
             stdout=open(DAEMON_LOG, "a", encoding="utf-8"),
             stderr=open(DAEMON_ERR_LOG, "a", encoding="utf-8"),

@@ -49,7 +49,6 @@ _shutdown = threading.Event()
 _heartbeat_mgr: HeartbeatManager | None = None
 _scheduler: TaskScheduler | None = None
 SAFE_MODE_SCRIPT = Path(__file__).resolve().parent / "safe_mode.py"
-DAEMON_ENTRY = f"{sys.executable} -m src.daemon"
 
 # boot_tasks 限制
 _MAX_TASKS = 20
@@ -534,7 +533,7 @@ def main() -> None:
     _patch_websockets_ssl()
 
     parser = argparse.ArgumentParser(
-        prog="python -m src.daemon",
+        prog="lamix gateway",
         description="Lamix 常驻 daemon：多平台消息网关 + 飞书 WebSocket 长连接监听。",
     )
     parser.parse_args()

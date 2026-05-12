@@ -38,6 +38,24 @@ from src.core.constants import HEARTBEAT_TIMEOUT, WATCHDOG_INTERVAL
 LOG_DIR = LAMIX_DIR / "logs"
 
 
+def _get_lamix_bin() -> str | None:
+    """定位 lamix 可执行文件路径。"""
+    import shutil
+    import sysconfig
+
+    lamix = shutil.which("lamix")
+    if lamix:
+        return lamix
+
+    scripts = sysconfig.get_path("scripts")
+    candidates = ["lamix", "lamix.exe", "lamix.bat", "lamix-script.py"]
+    for name in candidates:
+        path = os.path.join(scripts, name)
+        if os.path.exists(path):
+            return path
+    return None
+
+
 def _log(msg: str) -> None:
     """写日志。"""
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -69,7 +87,13 @@ def _restart_daemon(pm) -> None:
     """通过 ProcessManager 重启 daemon。"""
     _log("尝试重启 daemon...")
     try:
-        daemon_command = [sys.executable, "-m", "src.daemon"]
+        # 优先使用 lamix 命令，确保 ps aux | grep lamix 能搜到
+        lamix_bin = _get_lamix_bin()
+        if lamix_bin:
+            daemon_command = [lamix_bin, "gateway"]
+        else:
+            daemon_command = [sys.executable, "-m", "src.daemon"]
+
         pid_file = LOG_DIR / "daemon.pid"
 
         success = pm.restart_daemon(
@@ -107,7 +131,7 @@ class Watchdog:
                 pass
 
         # 通过进程名找
-        return self._pm.find_process("src.daemon")
+        return self._pm.find_process("(src\.daemon|lamix.*gateway)")
 
     def _check_daemon(self) -> None:
         """检查 daemon 心跳。"""

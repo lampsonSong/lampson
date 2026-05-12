@@ -203,6 +203,12 @@ def _ensure_daemon_running() -> None:
                 else:
                     os.kill(pid, 0)  # 不发信号，只检查进程存在
                     print(f"[cli] daemon 已在运行 (PID={pid})")
+                    # Windows 上确保 watchdog 也在运行
+                    if sys.platform == "win32" and not getattr(sys, "frozen", False):
+                        try:
+                            _ensure_watchdog_on_windows()
+                        except Exception:
+                            pass
                     return
             except (ProcessLookupError, OSError):
                 pass  # 进程不存在，继续启动
@@ -256,8 +262,60 @@ def _ensure_daemon_running() -> None:
                 **kwargs,
             )
         print("[cli] daemon 已在后台启动")
+
+        # Windows 上同时启动 watchdog（监控 daemon 崩溃时自动重启）
+        if sys.platform == "win32" and not getattr(sys, "frozen", False):
+            try:
+                _ensure_watchdog_on_windows()
+            except Exception as wd_e:
+                print(f"[cli] watchdog 启动失败: {wd_e}")
     except Exception as e:
         print(f"[cli] daemon 启动失败: {e}")
+
+
+def _ensure_watchdog_on_windows() -> None:
+    """Windows 上启动 watchdog 进程（监控 daemon，崩溃时自动重启）。"""
+    import subprocess
+    from pathlib import Path
+
+    log_dir = Path.home() / ".lamix" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    watchdog_log = log_dir / "watchdog.log"
+    pid_path = log_dir / "watchdog.pid"
+
+    # 检查 watchdog 是否已在运行
+    if pid_path.exists():
+        try:
+            pid = int(pid_path.read_text().strip())
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if handle:
+                kernel32.CloseHandle(handle)
+                return  # watchdog 已在运行
+        except (ValueError, OSError, AttributeError):
+            pass
+
+    DETACHED_PROCESS = 0x00000008
+    python_exe = sys.executable
+    pythonw = python_exe.replace("python.exe", "pythonw.exe")
+    if Path(pythonw).exists():
+        python_exe = pythonw
+
+    project_root = str(Path(__file__).resolve().parent.parent)
+
+    with open(watchdog_log, "a", encoding="utf-8") as f:
+        proc = subprocess.Popen(
+            [python_exe, "-m", "src.watchdog"],
+            stdout=f,
+            stderr=f,
+            creationflags=DETACHED_PROCESS,
+            cwd=project_root,
+        )
+
+    pid_path.write_text(str(proc.pid), encoding="utf-8")
+    print(f"[cli] watchdog 已启动 (PID={proc.pid})，daemon 崩溃时会自动重启")
 
 
 def _init_platform(config: dict, start_feishu: bool = True) -> None:
@@ -435,7 +493,8 @@ def run_gateway(args: argparse.Namespace) -> None:
     """'lamix gateway' 子命令：后台启动 daemon，显示日志后守护运行。
 
     macOS 上自动注册 launchd 服务（KeepAlive 自动重启 + watchdog 心跳监控）。
-    Linux/Windows 上使用传统方式启动。
+    Windows 上后台启动 daemon + watchdog 双进程，watchdog 监控自动重启。
+    Linux 上直接在前台运行 daemon。
     如果 LLM 未配置，先走安装引导再启动。
     """
     import subprocess
@@ -488,8 +547,47 @@ def run_gateway(args: argparse.Namespace) -> None:
             print("[gateway] 停止: launchctl bootout gui/$(id -u)/com.lamix.gateway")
         else:
             print("[gateway] daemon 启动完成，但日志文件未找到")
+    elif sys.platform == "win32":
+        # Windows: 后台启动 daemon + watchdog，watchdog 监控自动重启
+        DETACHED_PROCESS = 0x00000008
+        log_dir = Path.home() / ".lamix" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        project_root = str(Path(__file__).resolve().parent.parent)
+
+        # 用 pythonw.exe 避免弹窗
+        python_exe = sys.executable
+        pythonw = python_exe.replace("python.exe", "pythonw.exe")
+        if Path(pythonw).exists():
+            python_exe = pythonw
+
+        # 启动 daemon
+        daemon_log = log_dir / "daemon.log"
+        with open(daemon_log, "a", encoding="utf-8") as f:
+            daemon_proc = subprocess.Popen(
+                [python_exe, "-m", "src.daemon"],
+                stdout=f,
+                stderr=f,
+                creationflags=DETACHED_PROCESS,
+                cwd=project_root,
+            )
+        print(f"[gateway] daemon 已启动 (PID={daemon_proc.pid})")
+
+        # 启动 watchdog
+        watchdog_log = log_dir / "watchdog.log"
+        watchdog_pid_path = log_dir / "watchdog.pid"
+        with open(watchdog_log, "a", encoding="utf-8") as f:
+            watchdog_proc = subprocess.Popen(
+                [python_exe, "-m", "src.watchdog"],
+                stdout=f,
+                stderr=f,
+                creationflags=DETACHED_PROCESS,
+                cwd=project_root,
+            )
+        watchdog_pid_path.write_text(str(watchdog_proc.pid), encoding="utf-8")
+        print(f"[gateway] watchdog 已启动 (PID={watchdog_proc.pid})")
+        print(f"[gateway] 日志目录: {log_dir}")
     else:
-        # Linux/Windows: 直接启动 daemon
+        # Linux: 直接在前台运行 daemon
         import sys as _sys
         _sys.argv = [_sys.argv[0]] if _sys.argv else ["lamix"]
         from src.daemon import main as daemon_main

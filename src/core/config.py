@@ -370,7 +370,7 @@ def _notify_daemon_restart() -> None:
     import subprocess
     try:
         result = subprocess.run(
-            ["pgrep", "-f", "python.*src.daemon"],
+            ["pgrep", "-f", "(python.*src\.daemon|lamix.*gateway)"],
             capture_output=True, text=True, timeout=3,
         )
         if result.returncode == 0 and result.stdout.strip():

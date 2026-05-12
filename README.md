@@ -127,8 +127,19 @@ brew install ripgrep        # macOS
 ```bash
 git clone https://github.com/lampsonSong/lamix.git
 cd lamix
-pip install -e .
 ```
+
+安装方式二选一：
+
+- **正式模式（推荐）**：安装后代码锁定，适合日常使用
+  ```bash
+  pip install .
+  ```
+
+- **开发模式（editable）**：代码修改即时生效，适合二次开发
+  ```bash
+  pip install -e .
+  ```
 
 **3. 启动**
 
@@ -358,52 +369,26 @@ lamix/
 │   ├── watchdog.py            # 进程守护
 │   ├── core/
 │   │   ├── agent.py           # LLM Agent 核心
+│   │   ├── config.py          # 配置加载/热重载
 │   │   ├── session.py         # 会话管理
-│   │   ├── compaction.py      # 上下文压缩（轮次分段 V2）
-│   │   ├── prompt_builder.py  # 分层 system prompt 构建
-│   │   ├── config.py          # 配置管理
-│   │   ├── heartbeat.py       # 心跳机制
-│   │   ├── task_scheduler.py  # 定时任务
-│   │   └── tools.py           # 工具注册
-│   ├── platforms/
-│   │   ├── manager.py         # 多平台消息网关
-│   │   ├── adapters/
-│   │   │   ├── feishu.py      # 飞书 adapter
-│   │   │   └── cli.py         # CLI adapter
-│   │   ├── process_manager.py          # 进程管理抽象基类
-│   │   ├── posix_process_manager.py    # macOS/Linux 实现
-│   │   └── windows/
-│   │       └── process_manager.py      # Windows 实现
-│   ├── tools/
-│   │   ├── desktop.py         # 桌面控制
-│   │   ├── shell.py           # Shell 命令执行
-│   │   └── search.py          # 文件/内容搜索
-│   └── feishu/                # 飞书 API 封装
-├── scripts/
-│   ├── install_windows.py     # Windows 安装脚本
-│   └── safe_mode.py           # 安全模式修复
-├── docs/
-│   └── PROJECT.md             # 项目文档
-└── pyproject.toml
+│   │   ├── tools/             # 内置工具集
+│   │   ├── heartbeat.py       # 心跳机制（watchdog 依赖）
+│   │   ├── self_audit.py      # 自我审计
+│   │   └── task_scheduler.py  # 定时任务调度器
+│   ├── platforms/             # 多平台 adapter
+│   ├── feishu/                # 飞书 SDK 封装
+│   ├── memory/                # 长期记忆存储
+│   ├── skills/                # 技能知识库
+│   ├── selfupdate/            # 自更新模块
+│   └── cli.py                 # 命令分发器（cli/gateway/model/update/config）
+├── scripts/                   # 安装/部署脚本
+├── tests/                     # 测试
+├── config.yaml                # 用户配置（自动生成）
+└── pyproject.toml             # 项目配置
 ```
 
 </details>
 
-<details>
-<summary><strong>配置</strong></summary>
+---
 
-配置文件位于 `~/.lamix/config.yaml`，首次运行自动生成。主要配置项：
-
-| 配置项 | 说明 |
-|--------|------|
-| `llm.api_key` | LLM API Key |
-| `llm.model` | 模型名称 |
-| `feishu.app_id` | 飞书应用 App ID |
-| `feishu.app_secret` | 飞书应用 App Secret |
-| `feishu.owner_chat_id` | 飞书 owner 群 ID |
-
-</details>
-
-## 许可证
-
-Private
+<sub>Lamix 使用 MIT 协议，详情见 [LICENSE](LICENSE)。</sub>
