@@ -66,6 +66,7 @@ HELP_TEXT = """\
   /update list                   列出自更新分支
   /metrics                       查看最近任务指标统计
   /compaction                    手动触发上下文压缩
+  /contextsize                   查看当前上下文长度和占比
   /self-audit                    立即触发自我审计
   /new                           开始新 session（清空当前对话上下文）
   /exit                          退出
@@ -985,6 +986,9 @@ class Session:
         if command == "/compaction":
             return self._handle_compaction()
 
+        if command == "/contextsize":
+            return HandleResult(reply=self._handle_contextsize(), is_command=True)
+
         if command == "/self-audit":
             return self._handle_self_audit()
 
@@ -1058,6 +1062,37 @@ class Session:
                 )
         except Exception as e:
             return HandleResult(reply=f"[上下文压缩] 异常: {e}", is_command=True)
+
+    def _handle_contextsize(self) -> str:
+        """返回当前上下文长度信息。"""
+        messages = self.agent.llm.messages
+        total_msgs = len(messages)
+        user_msgs = sum(1 for m in messages if m.get("role") == "user")
+        assistant_msgs = sum(1 for m in messages if m.get("role") == "assistant")
+        tool_msgs = sum(1 for m in messages if m.get("role") == "tool")
+
+        # token 估算
+        estimated = self.agent._estimate_context_tokens()
+        source = "LLM返回值" if self.agent.last_prompt_tokens > 0 else "bytes/4估算"
+
+        # context_window
+        cw = 0
+        if self.agent._compaction_config:
+            cw = self.agent._compaction_config.context_window
+
+        lines = [
+            f"当前上下文: {estimated:,} tokens（{source}）",
+        ]
+        if cw > 0:
+            pct = estimated / cw * 100
+            lines.append(f"Context Window: {cw:,} tokens")
+            lines.append(f"使用率: {pct:.1f}%")
+            # 触发阈值
+            threshold = int(cw * self.agent._compaction_config.trigger_threshold)
+            lines.append(f"压缩触发阈值: {threshold:,} tokens（{self.agent._compaction_config.trigger_threshold:.0%}）")
+        lines.append(f"消息数: {total_msgs} 条（user: {user_msgs}, assistant: {assistant_msgs}, tool: {tool_msgs}）")
+
+        return "\n".join(lines)
 
     def _handle_self_audit(self) -> HandleResult:
         """手动触发自我审计。"""
@@ -1548,10 +1583,9 @@ def _build_compaction_config(
     cw = model_context_window or c.get("context_window", 131_072)
     return CompactionConfig(
         context_window=int(cw),
-        trigger_threshold=float(c.get("trigger_threshold", 0.95)),
+        trigger_threshold=float(c.get("trigger_threshold", 0.9)),
         end_threshold_percent=c.get("end_threshold_percent", 80.0),
-        max_archive_per_compaction=c.get("max_archive_per_compaction", 20),
         compaction_log_max_bytes=c.get("compaction_log_max_bytes", 10 * 1024 * 1024),
-        keep_recent_n=c.get("keep_recent_n", 3),
-        summary_trigger_ratio=c.get("summary_trigger_ratio", 0.5),
+        tail_ratio=float(c.get("tail_ratio", 0.2)),
+        tail_threshold=float(c.get("tail_threshold", 0.5)),
     )
