@@ -1,4 +1,4 @@
-"""/compaction 命令测试。
+"""/compact 命令测试。
 
 覆盖路径：
 Session._handle_compaction → Agent.force_compact → apply_compaction
@@ -10,7 +10,7 @@ Session._handle_compaction → Agent.force_compact → apply_compaction
 - 命令成功 / 失败
 - 连续调用
 - 异常兜底
-- 命令路由（handle_input → /compaction）
+- 命令路由（handle_input → /compact）
 """
 
 from typing import Optional, List
@@ -284,45 +284,45 @@ class TestSessionHandleCompaction:
 
 
 class TestCompactionCommandRouting:
-    """测试 /compaction 命令从 handle_input 正确路由到 _handle_compaction。"""
+    """测试 /compact 命令从 handle_input 正确路由到 _handle_compaction。"""
 
     def test_handle_input_routes_compaction(self):
-        """handle_input('/compaction') 路由到 _handle_compaction。"""
+        """handle_input('/compact') 路由到 _handle_compaction。"""
         config = CompactionConfig(context_window=1000, trigger_threshold=0.8)
         session = _make_session(compaction_config=config)
 
         with patch.object(session.agent, "force_compact", return_value=_success_result()):
-            result = session.handle_input("/compaction")
+            result = session.handle_input("/compact")
 
         assert isinstance(result, HandleResult)
         assert result.is_command is True
         assert "已完成" in result.reply
 
     def test_handle_input_routes_compaction_case_insensitive(self):
-        """/COMPACTION 大写也能路由（command 已 lower()）。"""
+        """/COMPACT 大写也能路由（command 已 lower()）。"""
         config = CompactionConfig(context_window=1000, trigger_threshold=0.8)
         session = _make_session(compaction_config=config)
 
         with patch.object(session.agent, "force_compact", return_value=_success_result()):
-            result = session.handle_input("/COMPACTION")
+            result = session.handle_input("/COMPACT")
 
         assert result.is_command is True
         assert "已完成" in result.reply
 
     def test_handle_input_compaction_with_trailing_spaces(self):
-        """/compaction 后面有空格也能路由（前导空格走自然语言分支，只有尾部空格是命令）。"""
+        """/compact 后面有空格也能路由（前导空格走自然语言分支，只有尾部空格是命令）。"""
         config = CompactionConfig(context_window=1000, trigger_threshold=0.8)
         session = _make_session(compaction_config=config)
 
-        # 尾部空格：strip() 后 parts[0]=="/compaction"，能路由
+        # 尾部空格：strip() 后 parts[0]=="/compact"，能路由
         with patch.object(session.agent, "force_compact", return_value=_success_result()):
-            result = session.handle_input("/compaction   ")
+            result = session.handle_input("/compact   ")
 
         assert result.is_command is True
         assert "已完成" in result.reply
 
         # 前导空格：不走命令分支（startswith("/") 为 False），属于自然语言
-        # 不测这个分支，它不是 /compaction 命令的职责
+        # 不测这个分支，它不是 /compact 命令的职责
 
     def test_handle_input_does_not_write_jsonl(self):
         """命令路由不写入 JSONL（不走自然语言分支）。"""
@@ -332,6 +332,6 @@ class TestCompactionCommandRouting:
 
         with patch.object(session.agent, "force_compact", return_value=_success_result()):
             with patch("src.core.session.session_store") as mock_ss:
-                session.handle_input("/compaction")
+                session.handle_input("/compact")
                 # 不应调用 append_message（JSONL 写入）
                 mock_ss.append_message.assert_not_called()

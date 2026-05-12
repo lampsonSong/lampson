@@ -18,6 +18,7 @@ import argparse
 import os
 import sys
 import textwrap
+from pathlib import Path
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
@@ -33,9 +34,17 @@ from src.core.config import (
 from src.core.session_manager import get_session_manager
 from src.memory import session_store
 
+# 导入 CLI 样式和补全模块
+from src.cli.styled import (
+    C, print_bot, print_command, print_info, print_success,
+    print_warning, print_error, print_divider, print_banner,
+    create_progress,
+)
+from src.cli.completion import LamixCompleter, create_key_bindings
 
 PROMPT_STYLE = Style.from_dict({
     "prompt": "ansigreen bold",
+    "command": "ansigreen",
 })
 
 
@@ -50,7 +59,8 @@ def _get_version() -> str:
 
 def _cli_partial_sender(text: str) -> None:
     """CLI 下 compaction 等进度文案即时打印。"""
-    print(text, flush=True)
+    from src.cli.styled import console
+    console.print(f"[dim]{text}[/dim]", end="", flush=True)
 
 
 def _cli_progress_callback(event: dict) -> None:
@@ -61,7 +71,8 @@ def _cli_progress_callback(event: dict) -> None:
     args_preview = event.get("args_preview", "")
     result_preview = event.get("result_preview", "")
     round_num = event.get("round", "?")
-    print(f"  [工具 {round_num}] {tool}({args_preview}) → {result_preview}", flush=True)
+    from src.cli.styled import print_tool, C
+    print_tool(f"[{C.TOOL}]  [工具 {round_num}] {tool}({args_preview}) → {result_preview}")
 
 
 def _maybe_greet_first_run(session) -> None:
@@ -81,28 +92,55 @@ def _maybe_greet_first_run(session) -> None:
             reply = result.reply
             if reply.startswith("Lamix> "):
                 reply = reply[7:]
-            print(f"\nLamix> {reply}\n")
+            print()
+            print_bot(reply)
 
 
 def _run_repl(config: dict) -> None:
     """交互式 REPL 循环。"""
+    # 打印 banner
+    print_banner()
+    print_divider()
+    
     mgr = get_session_manager(config)
     session = mgr.get_or_create("cli", "default")
     # CLI 模式下设置 progress_callback，工具调用时实时打印进度
     session.agent.progress_callback = _cli_progress_callback
     session.partial_sender = _cli_partial_sender
+    
     skill_count = len(session.skills)
     feishu_status = "已连接" if session.feishu_ready else "未配置"
-    print(f"Lamix 已启动（技能: {skill_count} 个，飞书: {feishu_status}）。输入 /help 查看命令，Ctrl+C 或 /exit 退出。\n")
+    
+    # 启动信息
+    print_info(f"技能: {skill_count} 个  |  飞书: {feishu_status}")
+    print_info("输入 /help 查看命令，Ctrl+C 或 /exit 退出。")
+    print_divider()
+    print()
 
     # 首次运行检测：USER.md 仍是默认内容时，自动发问候让对话自然开始
     _maybe_greet_first_run(session)
 
+    # 加载历史记录用于补全
     history_file = LAMIX_DIR / ".repl_history"
+    history_content = []
+    if history_file.exists():
+        try:
+            history_content = history_file.read_text(encoding="utf-8").strip().splitlines()
+        except Exception:
+            pass
+    
+    # 创建补全器
+    completer = LamixCompleter(history=history_content)
+    key_bindings = create_key_bindings()
+
     prompt_session: PromptSession = PromptSession(
         history=FileHistory(str(history_file)),
         auto_suggest=AutoSuggestFromHistory(),
         style=PROMPT_STYLE,
+        completer=completer,
+        key_bindings=key_bindings,
+        complete_while_typing=True,
+        reserve_space_for_menu=8,
     )
 
     try:
@@ -117,6 +155,10 @@ def _run_repl(config: dict) -> None:
             if not user_input:
                 continue
 
+            # 打印用户输入（带样式）
+            from src.cli.styled import console
+            console.print(f"[{C.USER_INPUT}]{user_input}[/{C.USER_INPUT}]")
+
             result = session.handle_input(user_input)
 
             if result.is_exit:
@@ -127,14 +169,17 @@ def _run_repl(config: dict) -> None:
                 session = mgr.reset_session("cli", "default")
                 session.agent.progress_callback = _cli_progress_callback
                 session.partial_sender = _cli_partial_sender
-                print("\n[新 session 已开始]\n")
+                print_divider()
+                print_info("新 session 已开始")
+                print_divider()
+                print()
                 continue
 
             if result.reply:
                 if result.is_command:
-                    print(result.reply)
+                    print_command(result.reply)
                 else:
-                    print(f"\nLamix> {result.reply}\n")
+                    print_bot(result.reply)
 
                 # 计划待确认时由用户选择是否执行
                 if (
@@ -151,9 +196,12 @@ def _run_repl(config: dict) -> None:
                     if confirm_input in ("y", "yes", "是"):
                         exec_result = session.agent.confirm_and_execute()
                         if exec_result:
-                            print(f"\nLamix> {exec_result}\n")
+                            print()
+                            print_bot(exec_result)
                     else:
-                        print(f"\nLamix> {session.agent.cancel_plan()}\n")
+                        cancel_result = session.agent.cancel_plan()
+                        print_info(f"已取消: {cancel_result}")
+                    
                     # 与 handle_input 一致：确认/取消后的回合也尝试压缩
                     try:
                         cr = session.agent.maybe_compact(
@@ -163,21 +211,23 @@ def _run_repl(config: dict) -> None:
                         )
                         if cr is not None:
                             if cr.success:
-                                print(
-                                    f"[上下文压缩] 已完成，归档 {cr.archived_count} 条内容，{cr.tokens_before} → {cr.tokens_after} token。"
+                                print_success(
+                                    f"上下文压缩完成：归档 {cr.archived_count} 条内容，"
+                                    f"{cr.tokens_before} → {cr.tokens_after} token"
                                 )
                             else:
-                                print(f"[上下文压缩] 失败: {cr.error}")
+                                print_error(f"上下文压缩失败: {cr.error}")
                     except Exception:
                         pass
 
             if result.compaction_msg:
-                print(result.compaction_msg)
+                print_info(result.compaction_msg)
 
     finally:
-        print("\n正在清理会话...")
+        print_divider()
+        print_info("正在清理会话...")
         session.cleanup()
-        print("再见！")
+        print_success("再见！")
 
 
 def _ensure_daemon_running() -> None:
@@ -198,11 +248,11 @@ def _ensure_daemon_running() -> None:
                     handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
                     if handle:
                         kernel32.CloseHandle(handle)
-                        print(f"[cli] daemon 已在运行 (PID={pid})")
+                        print_info(f"daemon 已在运行 (PID={pid})")
                         return
                 else:
                     os.kill(pid, 0)  # 不发信号，只检查进程存在
-                    print(f"[cli] daemon 已在运行 (PID={pid})")
+                    print_info(f"daemon 已在运行 (PID={pid})")
                     # Windows 上确保 watchdog 也在运行
                     if sys.platform == "win32" and not getattr(sys, "frozen", False):
                         try:
@@ -216,7 +266,7 @@ def _ensure_daemon_running() -> None:
             pass
 
     # 启动 daemon
-    print("[cli] daemon 未运行，正在后台启动...")
+    print_info("daemon 未运行，正在后台启动...")
     log_dir = Path.home() / ".lamix" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     daemon_log = log_dir / "daemon.log"
@@ -255,9 +305,9 @@ def _ensure_daemon_running() -> None:
             )
         import time
         time.sleep(1)
-        print("[cli] daemon 已在后台启动")
+        print_success("daemon 已在后台启动")
     except Exception as e:
-        print(f"[cli] 启动 daemon 失败: {e}")
+        print_error(f"启动 daemon 失败: {e}")
 
 
 def _ensure_watchdog_on_windows() -> None:
@@ -290,7 +340,7 @@ def _ensure_watchdog_on_windows() -> None:
         import time
         time.sleep(0.5)
     except Exception as e:
-        print(f"[cli] 启动 watchdog 失败: {e}")
+        print_error(f"启动 watchdog 失败: {e}")
 
 
 def _handle_gateway_predicate(predicate: str, config: dict) -> None:
@@ -307,7 +357,7 @@ def _handle_gateway_predicate(predicate: str, config: dict) -> None:
         session.partial_sender = _cli_partial_sender
 
     if repl_enabled:
-        print("[gateway] 启动交互式 CLI...")
+        print_info("启动交互式 CLI...")
         _run_repl(config)
 
 
@@ -339,15 +389,15 @@ def run_cli(args: argparse.Namespace) -> None:
     config = load_config()
     if not is_config_complete(config):
         if non_interactive_input is not None:
-            print("Lamix 未配置，请先运行 lamix cli 进入交互模式完成配置。")
+            print_error("Lamix 未配置，请先运行 lamix cli 进入交互模式完成配置。")
             sys.exit(1)
         try:
             config = run_setup_wizard()
         except (KeyboardInterrupt, EOFError):
-            print("\n配置已取消，退出。")
+            print_info("配置已取消，退出。")
             sys.exit(0)
         if not is_config_complete(config):
-            print("API Key 未填写，无法启动。")
+            print_error("API Key 未填写，无法启动。")
             sys.exit(1)
 
     _init_platform(config)
@@ -385,25 +435,25 @@ def _init_platform(config: dict) -> None:
             import threading
             threading.Thread(target=bot.start, daemon=True).start()
         except Exception as e:
-            print(f"[cli] 飞书初始化失败: {e}")
+            print_error(f"飞书初始化失败: {e}")
 
 
 def run_gateway(args: argparse.Namespace) -> None:
     """'lamix gateway' 子命令：仅启动 daemon（后台常驻），启动 CLI。"""
     config = load_config()
     if not is_config_complete(config):
-        print("Lamix 未配置，将进行首次配置。\n")
+        print_info("Lamix 未配置，将进行首次配置。\n")
     try:
         config = run_setup_wizard()
     except (KeyboardInterrupt, EOFError):
-        print("\n配置已取消，退出。")
+        print_info("配置已取消，退出。")
         sys.exit(0)
     if not is_config_complete(config):
-        print("API Key 未填写，退出。")
+        print_error("API Key 未填写，退出。")
         sys.exit(1)
 
     _init_platform(config)
-    print("[gateway] daemon 已就绪，启动交互式 CLI...")
+    print_info("daemon 已就绪，启动交互式 CLI...")
     _run_repl(config)
 
 
@@ -413,15 +463,15 @@ def run_model(args: argparse.Namespace) -> None:
 
     config = load_config()
     if not is_config_complete(config):
-        print("Lamix 未配置，将进行首次配置。\n")
+        print_info("Lamix 未配置，将进行首次配置。\n")
     try:
         run_setup_wizard(title="模型配置 - 重新选择 LLM 供应商和模型")
     except (KeyboardInterrupt, EOFError):
-        print("\n配置已取消。")
+        print_info("配置已取消。")
         return
     except SystemExit:
         return
-    print("模型配置完成。若 daemon 正在运行，配置将在 30 秒内自动热重载生效。")
+    print_success("模型配置完成。若 daemon 正在运行，配置将在 30 秒内自动热重载生效。")
 
 
 def run_update(args: argparse.Namespace) -> None:
@@ -439,171 +489,155 @@ def run_update(args: argparse.Namespace) -> None:
     from pathlib import Path
 
     project_root = Path(__file__).resolve().parent.parent
-    print("正在从 GitHub 拉取最新代码...")
+    print_info("正在从 GitHub 拉取最新代码...")
     try:
         result = subprocess.run(
             ["git", "pull"], cwd=str(project_root),
             capture_output=True, text=True, check=True,
         )
-        stdout, stderr = result.stdout.strip(), result.stderr.strip()
-        if stdout:
-            print(stdout)
-        if stderr:
-            print(stderr)
+        print_success(result.stdout.strip() or "代码已更新")
     except subprocess.CalledProcessError as e:
-        print(f"Git 拉取失败: {e}")
-        return
+        print_error(f"git pull 失败: {e.stderr}")
+        sys.exit(1)
     except FileNotFoundError:
-        print("Git 未安装或未在 PATH 中。请手动执行 git pull 更新代码。")
-        return
+        print_error("未找到 git 命令，请确保已安装 Git。")
+        sys.exit(1)
 
-    # 检测 daemon 是否在运行，尝试优雅重启
-    daemon_pid_path = Path.home() / ".lamix" / "logs" / "daemon.pid"
-    if daemon_pid_path.exists():
+    # 重启 daemon
+    print_info("正在重启 daemon...")
+    pid_path = Path.home() / ".lamix" / "logs" / "daemon.pid"
+    if pid_path.exists():
         try:
-            pid = int(daemon_pid_path.read_text().strip())
+            pid = int(pid_path.read_text().strip())
             os.kill(pid, signal.SIGTERM)
-            print(f"已向 daemon (PID={pid}) 发送 SIGTERM，watchdog 将自动重启。")
-        except ProcessLookupError:
-            print("daemon 进程已不存在，watchdog 会自动拉起。")
-        except Exception as exc:
-            print(f"检测到 daemon 在运行，但发送信号失败 ({exc})。请手动重启 daemon。")
-    else:
-        print("未检测到运行中的 daemon。如需后台运行，请执行 lamix gateway。")
+        except (ProcessLookupError, ValueError, PermissionError):
+            pass
+
+    print_success("更新完成，请重新运行 lamix。")
 
 
 def run_config(args: argparse.Namespace) -> None:
     """'lamix config' 子命令：显示当前配置。"""
+    from src.cli.styled import print_table, C
+    from src.core.config import load_config
+
     config = load_config()
-    if not is_config_complete(config):
-        print("Lamix 未配置，请先运行 lamix cli 进入交互模式完成配置。")
-        sys.exit(1)
-
-    _init_platform(config)
-
-    mgr = get_session_manager(config)
-    session = mgr.get_or_create("cli", "default")
-    session.agent.progress_callback = _cli_progress_callback
-    session.partial_sender = _cli_partial_sender
-    result = session.handle_input("/config")
-    if result.reply:
-        print(result.reply)
-
-
-# ── 帮助文本 ──────────────────────────────────────────────
-
-HELP_TEXT = textwrap.dedent("""\
-    usage: lamix <command> [options]
-
-    Lamix - 自更新的 AI Agent daemon
-
-    Commands:
-      cli       启动交互式 CLI（含 daemon）
-      gateway   仅启动 daemon（后台常驻）
-      model     模型管理（重新配置 LLM）
-      update    自更新（源码: git pull / Windows exe: 下载更新）
-      config    显示当前配置
-
-    Options:
-      -V, --version  显示版本号
-      -h, --help     显示帮助
-""")
-
-
-# ── 入口 ──────────────────────────────────────────────────
-
-def main() -> None:
-    """顶层命令分发器入口。"""
-    parser = argparse.ArgumentParser(
-        prog="lamix",
-        description="Lamix - 自更新的 AI Agent daemon",
-        add_help=True,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument(
-        "-V", "--version", action="version",
-        version=f"lamix {_get_version()}",
-    )
-
-    subparsers = parser.add_subparsers(dest="command", title="commands")
-
-    # ── cli ───────────────────────────────────────────────
-    cli_parser = subparsers.add_parser(
-        "cli", help="启动交互式 CLI（含 daemon）",
-    )
-    cli_parser.add_argument(
-        "query", nargs="?", default=None,
-        help="直接对话内容（单条查询模式）",
-    )
-    cli_parser.add_argument(
-        "-c", dest="query_c", default=None, metavar="QUERY",
-        help="直接对话内容（显式指定）",
-    )
-    cli_parser.add_argument(
-        "--memory", nargs="+", metavar="SUBCMD",
-        help="执行 memory 子命令，如 --memory show",
-    )
-    cli_parser.add_argument(
-        "--skills", nargs="+", metavar="SUBCMD",
-        help="执行 skills 子命令，如 --skills list",
-    )
-    cli_parser.add_argument(
-        "--feishu", nargs="+", metavar="SUBCMD",
-        help="执行 feishu 子命令",
-    )
-    cli_parser.add_argument(
-        "--update", nargs="+", metavar="SUBCMD",
-        help="执行 update 子命令",
-    )
-    cli_parser.add_argument(
-        "--help-cmd", action="store_true", default=False, dest="help_cmd",
-        help="显示可用命令帮助",
-    )
-    cli_parser.set_defaults(func=run_cli)
-
-    # ── gateway ───────────────────────────────────────────
-    gw_parser = subparsers.add_parser(
-        "gateway", help="仅启动 daemon（后台常驻）",
-    )
-    gw_parser.set_defaults(func=run_gateway)
-
-    # ── model ─────────────────────────────────────────────
-    model_parser = subparsers.add_parser(
-        "model", help="重新配置 LLM 模型",
-    )
-    model_parser.set_defaults(func=run_model)
-
-    # ── update ────────────────────────────────────────────
-    update_parser = subparsers.add_parser(
-        "update", help="自更新（源码: git pull / Windows exe: 下载更新并重启）",
-    )
-    update_parser.set_defaults(func=run_update)
-
-    # ── config ────────────────────────────────────────────
-    config_parser = subparsers.add_parser(
-        "config", help="显示当前配置",
-    )
-    config_parser.set_defaults(func=run_config)
-
-    args = parser.parse_args()
-
-    if args.command is None:
-        # PyInstaller 打包的 exe（Windows）：无参数时直接启动 CLI
-        if getattr(sys, "frozen", False):
-            # 构造 cli 子命令的默认参数
-            cli_args = argparse.Namespace(
-                command="cli",
-                query=None, query_c=None,
-                memory=None, skills=None, feishu=None, update=None,
-                help_cmd=False, func=run_cli,
-            )
-            run_cli(cli_args)
-            return
-        # 开发环境/其他系统：显示帮助
-        parser.print_help()
+    if not config:
+        print_warning("未找到配置文件，请先运行 lamix cli 完成配置。")
         return
 
-    args.func(args)
+    # 基本配置
+    basic_info = [
+        ["项目", "值"],
+        ["API 供应商", config.get("provider", "unknown")],
+        ["模型", config.get("model", "unknown")],
+        ["API Base URL", config.get("api_base", "-")],
+    ]
+    print_table("📋 基本配置", basic_info[0], basic_info[1:])
+
+    # 飞书配置
+    feishu = config.get("feishu", {})
+    if feishu.get("enabled"):
+        feishu_info = [
+            ["项目", "值"],
+            ["启用", "✓"],
+            ["App ID", feishu.get("app_id", "-")[:20] + "..." if len(feishu.get("app_id", "")) > 20 else feishu.get("app_id", "-")],
+        ]
+        print_table("📱 飞书配置", feishu_info[0], feishu_info[1:])
+    else:
+        print_warning("飞书未配置（使用 --feishu 参数启用）")
+
+    # 目录信息
+    print_info(f"数据目录: {LAMIX_DIR}")
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="lamix",
+        description="一起认识这个世界的 AI 伙计",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""\
+            示例:
+              lamix cli                    # 启动交互式 CLI
+              lamix cli 你好                # 单次对话
+              lamix gateway                # 仅启动 daemon
+              lamix config                 # 显示配置
+              lamix -V                     # 显示版本号
+
+            首次运行会自动引导配置。
+        """),
+    )
+    parser.add_argument("-V", "--version", action="version", version=f"lamix {_get_version()}")
+
+    subparsers = parser.add_subparsers(dest="command", title="子命令", description="可用子命令")
+
+    # lamix cli
+    cli_parser = subparsers.add_parser("cli", help="启动交互式 CLI（默认模式）")
+    cli_parser.add_argument("query", nargs="*", help="直接执行的查询")
+    cli_parser.add_argument("-c", dest="query_c", help="单条查询（内部使用）")
+    cli_parser.add_argument("--help-cmd", action="store_true", help="显示帮助")
+    cli_parser.add_argument("--memory", nargs="*", help="查看/操作记忆")
+    cli_parser.add_argument("--skills", nargs="*", help="查看/操作技能")
+    cli_parser.add_argument("--feishu", nargs="*", help="飞书命令")
+    cli_parser.add_argument("--update", nargs="*", help="自更新命令")
+
+    # lamix gateway
+    gateway_parser = subparsers.add_parser("gateway", help="仅启动 daemon")
+    gateway_parser.add_argument(
+        "-p", "--predicate",
+        default="",
+        help="控制选项，逗号分隔: no-feishu, no-repl, no-sandbox"
+    )
+
+    # lamix model
+    model_parser = subparsers.add_parser("model", help="重新配置 LLM 模型")
+
+    # lamix update
+    update_parser = subparsers.add_parser("update", help="检查并执行自更新")
+
+    # lamix config
+    config_parser = subparsers.add_parser("config", help="显示当前配置")
+
+    return parser
+
+
+def main() -> None:
+    parser = _build_parser()
+    args = parser.parse_args()
+
+    # 无子命令：Windows exe 或开发环境行为
+    if args.command is None:
+        _is_frozen = getattr(sys, "frozen", False)
+
+        # Windows exe 双击：无参数直接进 CLI
+        if _is_frozen and sys.platform == "win32":
+            config = load_config()
+            if not is_config_complete(config):
+                try:
+                    config = run_setup_wizard()
+                except (KeyboardInterrupt, EOFError):
+                    sys.exit(0)
+                if not is_config_complete(config):
+                    sys.exit(1)
+            _init_platform(config)
+            _ensure_daemon_running()
+            _run_repl(config)
+        else:
+            # macOS/Linux 开发环境：显示帮助
+            parser.print_help()
+        return
+
+    # 分发子命令
+    if args.command == "cli":
+        run_cli(args)
+    elif args.command == "gateway":
+        run_gateway(args)
+    elif args.command == "model":
+        run_model(args)
+    elif args.command == "update":
+        run_update(args)
+    elif args.command == "config":
+        run_config(args)
 
 
 if __name__ == "__main__":

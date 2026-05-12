@@ -19,6 +19,7 @@ dependencies = [
     "pyautogui>=0.9.54",
     "Pillow>=10.0.0",
     "certifi>=2023.7.22",
+    "rich>=13.0.0",
 ]
 
 [project.optional-dependencies]
