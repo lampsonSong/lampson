@@ -76,7 +76,7 @@ PROVIDER_PRESETS = {
     },
     "2": {
         "name": "智谱 GLM",
-        "base_url": "https://api.deepseek.com/",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4/",
         "models": ["glm-5.1", "glm-5-turbo", "glm-4-plus"],
         "default_model": "glm-5.1",
         "key_hint": "在 open.bigmodel.cn 获取",
