@@ -35,12 +35,12 @@ from src.core.session_manager import get_session_manager
 from src.memory import session_store
 
 # 导入 CLI 样式和补全模块
-from src.cli.styled import (
+from src.cli_ui.styled import (
     C, print_bot, print_command, print_info, print_success,
     print_warning, print_error, print_divider, print_banner,
     create_progress,
 )
-from src.cli.completion import LamixCompleter, create_key_bindings
+from src.cli_ui.completion import LamixCompleter, create_key_bindings
 
 PROMPT_STYLE = Style.from_dict({
     "prompt": "ansigreen bold",
@@ -59,7 +59,7 @@ def _get_version() -> str:
 
 def _cli_partial_sender(text: str) -> None:
     """CLI 下 compaction 等进度文案即时打印。"""
-    from src.cli.styled import console
+    from src.cli_ui.styled import console
     console.print(f"[dim]{text}[/dim]", end="", flush=True)
 
 
@@ -71,7 +71,7 @@ def _cli_progress_callback(event: dict) -> None:
     args_preview = event.get("args_preview", "")
     result_preview = event.get("result_preview", "")
     round_num = event.get("round", "?")
-    from src.cli.styled import print_tool, C
+    from src.cli_ui.styled import print_tool, C
     print_tool(f"[{C.TOOL}]  [工具 {round_num}] {tool}({args_preview}) → {result_preview}")
 
 
@@ -156,7 +156,7 @@ def _run_repl(config: dict) -> None:
                 continue
 
             # 打印用户输入（带样式）
-            from src.cli.styled import console
+            from src.cli_ui.styled import console
             console.print(f"[{C.USER_INPUT}]{user_input}[/{C.USER_INPUT}]")
 
             result = session.handle_input(user_input)
@@ -518,7 +518,7 @@ def run_update(args: argparse.Namespace) -> None:
 
 def run_config(args: argparse.Namespace) -> None:
     """'lamix config' 子命令：显示当前配置。"""
-    from src.cli.styled import print_table, C
+    from src.cli_ui.styled import print_table, C
     from src.core.config import load_config
 
     config = load_config()
