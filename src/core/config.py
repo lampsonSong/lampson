@@ -75,18 +75,18 @@ PROVIDER_PRESETS = {
         "key_hint": "在 platform.deepseek.com 获取",
     },
     "2": {
-        "name": "MiniMax",
-        "base_url": "https://api.minimaxi.com/v1/",
-        "models": ["MiniMax-M2.5", "MiniMax-M2.7-highspeed"],
-        "default_model": "MiniMax-M2.5",
-        "key_hint": "在 platform.minimaxi.com 获取",
-    },
-    "3": {
         "name": "智谱 GLM",
         "base_url": "https://api.deepseek.com/",
         "models": ["glm-5.1", "glm-5-turbo", "glm-4-plus"],
         "default_model": "glm-5.1",
         "key_hint": "在 open.bigmodel.cn 获取",
+    },
+    "3": {
+        "name": "MiniMax",
+        "base_url": "https://api.minimaxi.com/v1/",
+        "models": ["MiniMax-M2.5", "MiniMax-M2.7-highspeed"],
+        "default_model": "MiniMax-M2.5",
+        "key_hint": "在 platform.minimaxi.com 获取",
     },
 }
 
