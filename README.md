@@ -29,159 +29,60 @@ Lamix 把这些能力拆成三层：
 <details>
 <summary><strong>架构</strong></summary>
 
-### 整体架构
-
-```mermaid
-graph TB
-    subgraph 用户入口
-        FEISHU[飞书 WebSocket]
-        CLI[CLI REPL]
-    end
-
-    subgraph 平台层
-        GW[消息网关<br/>platforms/manager.py]
-        BG[后台任务管理<br/>platforms/background.py]
-    end
-
-    subgraph 会话层
-        SM[SessionManager<br/>按渠道隔离]
-        SS[Session<br/>命令路由 + 生命周期]
-    end
-
-    subgraph Agent 核心
-        AGENT[Agent<br/>LLM 主循环 + 工具分发]
-        PB[PromptBuilder<br/>5 层 system prompt]
-        PLAN[Planning<br/>Planner + Executor]
-        COMP[Compaction V2<br/>轮次分段压缩]
-    end
-
-    subgraph LLM 层
-        ADAPTER[模型适配层<br/>OpenAI / MiniMax]
-        LLM[LLMClient<br/>消息管理 + API 调用]
-    end
-
-    subgraph 工具层
-        SHELL[shell]
-        SEARCH[search / file_read / file_write]
-        FEISHU_TOOL[feishu_send / feishu_read]
-        SKILL_TOOL[skill / info / project_context]
-        DESKTOP[desktop_* 截图/点击/输入]
-        VISION[vision_analyze]
-        WEB[web_search]
-        SCHED[task_schedule / task_list / task_cancel]
-        LEARNED[learned_modules<br/>自学习工具]
-    end
-
-    subgraph 知识系统
-        SKILLS[Skills<br/>可复用工作流]
-        PROJECTS[Projects<br/>项目上下文]
-        INFO[Info<br/>通用知识]
-        MEMORY[Memory<br/>MEMORY.md]
-        INDEX[Indexer<br/>skills.jsonl / projects.jsonl]
-    end
-
-    subgraph 持久化
-        SESSIONS[Session Store<br/>JSONL 会话记录]
-        REFLECT[Reflection<br/>反思沉淀]
-        AUDIT[Self Audit<br/>知识生命周期]
-    end
-
-    subgraph 进程管理
-        DAEMON[Daemon<br/>后台主进程]
-        WATCHDOG[Watchdog<br/>看门狗]
-        HEARTBEAT[Heartbeat<br/>心跳机制]
-    end
-
-    FEISHU & CLI --> GW
-    GW --> SM --> SS --> AGENT
-    SS --> BG
-    AGENT --> PB & PLAN & COMP
-    AGENT --> ADAPTER --> LLM
-    AGENT --> SHELL & SEARCH & FEISHU_TOOL & SKILL_TOOL & DESKTOP & VISION & WEB & SCHED & LEARNED
-    PB --> SKILLS & PROJECTS & INFO & MEMORY & INDEX
-    SKILL_TOOL --> INDEX
-    AGENT --> REFLECT --> SKILLS & PROJECTS & INFO
-    AUDIT --> SKILLS & PROJECTS & INFO
-    AGENT --> SESSIONS
-    COMP --> LLM
-    DAEMON --> GW & HEARTBEAT & AUDIT
-    WATCHDOG --> DAEMON
-```
-
 ### 核心流程
 
 ```mermaid
-sequenceDiagram
-    participant U as 用户（飞书/CLI）
-    participant GW as 消息网关
-    participant SM as SessionManager
-    participant PB as PromptBuilder
-    participant A as Agent
-    participant LLM as LLM
-    participant T as 工具层
-
-    U->>GW: 发送消息
-    GW->>SM: 路由到对应 Session
-    SM->>A: handle_input()
-    
-    alt 命令（以/开头）
-        A-->>U: 直接处理并返回
-    else 自然语言
-        A->>PB: 构建 system prompt
-        Note over PB: L1 Identity → L2 Tools+Skills<br/>→ L3 Projects → L4 Model → L5 Channel
-        PB-->>A: 完整 system prompt
-        A->>LLM: 发送消息
-        LLM-->>A: 回复或 tool_calls
-        
-        loop 工具循环（最多 30 轮）
-            alt 有 tool_calls
-                A->>T: 执行工具
-                T-->>A: 工具结果
-                A->>LLM: 继续对话
-                LLM-->>A: 回复或 tool_calls
-            else 纯文字回复
-                A-->>GW: 回复
-                GW-->>U: 推送
-            end
-        end
-        
-        A->>A: maybe_compact()
-        Note over A: Token >= 90% 时触发<br/>轮次分段压缩（策略A/B）
-    end
+graph LR
+    U[飞书 / CLI] -->|消息| GW[消息网关]
+    GW --> PB[Prompt Builder]
+    PB -->|L1 Identity → L2 Tools → L3 Projects → L4 Model → L5 Channel| LLM[LLM]
+    LLM -->|tool_calls| T[工具层]
+    T --> LLM
+    LLM -->|回复| GW
+    GW --> U
 ```
 
-### 模块职责
+### 自学习闭环
 
-| 层 | 模块 | 文件 | 职责 |
-|------|------|------|------|
-| **进程** | Daemon | `src/daemon.py` | 后台主进程，启动网关 + 心跳 + 定时审计 |
-| | Watchdog | `src/watchdog.py` | 独立看门狗，监控 daemon 存活并自动重启 |
-| **平台** | 消息网关 | `src/platforms/manager.py` | 统一消息入口，路由到 SessionManager |
-| | 飞书 Adapter | `src/platforms/adapters/feishu.py` | WebSocket 长连接，消息收发 |
-| | CLI Adapter | `src/platforms/adapters/cli.py` | 终端 REPL |
-| | 后台任务 | `src/platforms/background.py` | 独立 Agent 实例，完成后推送结果 |
-| **会话** | SessionManager | `src/core/session_manager.py` | 按 channel+sender_id 隔离，idle 超时重置 |
-| | Session | `src/core/session.py` | Agent 生命周期 + 命令路由 + 压缩触发 |
-| **Agent** | Agent | `src/core/agent.py` | LLM 主循环，工具分发，规划执行，fallback |
-| | PromptBuilder | `src/core/prompt_builder.py` | 5 层分层 system prompt（L1-L5） |
-| | Planning | `src/planning/` | Planner + Executor + Plan 状态机 |
-| | Compaction | `src/core/compaction.py` | 轮次分段压缩：split → 策略 A/B → 摘要 |
-| **LLM** | LLMClient | `src/core/llm.py` | OpenAI SDK 封装，消息管理 |
-| | Adapters | `src/core/adapters/` | 多模型适配（OpenAI 兼容 / MiniMax） |
-| **工具** | Tools | `src/core/tools.py` | 工具注册表 + dispatch |
-| | Shell | `src/tools/shell.py` | 命令执行（危险命令拦截） |
-| | 搜索 | `src/tools/search.py` | ripgrep 文件/内容搜索 |
-| | 文件 | `src/tools/fileops.py` | 文件读写 |
-| | 桌面 | `src/tools/desktop.py` | 截图、鼠标键盘、UI 元素查询 |
-| | 视觉 | `src/tools/vision.py` | 截图 + 视觉模型分析 |
-| | Web | `src/tools/web.py` | 网页搜索 |
-| | 定时任务 | `src/tools/task_scheduler_tool.py` | 任务注册/查看/取消 |
-| | 自学习 | `src/tools/learned_modules.py` | 运行时自动注册的定制工具 |
-| **知识** | Memory | `src/memory/manager.py` | MEMORY.md 读写（load/add/search/forget） |
-| | Session Store | `src/memory/session_store.py` | JSONL 会话持久化 |
-| | Indexer | `src/core/indexer.py` | SkillIndex / ProjectIndex，增量构建 |
-| | Reflection | `src/core/reflection.py` | 反思沉淀（skill/project create/update） |
-| | Self Audit | `src/core/self_audit.py` | 定期扫描知识健康状态，自动修复/归档 |
+```mermaid
+graph TB
+    EXEC[执行任务] --> JUDGE{值得沉淀？}
+    JUDGE -->|可复用工作流| SKILL[Skill]
+    JUDGE -->|通用知识| INFO[Info]
+    JUDGE -->|项目信息| PROJ[Project]
+    JUDGE -->|固定模式| CODE[Learned Module]
+    JUDGE -->|不需要| END[结束]
+    SKILL & INFO & PROJ --> RELOAD[下次 Prompt 自动加载]
+    CODE --> REG[下次启动自动注册为工具]
+```
+
+Lamix 不是一个用完即走的聊天机器人——它有完整的**自学习闭环**：
+
+- **Skills**：把反复出现的任务标准化成可复用工作流。下次遇到类似问题自动加载，不用从头教
+- **Info / Projects**：通用知识和项目上下文分别归档，按需注入 prompt
+- **Learned Modules**：检测到固定调用模式后，Lamix 会自动生成 Python 工具模块，下次启动直接注册为原生工具——从"用工具"进化到"造工具"
+- **Reflection**：每次任务完成后自主反思，判断有没有值得记住的东西。被用户纠正的错误、过时的方案同样会触发更新
+- **Self Audit**：每天凌晨自动扫描知识库健康状态，清理过时内容，防止记忆变成负担
+
+### 安全机制
+
+| 层 | 机制 | 说明 |
+|------|------|------|
+| **Shell 拦截** | 危险命令黑名单 | `rm -rf /`、`mkfs`、`dd of=/dev` 等命令执行前拦截确认 |
+| **自更新保护** | 保护文件清单 | `agent.py`、`llm.py`、`cli.py` 等核心文件在自更新时不可覆盖 |
+| **自更新回滚** | git 分支管理 | 每次自更新创建独立分支，`/update rollback` 一键回退 |
+| **上下文保护** | 紧急截断 | Compaction 后仍超阈值时只保留最近 2 轮，防止 API 400 导致会话崩溃 |
+| **配置安全** | 热重载不丢密码 | 改配置用 patch 只改目标行，避免 yaml.dump 把 `***` 写入磁盘覆盖真实密钥 |
+| **进程守护** | Watchdog + 心跳 | 独立看门狗进程监控 daemon，崩溃自动重启，通过飞书通知用户 |
+| **知识归档** | 软删除 | 过期知识移入 `archived/` 而非直接删除，可恢复 |
+
+| 组件 | 说明 |
+|------|------|
+| 消息网关 | 飞书 WebSocket + CLI，接收消息、分发回复 |
+| Prompt Builder | 5 层分层构建 system prompt |
+| Agent 核心 | Tool loop、轮次分段压缩（Compaction V2）、反思沉淀 |
+| 知识系统 | Skills + Info + Projects + Learned Modules |
+| 进程守护 | Watchdog + Daemon，自动重启 |
 
 </details>
 
