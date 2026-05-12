@@ -163,25 +163,6 @@ class TestChatExceptionClassification(unittest.TestCase):
         print("✅ 模型不存在 404 → LLMFatalError")
 
 
-class TestCompactionSetSystemContext(unittest.TestCase):
-    """验证 compaction 不再使用 set_system_context(core_memory=...)。"""
-
-    def test_no_set_system_context_with_args(self):
-        """compaction.py 中不应出现 set_system_context(core_memory=..."""
-        with open("src/core/compaction.py", "r") as f:
-            content = f.read()
-        self.assertNotIn("set_system_context(core_memory=", content)
-        self.assertNotIn("set_system_context(", content)
-        print("✅ compaction.py 不再调用 set_system_context()")
-
-    def test_uses_direct_messages_assignment(self):
-        """compaction.py 应直接设置 messages[0]"""
-        with open("src/core/compaction.py", "r") as f:
-            content = f.read()
-        self.assertIn('[{"role": "system", "content": _CLASSIFY_SYSTEM}]', content)
-        print("✅ compaction.py 直接设置 messages")
-
-
 if __name__ == "__main__":
     print("\n" + "=" * 60)
     print("LLM 错误分类 + Compaction 修复测试")

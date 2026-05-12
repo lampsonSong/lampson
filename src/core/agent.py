@@ -787,7 +787,7 @@ class Agent:
         estimated_tokens = self._estimate_context_tokens()
 
         try:
-            return apply_compaction(
+            result = apply_compaction(
                 agent_llm=self.llm,
                 config=self._compaction_config,
                 estimated_tokens=estimated_tokens,
@@ -800,6 +800,12 @@ class Agent:
         except Exception as e:
             logger.warning(f"压缩异常: {e}")
             return None
+
+        # 压缩成功后重置 prompt token 计数，避免下次 _estimate_context_tokens 返回旧值
+        if result is not None and result.success:
+            self.last_prompt_tokens = 0
+
+        return result
 
     def force_compact(
         self,
@@ -830,7 +836,7 @@ class Agent:
                 return None
 
             try:
-                return apply_compaction(
+                result = apply_compaction(
                     agent_llm=self.llm,
                     config=self._compaction_config,
                     estimated_tokens=0,
@@ -844,6 +850,12 @@ class Agent:
             except Exception as e:
                 logger.warning(f"手动压缩异常: {e}")
                 return None
+
+            # 压缩成功后重置 prompt token 计数
+            if result is not None and result.success:
+                self.last_prompt_tokens = 0
+
+            return result
         finally:
             self._compaction_lock.release()
 
