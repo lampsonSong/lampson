@@ -308,7 +308,7 @@ def reflect_and_learn(
 
     try:
         resp = llm_client.client.chat.completions.create(
-            model=getattr(llm_client, "model", "deepseek-v4-flash"),
+            model=llm_client.model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
             max_tokens=2048,

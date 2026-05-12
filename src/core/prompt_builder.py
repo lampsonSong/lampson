@@ -468,14 +468,13 @@ def _notify_user_md_oversize(length: int) -> None:
 
 def build_model_guidance(model: str) -> list[str]:
     """根据模型类型返回对应的行为指引。"""
-    lower = model.lower()
     layers = []
 
-    if "deepseek" in lower:
-        layers.append(
-            "你正在使用 DeepSeek 模型。请使用工具调用（tool_calls）完成任务，"
-            "不要尝试用文本描述工具调用。"
-        )
+    # 所有现代模型都支持 tool_calls，统一告知使用工具调用
+    layers.append(
+        "请使用工具调用（tool_calls）完成任务，"
+        "不要尝试用文本描述工具调用。"
+    )
 
     return layers
 

@@ -74,7 +74,7 @@ class TaskCollector:
 
     使用方式：
         collector = TaskCollector()
-        collector.start(model="deepseek-v4-flash", channel="feishu", ...)
+        collector.start(model="<your-model>", channel="feishu", ...)
         # ... 任务执行中 ...
         collector.record_tool_call()
         collector.finish(success=True)

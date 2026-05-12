@@ -14,6 +14,8 @@ safe_mode.py — Lamix 安全恢复入口
 import json
 import os
 import subprocess
+
+from src.core.config import DEFAULT_CONFIG
 import sys
 import tarfile
 import tempfile
@@ -166,8 +168,8 @@ def process_chat(text: str, llm_config: dict) -> str:
         return "❌ OpenAI SDK 未安装。请先安装: pip install openai"
 
     api_key = llm_config.get("api_key", "")
-    base_url = llm_config.get("base_url", "https://api.deepseek.com/")
-    model = llm_config.get("model", "deepseek-v4-flash")
+    base_url = llm_config.get("base_url", DEFAULT_CONFIG["llm"]["base_url"])
+    model = llm_config.get("model", DEFAULT_CONFIG["llm"]["model"])
 
     if not base_url:
         return "❌ LLM 未配置 base_url"
