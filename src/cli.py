@@ -4,7 +4,7 @@ lamix              → 显示帮助（macOS/开发环境）/ 直接启动 CLI（
 lamix cli [query]  → 交互式 CLI（启动 daemon + REPL）
 lamix gateway      → 仅启动 daemon
 lamix model        → 模型管理（占位）
-lamix update       → 自更新（占位）
+lamix update       → 自更新（源码: git pull / Windows exe: 下载新版本）
 lamix config       → 显示当前配置
 lamix -V/--version → 版本号
 
@@ -239,115 +239,77 @@ def _ensure_daemon_running() -> None:
 
     try:
         if sys.platform == "win32" and not _is_frozen:
-            DETACHED_PROCESS = 0x00000008
-            CREATE_NEW_PROCESS_GROUP = 0x00000200
-            with open(daemon_log, "a", encoding="utf-8") as log_file:
-                subprocess.Popen(
-                    daemon_cmd,
-                    stdout=log_file,
-                    stderr=log_file,
-                    creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
-                    cwd=str(Path(__file__).resolve().parent.parent),
-                )
-        else:
-            # frozen exe (PyInstaller) 或 macOS
-            kwargs = {}
-            if not _is_frozen and sys.platform != "win32":
-                kwargs["start_new_session"] = True
             subprocess.Popen(
                 daemon_cmd,
                 stdout=open(daemon_log, "a"),
-                stderr=open(daemon_log, "a"),
-                cwd=str(Path(__file__).resolve().parent.parent),
-                **kwargs,
+                stderr=subprocess.STDOUT,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                close_fds=True,
             )
+        else:
+            subprocess.Popen(
+                daemon_cmd,
+                stdout=open(daemon_log, "a"),
+                stderr=subprocess.STDOUT,
+                close_fds=True,
+            )
+        import time
+        time.sleep(1)
         print("[cli] daemon 已在后台启动")
-
-        # Windows 上同时启动 watchdog（监控 daemon 崩溃时自动重启）
-        if sys.platform == "win32" and not getattr(sys, "frozen", False):
-            try:
-                _ensure_watchdog_on_windows()
-            except Exception as wd_e:
-                print(f"[cli] watchdog 启动失败: {wd_e}")
     except Exception as e:
-        print(f"[cli] daemon 启动失败: {e}")
+        print(f"[cli] 启动 daemon 失败: {e}")
 
 
 def _ensure_watchdog_on_windows() -> None:
-    """Windows 上启动 watchdog 进程（监控 daemon，崩溃时自动重启）。"""
+    """Windows 上确保 watchdog 在运行。"""
     import subprocess
     from pathlib import Path
 
-    log_dir = Path.home() / ".lamix" / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    watchdog_log = log_dir / "watchdog.log"
-    pid_path = log_dir / "watchdog.pid"
-
-    # 检查 watchdog 是否已在运行
-    if pid_path.exists():
+    watchdog_pid_path = Path.home() / ".lamix" / "logs" / "watchdog.pid"
+    if watchdog_pid_path.exists():
         try:
-            pid = int(pid_path.read_text().strip())
-            import ctypes
-            kernel32 = ctypes.windll.kernel32
-            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-            if handle:
-                kernel32.CloseHandle(handle)
-                return  # watchdog 已在运行
-        except (ValueError, OSError, AttributeError):
+            pid = int(watchdog_pid_path.read_text().strip())
+            os.kill(pid, 0)
+            return
+        except (ProcessLookupError, OSError, ValueError):
             pass
 
-    DETACHED_PROCESS = 0x00000008
+    # 启动 watchdog
     python_exe = sys.executable
-    pythonw = python_exe.replace("python.exe", "pythonw.exe")
-    if Path(pythonw).exists():
-        python_exe = pythonw
+    log_dir = Path.home() / ".lamix" / "logs"
+    watchdog_log = log_dir / "watchdog.log"
 
-    project_root = str(Path(__file__).resolve().parent.parent)
-
-    with open(watchdog_log, "a", encoding="utf-8") as f:
-        proc = subprocess.Popen(
+    try:
+        subprocess.Popen(
             [python_exe, "-m", "src.watchdog"],
-            stdout=f,
-            stderr=f,
-            creationflags=DETACHED_PROCESS,
-            cwd=project_root,
+            stdout=open(watchdog_log, "a"),
+            stderr=subprocess.STDOUT,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            close_fds=True,
         )
-
-    pid_path.write_text(str(proc.pid), encoding="utf-8")
-    print(f"[cli] watchdog 已启动 (PID={proc.pid})，daemon 崩溃时会自动重启")
-
-
-def _init_platform(config: dict, start_feishu: bool = True) -> None:
-    """初始化 PlatformManager（多平台网关 + 后台任务支持）。"""
-    import asyncio
-    import threading
-    from src.platforms.manager import PlatformManager
-    from src.platforms.adapters.cli import CliAdapter
-
-    pm = PlatformManager(config)
-    PlatformManager._instance = pm
-    _cli_loop = asyncio.new_event_loop()
-    pm._loop = _cli_loop
-    _cli_loop_thread = threading.Thread(target=_cli_loop.run_forever, daemon=True)
-    _cli_loop_thread.start()
-    pm.register(CliAdapter())
-
-    # 注册并启动飞书 adapter（仅当 daemon 未运行时）
-    if start_feishu:
-        feishu_cfg = config.get("feishu", {})
-        if feishu_cfg.get("app_id") and feishu_cfg.get("app_secret"):
-            from src.platforms.adapters.feishu import FeishuAdapter
-            feishu_adapter = FeishuAdapter({
-                "app_id": feishu_cfg["app_id"],
-                "app_secret": feishu_cfg["app_secret"],
-            })
-            pm.register(feishu_adapter)
-            feishu_adapter.start()
-            print("[cli] 飞书 adapter 已启动", flush=True)
+        import time
+        time.sleep(0.5)
+    except Exception as e:
+        print(f"[cli] 启动 watchdog 失败: {e}")
 
 
-# ── 子命令处理 ────────────────────────────────────────────
+def _handle_gateway_predicate(predicate: str, config: dict) -> None:
+    """处理 gateway 的谓词参数（如 --no-repl, --no-sandbox）。"""
+    actions = predicate.split(",")
+    feishu_enabled = "no-feishu" not in actions
+    repl_enabled = "no-repl" not in actions
+    sandbox_enabled = "no-sandbox" not in actions
+
+    if feishu_enabled and config.get("feishu", {}).get("enabled", False):
+        mgr = get_session_manager(config)
+        session = mgr.get_or_create("gateway", "default")
+        session.agent.progress_callback = _cli_progress_callback
+        session.partial_sender = _cli_partial_sender
+
+    if repl_enabled:
+        print("[gateway] 启动交互式 CLI...")
+        _run_repl(config)
+
 
 def run_cli(args: argparse.Namespace) -> None:
     """'lamix cli' 子命令：继承原 main() 的所有逻辑。"""
@@ -388,17 +350,22 @@ def run_cli(args: argparse.Namespace) -> None:
             print("API Key 未填写，无法启动。")
             sys.exit(1)
 
-    # daemon 已在运行时不再重复起飞书 adapter（daemon 负责）
-    _daemon_running = getattr(args, "_daemon_already_running", False)
-    _init_platform(config, start_feishu=not _daemon_running)
+    _init_platform(config)
 
-    # 非交互模式
-    if non_interactive_input is not None:
+    # 后台启动 daemon
+    _ensure_daemon_running()
+
+    # 单条查询模式
+    if non_interactive_input:
         mgr = get_session_manager(config)
         session = mgr.get_or_create("cli", "default")
         session.agent.progress_callback = _cli_progress_callback
         session.partial_sender = _cli_partial_sender
-        result = session.handle_input(non_interactive_input)
+
+        if is_slash_command:
+            result = session.handle_input(non_interactive_input)
+        else:
+            result = session.handle_input(non_interactive_input)
         if result.reply:
             print(result.reply)
         return
@@ -407,196 +374,43 @@ def run_cli(args: argparse.Namespace) -> None:
     _run_repl(config)
 
 
-def _register_launchd_services(python_exe: str, project_dir: str) -> None:
-    """生成并注册 macOS launchd 服务（gateway + watchdog）。"""
-    import plistlib
-    import subprocess
-    from pathlib import Path
-
-    log_dir = Path.home() / ".lamix" / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-
-    launch_agents = Path.home() / "Library" / "LaunchAgents"
-    launch_agents.mkdir(parents=True, exist_ok=True)
-
-    # 检测 nvm 的 node bin 路径，launchd 默认 PATH 找不到它
-    _node_bin = ""
-    _nvm_node = Path.home() / ".nvm" / "versions" / "node"
-    if _nvm_node.exists():
-        versions = sorted(_nvm_node.iterdir(), reverse=True)
-        for v in versions:
-            bin_dir = v / "bin"
-            if (bin_dir / "node").exists():
-                _node_bin = str(bin_dir)
-                break
-    _launchd_path = "/usr/bin:/bin:/usr/sbin:/sbin"
-    if _node_bin:
-        _launchd_path = f"{_node_bin}:{_launchd_path}"
-
-    gw_plist = {
-        "Label": "com.lamix.gateway",
-        "ProgramArguments": [python_exe, "-m", "src.daemon"],
-        "RunAtLoad": True,
-        "KeepAlive": True,
-        "WorkingDirectory": project_dir,
-        "StandardOutPath": str(log_dir / "launchd.log"),
-        "StandardErrorPath": str(log_dir / "launchd.err.log"),
-        "EnvironmentVariables": {
-            "TERM": "xterm-256color",
-            "PYTHONUNBUFFERED": "1",
-            "PATH": _launchd_path,
-        },
-    }
-
-    wd_plist = {
-        "Label": "com.lamix.watchdog",
-        "ProgramArguments": [python_exe, "-m", "src.watchdog"],
-        "RunAtLoad": True,
-        "KeepAlive": True,
-        "WorkingDirectory": project_dir,
-        "StandardOutPath": str(log_dir / "watchdog.log"),
-        "StandardErrorPath": str(log_dir / "watchdog.err.log"),
-        "EnvironmentVariables": {
-            "PYTHONUNBUFFERED": "1",
-            "PATH": _launchd_path,
-        },
-    }
-
-    gw_path = launch_agents / "com.lamix.gateway.plist"
-    wd_path = launch_agents / "com.lamix.watchdog.plist"
-
-    # 写入 plist
-    for path, data in [(gw_path, gw_plist), (wd_path, wd_plist)]:
-        with open(path, "wb") as f:
-            plistlib.dump(data, f)
-
-    # 先 unload（如果已注册，静默忽略失败）
-    for path in [wd_path, gw_path]:
-        subprocess.run(
-            ["launchctl", "unload", str(path)],
-            capture_output=True, timeout=10,
-        )
-
-    # load（watchdog 先，gateway 后）
-    for path in [wd_path, gw_path]:
-        result = subprocess.run(
-            ["launchctl", "load", "-w", str(path)],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode != 0:
-            print(f"[gateway] launchctl load {path.name} 失败: {result.stderr.strip()}")
-
-    print("[gateway] launchd 服务已注册 (daemon + watchdog)")
+def _init_platform(config: dict) -> None:
+    """初始化平台相关组件。"""
+    # 初始化飞书
+    feishu_config = config.get("feishu", {})
+    if feishu_config.get("enabled", False):
+        try:
+            from src.feishu.bot import get_feishu_bot
+            bot = get_feishu_bot(feishu_config)
+            import threading
+            threading.Thread(target=bot.start, daemon=True).start()
+        except Exception as e:
+            print(f"[cli] 飞书初始化失败: {e}")
 
 
 def run_gateway(args: argparse.Namespace) -> None:
-    """'lamix gateway' 子命令：后台启动 daemon，显示日志后守护运行。
-
-    macOS 上自动注册 launchd 服务（KeepAlive 自动重启 + watchdog 心跳监控）。
-    Windows 上后台启动 daemon + watchdog 双进程，watchdog 监控自动重启。
-    Linux 上直接在前台运行 daemon。
-    如果 LLM 未配置，先走安装引导再启动。
-    """
-    import subprocess
-    import time
-    from pathlib import Path
-
-    # 启动前检查配置，未配置则走安装引导
+    """'lamix gateway' 子命令：仅启动 daemon（后台常驻），启动 CLI。"""
     config = load_config()
     if not is_config_complete(config):
-        if not sys.stdin.isatty():
-            print("[gateway] LLM 未配置，但当前无交互终端（被 launchd 调用？），跳过引导。")
-            print("[gateway] 请手动运行 'lamix cli' 完成初始配置。")
-        else:
-            print("[gateway] LLM 未配置，启动安装引导...\n")
-            try:
-                config = run_setup_wizard()
-            except (KeyboardInterrupt, EOFError):
-                print("\n配置已取消，退出。")
-                return
-            if not is_config_complete(config):
-                print("API Key 未填写，无法启动。")
-                return
-            print("\n[gateway] 安装引导完成，启动 daemon...\n")
+        print("Lamix 未配置，将进行首次配置。\n")
+    try:
+        config = run_setup_wizard()
+    except (KeyboardInterrupt, EOFError):
+        print("\n配置已取消，退出。")
+        sys.exit(0)
+    if not is_config_complete(config):
+        print("API Key 未填写，退出。")
+        sys.exit(1)
 
-    if sys.platform == "darwin":
-        # macOS: 注册 launchd 服务（daemon + watchdog），自动管理生命周期
-        python_exe = sys.executable
-        project_dir = str(Path(__file__).resolve().parent.parent)
-        log_dir = Path.home() / ".lamix" / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        daemon_log = log_dir / "launchd.log"
-
-        _register_launchd_services(python_exe, project_dir)
-
-        # 等待 daemon 启动并显示日志
-        print("[gateway] 等待 daemon 启动...")
-        time.sleep(3)
-
-        if daemon_log.exists():
-            print("\n" + "=" * 50)
-            print("[gateway] 启动日志:")
-            print("=" * 50)
-            log_content = daemon_log.read_text(encoding="utf-8", errors="replace")
-            for line in log_content.split("\n")[-30:]:
-                if line.strip():
-                    print(line)
-            print("=" * 50)
-            print(f"\n[gateway] daemon 已在后台运行")
-            print(f"[gateway] 持续监控日志: tail -f {daemon_log}")
-            print("[gateway] 停止: launchctl bootout gui/$(id -u)/com.lamix.gateway")
-        else:
-            print("[gateway] daemon 启动完成，但日志文件未找到")
-    elif sys.platform == "win32":
-        # Windows: 后台启动 daemon + watchdog，watchdog 监控自动重启
-        DETACHED_PROCESS = 0x00000008
-        log_dir = Path.home() / ".lamix" / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        project_root = str(Path(__file__).resolve().parent.parent)
-
-        # 用 pythonw.exe 避免弹窗
-        python_exe = sys.executable
-        pythonw = python_exe.replace("python.exe", "pythonw.exe")
-        if Path(pythonw).exists():
-            python_exe = pythonw
-
-        # 启动 daemon
-        daemon_log = log_dir / "daemon.log"
-        with open(daemon_log, "a", encoding="utf-8") as f:
-            daemon_proc = subprocess.Popen(
-                [python_exe, "-m", "src.daemon"],
-                stdout=f,
-                stderr=f,
-                creationflags=DETACHED_PROCESS,
-                cwd=project_root,
-            )
-        print(f"[gateway] daemon 已启动 (PID={daemon_proc.pid})")
-
-        # 启动 watchdog
-        watchdog_log = log_dir / "watchdog.log"
-        watchdog_pid_path = log_dir / "watchdog.pid"
-        with open(watchdog_log, "a", encoding="utf-8") as f:
-            watchdog_proc = subprocess.Popen(
-                [python_exe, "-m", "src.watchdog"],
-                stdout=f,
-                stderr=f,
-                creationflags=DETACHED_PROCESS,
-                cwd=project_root,
-            )
-        watchdog_pid_path.write_text(str(watchdog_proc.pid), encoding="utf-8")
-        print(f"[gateway] watchdog 已启动 (PID={watchdog_proc.pid})")
-        print(f"[gateway] 日志目录: {log_dir}")
-    else:
-        # Linux: 直接在前台运行 daemon
-        import sys as _sys
-        _sys.argv = [_sys.argv[0]] if _sys.argv else ["lamix"]
-        from src.daemon import main as daemon_main
-        daemon_main()
+    _init_platform(config)
+    print("[gateway] daemon 已就绪，启动交互式 CLI...")
+    _run_repl(config)
 
 
 def run_model(args: argparse.Namespace) -> None:
     """'lamix model' 子命令：重新配置 LLM 模型。"""
-    print("进入模型配置向导...")
+    from src.core.config import load_config, is_config_complete, run_setup_wizard
+
     config = load_config()
     if not is_config_complete(config):
         print("Lamix 未配置，将进行首次配置。\n")
@@ -611,7 +425,14 @@ def run_model(args: argparse.Namespace) -> None:
 
 
 def run_update(args: argparse.Namespace) -> None:
-    """'lamix update' 子命令：从 GitHub 拉取最新代码并重启 daemon。"""
+    """从 GitHub 拉取最新代码/下载最新 exe 并重启。"""
+    # Windows exe 模式：走 exe 自更新
+    if getattr(sys, "frozen", False) and sys.platform == "win32":
+        from src.selfupdate.exe_updater import run_exe_update
+        result = run_exe_update()
+        print(result)
+        return
+
     import os
     import signal
     import subprocess
@@ -680,7 +501,7 @@ HELP_TEXT = textwrap.dedent("""\
       cli       启动交互式 CLI（含 daemon）
       gateway   仅启动 daemon（后台常驻）
       model     模型管理（重新配置 LLM）
-      update    自更新（拉取代码并重启）
+      update    自更新（源码: git pull / Windows exe: 下载更新）
       config    显示当前配置
 
     Options:
@@ -754,7 +575,7 @@ def main() -> None:
 
     # ── update ────────────────────────────────────────────
     update_parser = subparsers.add_parser(
-        "update", help="拉取代码并重启 daemon",
+        "update", help="自更新（源码: git pull / Windows exe: 下载更新并重启）",
     )
     update_parser.set_defaults(func=run_update)
 
