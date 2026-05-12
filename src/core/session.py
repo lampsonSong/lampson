@@ -65,8 +65,8 @@ HELP_TEXT = """\
   /update rollback               回滚自更新
   /update list                   列出自更新分支
   /metrics                       查看最近任务指标统计
-  /compaction                    手动触发上下文压缩
-  /contextsize                   查看当前上下文长度和占比
+  /compact                    手动触发上下文压缩
+  /context-size                   查看当前上下文长度和占比
   /self-audit                    立即触发自我审计
   /audit-report                  列出历史审计报告
   /audit-report <path>           查看指定审计报告详情
@@ -987,10 +987,10 @@ class Session:
         if command == "/metrics":
             return HandleResult(reply=format_summary(), is_command=True)
 
-        if command == "/compaction":
+        if command == "/compact":
             return self._handle_compaction()
 
-        if command == "/contextsize":
+        if command == "/context-size":
             return HandleResult(reply=self._handle_contextsize(), is_command=True)
 
         if command == "/self-audit":
