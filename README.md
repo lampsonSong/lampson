@@ -60,7 +60,7 @@ Lamix 不是一个用完即走的聊天机器人——它有完整的**自学习
 
 - **Skills**：把反复出现的任务标准化成可复用工作流。下次遇到类似问题自动加载，不用从头教
 - **Info / Projects**：通用知识和项目上下文分别归档，按需注入 prompt
-- **Learned Modules**：检测到固定调用模式后，Lamix 会自动生成 Python 工具模块，下次启动直接注册为原生工具——从"用工具"进化到"造工具"
+- **Skill Scripts**：检测到固定调用模式后，Lamix 会自动生成 Python 工具脚本（存放在 skills/*/scripts/ 下），下次启动直接注册为原生工具——从"用工具"进化到"造工具"
 - **Reflection**：每次任务完成后自主反思，判断有没有值得记住的东西。被用户纠正的错误、过时的方案同样会触发更新
 - **Self Audit**：每天凌晨自动扫描知识库健康状态，清理过时内容，防止记忆变成负担
 
@@ -81,7 +81,7 @@ Lamix 不是一个用完即走的聊天机器人——它有完整的**自学习
 | 消息网关 | 飞书 WebSocket + CLI，接收消息、分发回复 |
 | Prompt Builder | 5 层分层构建 system prompt |
 | Agent 核心 | Tool loop、轮次分段压缩（Compaction V2）、反思沉淀 |
-| 知识系统 | Skills + Info + Projects + Learned Modules |
+| 知识系统 | Skills + Info + Projects + Skill Scripts |
 | 进程守护 | Watchdog + Daemon，自动重启 |
 
 </details>

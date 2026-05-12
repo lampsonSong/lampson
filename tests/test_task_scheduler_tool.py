@@ -112,7 +112,7 @@ class TestListEmpty:
 
 
 class TestScheduleIntegration:
-    """集成测试：通过 mock learned_module 验证完整注册流程。"""
+    """集成测试：通过 mock skill_script 验证完整注册流程。"""
 
     def test_interval_schedule_success(self):
         """注册一个 interval 任务，验证返回成功。"""

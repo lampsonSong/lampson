@@ -3,7 +3,6 @@
 每次任务完成后，自动判断是否有值得持久化的知识：
 - 项目事实 → projects/<名>.md（新建或更新）
 - 新方法论 → skills/<名>/SKILL.md（新建或更新）
-- 可复用代码 → learned_modules/<名>.py（新建或更新）
 - 无价值 → 跳过
 """
 
@@ -83,9 +82,9 @@ REFLECT_TOOL_SCHEMA = {
         "name": "reflect_and_learn",
         "description": (
             "任务完成后反思沉淀知识。分析本轮对话内容，判断是否有值得持久化的知识"
-            "（skill、info、project、learned_module），并自动执行沉淀。"
+            "（skill、info、project），并自动执行沉淀。"
             "适用场景：(1) 任务完成后 (2) 激活了某个技能并发现可改进之处 "
-            "(3) 解决了复杂问题，过程中产生了可复用的方法或代码 "
+            "(3) 解决了复杂问题，过程中产生了可复用的方法 "
             "(4) 探索了新项目，发现了项目信息"
         ),
         "parameters": {
@@ -188,13 +187,10 @@ REFLECT_PROMPT = """你是一个知识管理助手。请分析这次任务执行
 ## 已有 Info
 {existing_info}
 
-## 已有自我学习模块
-{existing_modules}
-
 请只输出一个 JSON 对象，不要其他文字。字段说明：
 - "learnings": 数组。每项含：
-  - "type": "project_create" | "project_update" | "skill_create" | "skill_update" | "info_create" | "info_update" | "module_create" | "module_update"
-  - "target": 项目名、技能名、信息名或模块名（模块名用 snake_case）
+  - "type": "project_create" | "project_update" | "skill_create" | "skill_update" | "info_create" | "info_update"
+  - "target": 项目名、技能名或信息名
   - "reason": 一句话说明为什么值得记录
   - "content": 要写入的正文内容
 
@@ -205,8 +201,6 @@ REFLECT_PROMPT = """你是一个知识管理助手。请分析这次任务执行
 - skill_update: 执行过程中发现某个已有 skill 的步骤不够、有错误，需要修正或补充
 - info_create: 发现了通用的、项目无关的知识信息（如服务地址、工具用法、API文档），当前 info 中没有的
 - info_update: 已有 info 需要修正或补充
-- module_create: 发现了一段可复用的代码逻辑（如数据转换、日志解析、格式化、自动化脚本等），可作为独立 Python 模块沉淀。内容为完整的、可运行的 Python 代码
-- module_update: 现有模块的代码有 bug、可以优化、或需要新增功能。仅当已有 Modules 列表中有该模块时使用
 - 空数组: 简单查询、闲聊、或信息已经记录过
 
 注意：
@@ -214,12 +208,10 @@ REFLECT_PROMPT = """你是一个知识管理助手。请分析这次任务执行
 - skill 的 content 是方法论（通用步骤），不是具体答案
 - project_update 的 content 是增量信息，不是整个文件重写
 - info 的 content 是项目无关的通用知识（如服务地址、工具配置、API说明等）
-- module 的 content 是完整的、可运行的 Python 代码，禁止 import src 内部模块
 
 示例：
 {{"learnings": []}}
-{{"learnings": [{{"type": "project_create", "target": "hermes", "reason": "首次探索了 hermes 项目", "content": "源码路径: ~/.hermes/hermes-agent/\\n入口: hermes_cli.main:main"}}]}}
-{{"learnings": [{{"type": "module_create", "target": "log_parser", "reason": "连续手动写 awk 命令解析日志", "content": "# Log Parser\\n\\nTOOL_SCHEMA = {{\\n  'function': {{\\n    'name': 'learned_log_parser',\\n    'description': '解析日志文件，支持过滤级别和关键词',\\n    'parameters': {{\\n      'type': 'object',\\n      'properties': {{\\n        'path': {{'type': 'string', 'description': '日志文件路径'}},\\n        'level': {{'type': 'string', 'description': '日志级别，如 ERROR/WARN/INFO'}},\\n        'keyword': {{'type': 'string', 'description': '过滤关键词'}},\\n        'limit': {{'type': 'integer', 'description': '最多返回行数'}}\\n      }},\\n      'required': ['path']\\n    }}\\n  }}\\n}}\\n\\n\\ndef TOOL_RUNNER(params: dict) -> str:\\n    ...\\n"}}]}}"""
+{{"learnings": [{{"type": "project_create", "target": "hermes", "reason": "首次探索了 hermes 项目", "content": "源码路径: ~/.hermes/hermes-agent/\\n入口: hermes_cli.main:main"}}]}}"""
 
 
 # ── 是否需要反思（LLM 判断）─────────────────────────────────────────────────
@@ -290,7 +282,6 @@ def reflect_and_learn(
     existing_skills = _get_existing_skills_summary()
     existing_projects = _get_existing_projects_summary()
     existing_info = _get_existing_info_summary()
-    existing_modules = _get_existing_modules_summary()
 
     # 构建反思上下文
     extra_context = ""
@@ -313,7 +304,6 @@ def reflect_and_learn(
         existing_skills=existing_skills,
         existing_projects=existing_projects,
         existing_info=existing_info,
-        existing_modules=existing_modules,
     ) + extra_context
 
     try:
@@ -375,16 +365,6 @@ def execute_learnings(learnings: list[dict[str, Any]]) -> list[str]:
 
         elif ltype == "info_update":
             hint = _update_info(target, content, reason)
-            if hint:
-                hints.append(hint)
-
-        elif ltype == "module_create":
-            hint = _create_module(target, content, reason)
-            if hint:
-                hints.append(hint)
-
-        elif ltype == "module_update":
-            hint = _update_module(target, content, reason)
             if hint:
                 hints.append(hint)
 
@@ -571,79 +551,6 @@ def _update_skill(
     return f"已更新技能: {target}（{reason}）"
 
 
-def _create_module(target: str, content: str, reason: str) -> str | None:
-    """创建新的 learned module。"""
-    if not target or not content:
-        return None
-
-    safe_name = _sanitize_module_name(target)
-    if not safe_name:
-        logger.warning(f"模块名非法: {target}，跳过")
-        return None
-
-    MODULES_DIR = LAMIX_DIR / "learned_modules"
-    MODULES_DIR.mkdir(parents=True, exist_ok=True)
-    module_file = MODULES_DIR / f"{safe_name}.py"
-
-    if module_file.exists():
-        return _update_module(safe_name, content, reason)
-
-    if _contains_blocked_import(content):
-        logger.warning(f"模块 {target} 包含禁止的 import，跳过")
-        return None
-
-    module_file.write_text(content + "\n", encoding="utf-8")
-    logger.info(f"已创建模块: {safe_name} ({reason})")
-    return f"已创建模块: {safe_name}（{reason}）"
-
-
-def _update_module(target: str, content: str, reason: str) -> str | None:
-    """更新已有 learned module。"""
-    if not target or not content:
-        return None
-
-    safe_name = _sanitize_module_name(target)
-    if not safe_name:
-        return None
-
-    MODULES_DIR = LAMIX_DIR / "learned_modules"
-    module_file = MODULES_DIR / f"{safe_name}.py"
-
-    if not module_file.exists():
-        return _create_module(safe_name, content, reason)
-
-    if _contains_blocked_import(content):
-        logger.warning(f"模块 {target} 包含禁止的 import，跳过")
-        return None
-
-    module_file.write_text(content + "\n", encoding="utf-8")
-    logger.info(f"已更新模块: {safe_name} ({reason})")
-    return f"已更新模块: {safe_name}（{reason}）"
-
-
-# ── 辅助函数 ─────────────────────────────────────────────────────────────────
-
-
-def _sanitize_module_name(name: str) -> str:
-    """将名称转换为合法的 Python 模块名。"""
-    name = re.sub(r"[^a-zA-Z0-9_]", "_", name)
-    name = re.sub(r"^[^a-zA-Z]+", "", name)
-    return name[:64] or "learned_module"
-
-
-def _contains_blocked_import(code: str) -> bool:
-    """检查模块代码中是否包含禁止的 import。"""
-    BLOCKED_PREFIXES = ("from src", "import src")
-    for line in code.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("#"):
-            continue
-        for prefix in BLOCKED_PREFIXES:
-            if stripped.startswith(prefix):
-                return True
-    return False
-
-
 def _content_already_exists(existing: str, new_content: str) -> bool:
     """检查新内容是否已在现有 skill 中。"""
     stripped = new_content.strip()
@@ -686,18 +593,6 @@ def _get_existing_projects_summary() -> str:
         content = proj_file.read_text(encoding="utf-8")
         first_line = content.split("\n")[0].lstrip("# ").strip()
         lines.append(f"- {proj_file.stem}: {first_line}")
-    return "\n".join(lines) if lines else "(无)"
-def _get_existing_modules_summary() -> str:
-    """获取已有 learned_modules 列表摘要。"""
-    MODULES_DIR = LAMIX_DIR / "learned_modules"
-    if not MODULES_DIR.exists():
-        return "(无)"
-    lines = []
-    for mod_file in sorted(MODULES_DIR.glob("*.py")):
-        # 提取 docstring 或第一段注释
-        content = mod_file.read_text(encoding="utf-8")
-        desc = content.split('"""')[1].split("\n")[0].strip() if '"""' in content else content.split("\n")[0].lstrip("# ").strip()
-        lines.append(f"- {mod_file.stem}: {desc[:80]}")
     return "\n".join(lines) if lines else "(无)"
 
 

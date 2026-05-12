@@ -7,7 +7,7 @@
 
 支持两种执行方式（二选一）：
 - prompt: 自然语言提示，触发时注入 agent session 由 LLM 执行
-- module: 引用 learned_modules 下的 Python 模块
+- module: 引用 skills 下 scripts 目录中的 Python 模块
 
 示例：
   schedule(task_type="interval", interval_seconds=1800, prompt="检查ASR训练进度并发飞书报告")
@@ -30,7 +30,7 @@ SCHEDULE_SCHEMA: dict[str, Any] = {
         "name": "task_schedule",
         "description": (
             "动态注册定时任务。支持 interval（固定间隔）、cron（定时）、delayed（一次性延迟）。"
-            "执行方式：用 prompt（自然语言，推荐）指定任务内容，或用 module 引用 learned_modules。"
+            "执行方式：用 prompt（自然语言，推荐）指定任务内容，或用 module 引用 skill scripts。"
             "注册后立即生效，无需重启。"
         ),
         "parameters": {
@@ -56,7 +56,7 @@ SCHEDULE_SCHEMA: dict[str, Any] = {
                 },
                 "module": {
                     "type": "string",
-                    "description": "learned_modules 下的模块名（如 'self_audit'）。与 prompt 二选一。",
+                    "description": "skills 下 scripts 目录中的模块名（如 'self_audit'）。与 prompt 二选一。",
                 },
                 "func_name": {
                     "type": "string",
@@ -129,12 +129,12 @@ CANCEL_TASK_SCHEMA: dict[str, Any] = {
 
 
 def _resolve_runner(module_name: str, func_name: str) -> tuple[Any, str]:
-    """解析 learned_module 中的函数，返回 (func, error_msg)。"""
-    from src.tools.learned_modules import get_module
+    """解析 skill script 中的函数，返回 (func, error_msg)。"""
+    from src.tools.skill_scripts import get_module_by_script_name
 
-    mod = get_module(module_name)
+    mod = get_module_by_script_name(module_name)
     if mod is None:
-        return None, f"模块 '{module_name}' 未加载。请确认 ~/.lamix/learned_modules/{module_name}.py 存在且已注册。"
+        return None, f"模块 '{module_name}' 未加载。请确认 skills/*/scripts/{module_name}.py 存在且已注册。"
 
     func = getattr(mod, func_name, None)
     if func is None or not callable(func):
@@ -187,7 +187,7 @@ def run_schedule(params: dict[str, Any]) -> str:
         if not description:
             config_kwargs["description"] = f"{module_name}.{func_name}"
     else:
-        return "[错误] 需要指定 prompt（自然语言任务描述）或 module（learned_module 名称），二选一"
+        return "[错误] 需要指定 prompt（自然语言任务描述）或 module（skill script 名称），二选一"
 
     # 解析触发参数
     if task_type == TaskType.INTERVAL:

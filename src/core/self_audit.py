@@ -1,4 +1,4 @@
-"""自我审计模块：定时扫描 skills、projects、learned_modules，检查过时、错误、冗余。
+"""自我审计模块：定时扫描 skills、projects、skill scripts，检查过时、错误、冗余。
 
 审计触发：
     1. 定时：daemon 每 4 小时检查一次是否需要执行（每天按日历日期至少一次）
@@ -7,7 +7,7 @@
 审计维度：
     - Skills：frontmatter 缺失、内容过短、孤立文件（触发逻辑已改为 LLM，不再检查 triggers）
     - Projects：路径失效、信息过时、格式异常
-    - Learned Modules：语法错误、危险 import、schema 不完整
+    - Skill Scripts：语法错误、危险 import、TOOL_SCHEMA/TOOL_RUNNER 配置不完整
 
 审计报告通过飞书发送给 owner_chat_id（已配置时）。报告同时持久化到 ~/.lamix/audit_reports/。
 """
@@ -25,7 +25,7 @@ from src.core.constants import DEFAULT_AUDIT_HOUR, DEFAULT_AUDIT_MINUTE
 
 logger = logging.getLogger(__name__)
 
-LEARNED_MODULES_DIR = LAMIX_DIR / "learned_modules"
+
 AUDIT_LOG_DIR = LAMIX_DIR / "logs"
 AUDIT_LOG_PATH = AUDIT_LOG_DIR / "self_audit.log"
 
@@ -65,7 +65,7 @@ class AuditReport:
     duration_seconds: float
     skills_scanned: int = 0
     projects_scanned: int = 0
-    modules_scanned: int = 0
+    scripts_scanned: int = 0
     findings: list[AuditFinding] = field(default_factory=list)
 
     @property
@@ -81,7 +81,7 @@ class AuditReport:
         warnings = len(self.findings_by_severity["warning"])
         lines = [
             f"审计时间：{self.timestamp}",
-            f"扫描范围：{self.skills_scanned} skills / {self.projects_scanned} projects / {self.modules_scanned} modules",
+            f"扫描范围：{self.skills_scanned} skills / {self.projects_scanned} projects / {self.scripts_scanned} scripts",
             f"发现问题：{total} 条（error={errors}, warning={warnings}, info={total - errors - warnings}）",
         ]
         if total == 0:
@@ -482,101 +482,107 @@ def scan_projects() -> list[AuditFinding]:
     return findings
 
 
-def scan_learned_modules() -> list[AuditFinding]:
-    """扫描所有 learned_modules，返回审计发现列表。"""
+def scan_skill_scripts() -> list[AuditFinding]:
+    """扫描所有 skills/*/scripts/ 下的 Python 脚本，返回审计发现列表。"""
     findings: list[AuditFinding] = []
 
-    if not LEARNED_MODULES_DIR.exists():
+    if not SKILLS_DIR.exists():
         return findings
 
-    for py_file in sorted(LEARNED_MODULES_DIR.glob("*.py")):
-        if py_file.name.startswith("_"):
+    for scripts_dir in sorted(SKILLS_DIR.glob("*/scripts")):
+        if not scripts_dir.is_dir():
             continue
 
-        name = py_file.stem
-        try:
-            code = py_file.read_text(encoding="utf-8")
-        except OSError:
-            continue
+        skill_name = scripts_dir.parent.name
 
-        # 语法检查
-        try:
-            import py_compile
-            py_compile.compile(str(py_file), doraise=True)
-        except py_compile.PyCompileError as e:
-            findings.append(AuditFinding(
-                severity="error",
-                category="module",
-                target=name,
-                message=f"语法错误: {e}",
-                suggestion="修复语法错误",
-            ))
-            continue
+        for py_file in sorted(scripts_dir.glob("*.py")):
+            if py_file.name.startswith("_"):
+                continue
 
-        # 危险 import 检查
-        BLOCKED = frozenset({"src", "src.core", "src.tools", "src.feishu",
-                              "src.skills", "src.memory", "src.platforms", "src.selfupdate",
-                              "src.planning"})
-        for line in code.splitlines():
-            stripped = line.strip()
-            m = re.match(r"^from\s+(\S+)", stripped)
-            if m and m.group(1).split(".")[0] in BLOCKED:
+            script_name = py_file.stem
+            target_label = f"{skill_name}/{script_name}"
+
+            try:
+                code = py_file.read_text(encoding="utf-8")
+            except OSError:
+                continue
+
+            # 语法检查
+            try:
+                import py_compile
+                py_compile.compile(str(py_file), doraise=True)
+            except py_compile.PyCompileError as e:
                 findings.append(AuditFinding(
                     severity="error",
                     category="module",
-                    target=name,
-                    message=f"危险 import: {stripped}",
-                    suggestion="移除此 import，禁止 learned_module 调用 src 内部模块",
+                    target=target_label,
+                    message=f"语法错误: {e}",
+                    suggestion="修复语法错误",
                 ))
-            m = re.match(r"^import\s+(\S+)", stripped)
-            if m and m.group(1).split(".")[0] in BLOCKED:
-                findings.append(AuditFinding(
-                    severity="error",
-                    category="module",
-                    target=name,
-                    message=f"危险 import: {stripped}",
-                    suggestion="移除此 import",
-                ))
+                continue
 
-        # 检查是否有 TOOL_SCHEMA 或 TOOL_RUNNER
-        has_schema = "TOOL_SCHEMA" in code
-        has_runner = "TOOL_RUNNER" in code
-        if has_schema and not has_runner:
-            findings.append(AuditFinding(
-                severity="warning",
-                category="module",
-                target=name,
-                message="定义了 TOOL_SCHEMA 但缺少 TOOL_RUNNER，工具不会被注册",
-                suggestion="添加 TOOL_RUNNER 函数: TOOL_RUNNER(params: dict) -> str",
-            ))
-        if has_runner and not has_schema:
-            findings.append(AuditFinding(
-                severity="warning",
-                category="module",
-                target=name,
-                message="定义了 TOOL_RUNNER 但缺少 TOOL_SCHEMA，无法注册为工具",
-                suggestion="添加 TOOL_SCHEMA（OpenAI function calling schema）",
-            ))
+            # 危险 import 检查（使用公共常量）
+            from src.tools.skill_scripts import BLOCKED_IMPORTS
+            for line in code.splitlines():
+                stripped = line.strip()
+                m = re.match(r"^from\s+(\S+)", stripped)
+                if m and m.group(1).split(".")[0] in BLOCKED_IMPORTS:
+                    findings.append(AuditFinding(
+                        severity="error",
+                        category="script",
+                        target=target_label,
+                        message=f"危险 import: {stripped}",
+                        suggestion="移除此 import，禁止脚本调用 src 内部模块",
+                    ))
+                m = re.match(r"^import\s+(\S+)", stripped)
+                if m and m.group(1).split(".")[0] in BLOCKED_IMPORTS:
+                    findings.append(AuditFinding(
+                        severity="error",
+                        category="script",
+                        target=target_label,
+                        message=f"危险 import: {stripped}",
+                        suggestion="移除此 import",
+                    ))
 
-        # 检查 TOOL_RUNNER 函数签名
-        if has_runner:
-            runner_match = re.search(r"def\s+TOOL_RUNNER\s*\([^)]*\)\s*(?:->\s*\w+)?\s*:", code)
-            if not runner_match:
+            # 检查是否有 TOOL_SCHEMA 或 TOOL_RUNNER
+            has_schema = "TOOL_SCHEMA" in code
+            has_runner = "TOOL_RUNNER" in code
+            if has_schema and not has_runner:
                 findings.append(AuditFinding(
                     severity="warning",
                     category="module",
-                    target=name,
-                    message="TOOL_RUNNER 签名不符合规范，应为: def TOOL_RUNNER(params: dict) -> str:",
+                    target=target_label,
+                    message="定义了 TOOL_SCHEMA 但缺少 TOOL_RUNNER，工具不会被注册",
+                    suggestion="添加 TOOL_RUNNER 函数: TOOL_RUNNER(params: dict) -> str",
+                ))
+            if has_runner and not has_schema:
+                findings.append(AuditFinding(
+                    severity="warning",
+                    category="module",
+                    target=target_label,
+                    message="定义了 TOOL_RUNNER 但缺少 TOOL_SCHEMA，无法注册为工具",
+                    suggestion="添加 TOOL_SCHEMA（OpenAI function calling schema）",
                 ))
 
-        # 检查文件大小（异常大的模块）
-        if len(code) > 50_000:
-            findings.append(AuditFinding(
-                severity="info",
-                category="module",
-                target=name,
-                message=f"模块代码 {len(code)} 字符，较大。建议拆分。",
-            ))
+            # 检查 TOOL_RUNNER 函数签名
+            if has_runner:
+                runner_match = re.search(r"def\s+TOOL_RUNNER\s*\([^)]*\)\s*(?:->\s*\w+)?\s*:", code)
+                if not runner_match:
+                    findings.append(AuditFinding(
+                        severity="warning",
+                        category="module",
+                        target=target_label,
+                        message="TOOL_RUNNER 签名不符合规范，应为: def TOOL_RUNNER(params: dict) -> str:",
+                    ))
+
+            # 检查文件大小（异常大的脚本）
+            if len(code) > 50_000:
+                findings.append(AuditFinding(
+                    severity="info",
+                    category="module",
+                    target=target_label,
+                    message=f"脚本代码 {len(code)} 字符，较大。建议拆分。",
+                ))
 
     return findings
 
@@ -792,13 +798,13 @@ def run_audit(auto_fix: bool = True) -> AuditReport:
     # 统计扫描数量
     skills_count = len(list(SKILLS_DIR.glob("*/SKILL.md"))) if SKILLS_DIR.exists() else 0
     projects_count = len(list(PROJECTS_DIR.glob("*.md"))) if PROJECTS_DIR.exists() else 0
-    modules_count = len([p for p in LEARNED_MODULES_DIR.glob("*.py") if not p.name.startswith("_")]) if LEARNED_MODULES_DIR.exists() else 0
+    scripts_count = len(list(SKILLS_DIR.glob("*/scripts/*.py"))) if SKILLS_DIR.exists() else 0
 
     findings: list[AuditFinding] = []
     findings.extend(scan_skills(auto_fix=auto_fix))
     findings.extend(scan_skill_overlap())
     findings.extend(scan_projects())
-    findings.extend(scan_learned_modules())
+    findings.extend(scan_skill_scripts())
     findings.extend(scan_user_patterns())
     findings.extend(cleanup_stale_knowledge(auto_fix=auto_fix))
 
@@ -809,7 +815,7 @@ def run_audit(auto_fix: bool = True) -> AuditReport:
         duration_seconds=duration,
         skills_scanned=skills_count,
         projects_scanned=projects_count,
-        modules_scanned=modules_count,
+        scripts_scanned=scripts_count,
         findings=findings,
     )
     return report
@@ -1074,7 +1080,7 @@ def _serialize_report(report: AuditReport) -> dict:
         "duration_seconds": report.duration_seconds,
         "skills_scanned": report.skills_scanned,
         "projects_scanned": report.projects_scanned,
-        "modules_scanned": report.modules_scanned,
+        "scripts_scanned": report.scripts_scanned,
         "findings": [
             {
                 "severity": f.severity,
@@ -1109,7 +1115,7 @@ def _deserialize_report(data: dict) -> AuditReport:
         duration_seconds=data["duration_seconds"],
         skills_scanned=data.get("skills_scanned", 0),
         projects_scanned=data.get("projects_scanned", 0),
-        modules_scanned=data.get("modules_scanned", 0),
+        scripts_scanned=data.get("scripts_scanned", 0),
         findings=findings,
     )
 
@@ -1150,7 +1156,7 @@ def list_reports(limit: int = 10) -> list[dict]:
                 "timestamp": data.get("timestamp", ""),
                 "skills_scanned": data.get("skills_scanned", 0),
                 "projects_scanned": data.get("projects_scanned", 0),
-                "modules_scanned": data.get("modules_scanned", 0),
+                "scripts_scanned": data.get("scripts_scanned", 0),
                 "findings_count": len(data.get("findings", [])),
             })
         except Exception:

@@ -38,7 +38,7 @@ from src.core.self_audit import (
 )
 from src.core.constants import DEFAULT_AUDIT_HOUR, DEFAULT_AUDIT_MINUTE, AUDIT_CHECK_INTERVAL, REPORT_MAX_LENGTH
 from src.core.task_scheduler import TaskScheduler, TaskType, TaskConfig, schedule, start as scheduler_start, shutdown as scheduler_shutdown
-from src.core.tools import load_learned_modules
+from src.core.tools import load_skill_scripts
 import logging
 logger = logging.getLogger(__name__)
 
@@ -607,9 +607,9 @@ def main() -> None:
     # ── 任务调度器（自我审计）──────────────────────────────────────────
     _register_tasks(session)
 
-    # ── 加载 learned_modules（延迟，避免循环导入）──────────────────────
-    load_learned_modules()
-    logger.info("[daemon] learned_modules 已加载")
+    # ── 加载 skill scripts（延迟，避免循环导入）──────────────────────
+    load_skill_scripts()
+    logger.info("[daemon] skill scripts 已加载")
 
     # ── 上线通知 ─────────────────────────────────────────────────────────
     _send_boot_notification(config, pid)
@@ -852,8 +852,8 @@ def _restore_daemon(pm, mgr) -> None:
 
     # 恢复任务调度器
     _register_tasks(session)
-    load_learned_modules()
-    logger.info("[daemon] learned_modules 已加载")
+    load_skill_scripts()
+    logger.info("[daemon] skill scripts 已加载")
 
     # 上线通知
     from src.feishu.client import FeishuClient

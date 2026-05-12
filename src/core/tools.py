@@ -116,7 +116,7 @@ _register(
             "name": "task_schedule",
             "description": (
                 "动态注册定时任务。支持 interval（固定间隔）、cron（定时）、delayed（一次性延迟）。"
-                "执行方式：用 prompt（自然语言，推荐）指定任务内容，或用 module 引用 learned_modules。"
+                "执行方式：用 prompt（自然语言，推荐）指定任务内容，或用 module 引用 skill scripts。"
                 "注册后立即生效，无需重启。"
             ),
             "parameters": {
@@ -137,7 +137,7 @@ _register(
                         "type": "string",
                         "description": "自然语言任务描述。触发时注入 agent session 由 LLM 用工具执行。推荐用于大多数场景。",
                     },
-                    "module": {"type": "string", "description": "learned_modules 下的模块名（如 'self_audit'）。与 prompt 二选一。"},
+                    "module": {"type": "string", "description": "skills 下 scripts 目录中的模块名。与 prompt 二选一。"},
                     "func_name": {"type": "string", "description": "模块中要调用的函数名（默认 'run'）"},
                     "func_args": {"type": "object", "description": "传给函数的额外参数（可选）"},
                     "interval_seconds": {"type": "integer", "description": "interval 模式的间隔秒数"},
@@ -232,24 +232,24 @@ _register(
 )
 
 
-# ── learned_modules 延迟加载 ──────────────────────────────────────────────
+# ── skill scripts 延迟加载 ──────────────────────────────────────────────
 
-def load_learned_modules() -> None:
-    """扫描 ~/.lamix/learned_modules/，注册所有包含 TOOL_SCHEMA 的模块为工具。
+def load_skill_scripts() -> None:
+    """扫描 ~/.lamix/skills/*/scripts/，注册所有包含 TOOL_SCHEMA 的脚本为工具。
 
     必须在 daemon 启动完成后调用，不能在模块初始化时调用，否则会产生循环导入：
-    tools.py → learned_modules.py → tools.py（tools 模块还未初始化完成）。
+    tools.py → skill_scripts.py → tools.py（tools 模块还未初始化完成）。
     """
     try:
-        from src.tools import learned_modules
-        registered = learned_modules.scan_and_register()
+        from src.tools import skill_scripts
+        registered = skill_scripts.scan_and_register()
         if registered:
-            logger.info(f"已加载 {len(registered)} 个 learned_modules 工具: "
+            logger.info(f"已加载 {len(registered)} 个 skill script 工具: "
                         f"{[s['function']['name'] for s in registered]}")
         else:
-            logger.debug("未发现 learned_modules 工具（learned_modules/ 目录为空）")
+            logger.debug("未发现 skill script 工具（skills/*/scripts/ 下无有效脚本）")
     except Exception as e:
-        logger.warning(f"加载 learned_modules 失败: {e}")
+        logger.warning(f"加载 skill scripts 失败: {e}")
 
 
 # ─── 飞书客户端懒加载初始化 ────────────────────────────────────────────────
