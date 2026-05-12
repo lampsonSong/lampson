@@ -40,8 +40,8 @@ def _get_config_value(key: str, default: Any) -> Any:
 
 # 从配置文件读取，提供合理默认值
 API_KEY = _get_config_value("api_key", "")
-API_URL = _get_config_value("base_url", "https://open.bigmodel.cn/api/paas/v4/chat/completions")
-MODEL = _get_config_value("model", "glm-4.6v")
+API_URL = _get_config_value("base_url", "")
+MODEL = _get_config_value("model", "")
 TIMEOUT = _get_config_value("timeout", 60)
 MAX_BASE64_LENGTH = _get_config_value("max_base64_length", 4_000_000)
 
@@ -112,8 +112,8 @@ def analyze_image(image_base64: str, prompt: str = "描述这张图片的内容"
             "请在 ~/.lamix/config.yaml 中添加 vision 配置段：\n"
             "vision:\n"
             "  api_key: your_api_key_here\n"
-            "  model: glm-4.6v\n"
-            "  base_url: https://open.bigmodel.cn/api/paas/v4/chat/completions\n"
+            "  model: your-vision-model\n"
+            "  base_url: https://your-vision-provider.com/v1/\n"
             "  timeout: 60\n"
             "  max_base64_length: 4000000"
         )

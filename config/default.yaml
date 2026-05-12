@@ -22,13 +22,22 @@ skills_management:
   cleanup_min_invocations: 0   # 调用次数不超过此值的参与清理
 
 # Embedding 配置（语义检索 & session 搜索）
-# 配置有效的 provider（如 DeepSeek、OpenAI 等）启用语义检索；
-# 留空则降级为纯关键词搜索。
+# 配置有效的 provider 启用语义检索；留空则降级为纯关键词搜索。
 embedding:
   provider: ""
   model: ""
   # base_url: ""                                          # 必须显式配置
   # api_key: ""                                           # 必须显式配置
+
+# Vision 配置（桌面截图分析）
+# 配置有效的 provider（如智谱 GLM-4V 等）启用视觉识别能力。
+# 注意：DeepSeek 不支持视觉模型，需使用其他 provider。
+# vision:
+#   api_key: ""
+#   model: "your-vision-model"
+#   base_url: ""
+#   timeout: 60
+#   max_base64_length: 4000000
 
 # 检索配置
 retrieval:
