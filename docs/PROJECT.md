@@ -205,8 +205,8 @@ skills_management:
 | `/skills` | 技能管理 |
 | `/feishu` | 飞书操作 |
 | `/update` | 自更新 |
-| `/compaction` | 手动触发压缩 |
-| `/contextsize` | 查看当前上下文长度和使用率 |
+| `/compact` | 手动触发压缩 |
+| `/context-size` | 查看当前上下文长度和使用率 |
 | `/search` | 跨 session 搜索历史 |
 | `/resume` | 加载历史 session |
 | `/new` | 结束当前 session，创建空白 |
@@ -532,7 +532,7 @@ compaction:
 |------|------|
 | `src/core/compaction.py` | Compactor + split_into_turns + 策略 A/B + LLM 摘要 |
 | `src/core/agent.py` | maybe_compact / force_compact 触发入口，last_prompt_tokens 管理 |
-| `src/core/session.py` | `/compaction` 命令路由，`/contextsize` 命令 |
+| `src/core/session.py` | `/compact` 命令路由，`/context-size` 命令 |
 | `tests/test_compaction.py` | 20 个测试覆盖分轮/策略A/策略B/边界 |
 
 ## 十二、已知问题
@@ -542,3 +542,39 @@ compaction:
 - SkillIndex 增量构建时 config.yaml 路径可能过时（已有自动修正逻辑）
 - Planning replan 场景 prompt 待优化
 
+
+## 十三、设计决策
+
+### 13.1 Skills 统一承载 scripts
+
+**背景**：Skills（markdown 工作流）和 Learned Modules（Python 工具）功能重叠，维护分散。实际 learned_modules 为空，决定合并。
+
+**合并方案**：skill 目录结构：
+
+```
+~/.lamix/skills/<skill-name>/
+├── SKILL.md              # 知识/流程描述（必须）
+├── scripts/              # 可选：附属 Python 脚本
+│   ├── main.py           # 定义 TOOL_SCHEMA + TOOL_RUNNER，自动注册为工具
+│   └── helper.py         # 辅助模块，不注册
+├── templates/            # 可选：模板文件
+└── references/           # 可选：参考文档
+```
+
+**核心变化**：
+- `scripts/` 下的 .py 文件如果定义了 `TOOL_SCHEMA` + `TOOL_RUNNER`，自动注册为工具
+- 沙箱约束（禁止 import src）复用到 scripts/
+- `~/.lamix/learned_modules/` 废弃，不再扫描
+
+**涉及文件改动**：
+- `src/tools/learned_modules.py` — 扫描路径从 `learned_modules/*.py` 改为 `skills/*/scripts/*.py`
+- `src/core/reflection.py` — 沉淀逻辑删除 learned_module 相关函数
+- `src/core/self_audit.py` — `scan_learned_modules()` 改为 `scan_skill_scripts()`
+- `src/core/tools.py` — 工具描述更新
+- `src/tools/task_scheduler_tool.py` — 参数描述更新
+
+**验收标准**：
+1. `pytest tests/ -x` 全部通过
+2. `/self-audit` 正常执行，扫描范围包含 scripts
+3. skill 的 scripts/ 下放一个带 TOOL_SCHEMA 的 .py，重启 daemon 后工具自动注册
+4. `grep -r "learned_module" src/` 只有注释和历史说明
