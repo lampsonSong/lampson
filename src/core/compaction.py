@@ -324,15 +324,49 @@ class Compactor:
         _notify_progress(progress_callback, "[1/4] 正在切分对话轮次...")
         turns = split_into_turns(messages)
 
-        # 边界：轮数太少不压缩
+        # 边界：轮数太少时，只对最大轮做摘要压缩
         if len(turns) <= 3:
-            logger.info(f"轮数 {len(turns)} <= 3，跳过压缩")
-            _notify_progress(progress_callback, "[跳过] 对话轮数太少，无需压缩")
+            logger.info(f"轮数 {len(turns)} <= 3，尝试对最大轮做摘要压缩")
+            _notify_progress(progress_callback, "[跳过] 对话轮数太少，尝试压缩最大轮次...")
+            max_turn = max(turns, key=lambda t: t.byte_length)
+            if not max_turn.assistant_texts:
+                logger.info("最大轮次无 assistant 文字，跳过压缩")
+                return CompactionResult(
+                    success=True,
+                    messages_kept=list(messages),
+                    archived_count=0,
+                    archive_details="轮数太少且无 assistant 文字，未压缩",
+                )
+            summary = _llm_summarize_turn(max_turn, self.llm, self.fallback_llms)
+            if not summary:
+                logger.info("摘要生成失败，跳过压缩")
+                return CompactionResult(
+                    success=True,
+                    messages_kept=list(messages),
+                    archived_count=0,
+                    archive_details="轮数太少且摘要失败，未压缩",
+                )
+            summary_bytes = len(summary.encode("utf-8"))
+            if summary_bytes >= max_turn.assistant_texts_len * 0.7:
+                logger.info("摘要未达到 30% 压缩率，跳过压缩")
+                return CompactionResult(
+                    success=True,
+                    messages_kept=list(messages),
+                    archived_count=0,
+                    archive_details="轮数太少且压缩率不足，未压缩",
+                )
+            result_messages = list(messages)
+            for i, msg in enumerate(result_messages):
+                if msg in max_turn.messages and msg.get("role") == "assistant":
+                    msg_copy = dict(msg)
+                    msg_copy["content"] = summary
+                    result_messages[i] = msg_copy
+                    break
             return CompactionResult(
                 success=True,
-                messages_kept=list(messages),
+                messages_kept=result_messages,
                 archived_count=0,
-                archive_details="轮数太少，未压缩",
+                archive_details=f"轮数太少，仅压缩最大轮次 assistant（{max_turn.assistant_texts_len}→{summary_bytes} bytes）",
             )
 
         # Step 2: 计算 tail 占比

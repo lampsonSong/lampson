@@ -839,7 +839,7 @@ class Agent:
                 result = apply_compaction(
                     agent_llm=self.llm,
                     config=self._compaction_config,
-                    estimated_tokens=0,
+                    estimated_tokens=self._estimate_context_tokens(),
                     stop_reason="end_turn",
                     session_id=session_id,
                     session_store=session_store,
