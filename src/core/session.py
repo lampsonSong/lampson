@@ -68,6 +68,8 @@ HELP_TEXT = """\
   /compaction                    手动触发上下文压缩
   /contextsize                   查看当前上下文长度和占比
   /self-audit                    立即触发自我审计
+  /audit-report                  列出历史审计报告
+  /audit-report <path>           查看指定审计报告详情
   /new                           开始新 session（清空当前对话上下文）
   /exit                          退出
 
@@ -994,6 +996,9 @@ class Session:
         if command == "/self-audit":
             return self._handle_self_audit()
 
+        if command == "/audit-report":
+            return HandleResult(reply=self._handle_audit_report(parts), is_command=True)
+
         if command == "/help":
             return HandleResult(reply=HELP_TEXT, is_command=True)
 
@@ -1099,12 +1104,44 @@ class Session:
     def _handle_self_audit(self) -> HandleResult:
         """手动触发自我审计。"""
         try:
-            from src.core.self_audit import run_audit, format_report_detail
+            from src.core.self_audit import run_audit, format_report_detail, save_report
             report = run_audit()
+            save_report(report)  # 持久化到磁盘
             detail = format_report_detail(report)
             return HandleResult(reply=detail, is_command=True)
         except Exception as e:
             return HandleResult(reply=f"[自我审计] 失败: {e}", is_command=True)
+
+    def _handle_audit_report(self, parts: list[str]) -> str:
+        """处理 /audit-report 命令：列出历史报告或查看指定报告详情。"""
+        from src.core.self_audit import list_reports, load_report, format_report_detail
+
+        if len(parts) >= 2:
+            # /audit-report <path> → 查看指定报告
+            report_path = parts[1]
+            report = load_report(report_path)
+            if report is None:
+                return f"[错误] 无法加载报告: {report_path}"
+            return format_report_detail(report)
+
+        # /audit-report → 列出最近报告
+        reports = list_reports(limit=10)
+        if not reports:
+            return "[audit-report] 暂无历史审计报告。"
+
+        lines = ["[audit-report] 历史审计报告：\n"]
+        for i, r in enumerate(reports, 1):
+            ts = r["timestamp"]
+            findings = r["findings_count"]
+            skills = r["skills_scanned"]
+            projects = r["projects_scanned"]
+            lines.append(
+                f"  {i}. [{ts}] 扫描 {skills} skills / {projects} projects，"
+                f"发现 {findings} 条问题"
+            )
+            lines.append(f"     → {r['path']}")
+        lines.append("\n使用 /audit-report <path> 查看详情。")
+        return "\n".join(lines)
 
     def _format_config(self) -> str:
         """脱敏后格式化配置。"""

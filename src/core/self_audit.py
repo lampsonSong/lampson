@@ -1,7 +1,7 @@
 """自我审计模块：定时扫描 skills、projects、learned_modules，检查过时、错误、冗余。
 
 审计触发：
-    1. 定时：通过 TaskScheduler（APScheduler）每天凌晨 4 点调度
+    1. 定时：daemon 每 4 小时检查一次是否需要执行（每天按日历日期至少一次）
     2. 手动：用户输入 /self-audit 命令
 
 审计维度：
@@ -9,7 +9,7 @@
     - Projects：路径失效、信息过时、格式异常
     - Learned Modules：语法错误、危险 import、schema 不完整
 
-审计报告通过飞书发送给 owner_chat_id（已配置时）。
+审计报告通过飞书发送给 owner_chat_id（已配置时）。报告同时持久化到 ~/.lamix/audit_reports/。
 """
 
 from __future__ import annotations
@@ -85,7 +85,7 @@ class AuditReport:
             f"发现问题：{total} 条（error={errors}, warning={warnings}, info={total - errors - warnings}）",
         ]
         if total == 0:
-            lines.append("✅ 没有发现问题，知识库状态良好。")
+            lines.append("OK - 没有发现问题，知识库状态良好。")
         return "\n".join(lines)
 
 
@@ -827,7 +827,7 @@ def format_report_detail(report: AuditReport) -> str:
         if not items:
             continue
 
-        icon = {"error": "🔴", "warning": "🟡", "info": "🔵"}[severity]
+        icon = {"error": "[ERR]", "warning": "[WRN]", "info": "[INF]"}[severity]
         header = f"{icon} {severity.upper()} ({len(items)} 条)"
 
         # 按类别分组
@@ -837,7 +837,7 @@ def format_report_detail(report: AuditReport) -> str:
 
         lines.append(header)
         for cat, cat_findings in by_category.items():
-            cat_icon = {"skill": "⚙️", "project": "📁", "module": "🐍"}.get(cat, "•")
+            cat_icon = {"skill": "[S]", "project": "[P]", "module": "[M]"}.get(cat, "•")
             lines.append(f"  {cat_icon} {cat}: {len(cat_findings)} 条")
             for f in cat_findings:
                 lines.append(f"    • [{f.target}] {f.message}")
@@ -848,7 +848,7 @@ def format_report_detail(report: AuditReport) -> str:
     # 已自动修复的问题列表
     fixed_items = [f for f in report.findings if f.fixed]
     if fixed_items:
-        lines.append("🔧 已自动修复 ({} 条)".format(len(fixed_items)))
+        lines.append("  [AUTO-FIX] 已自动修复 ({} 条)".format(len(fixed_items)))
         for f in fixed_items:
             lines.append(f"  • [{f.target}] {f.fix_detail}")
         lines.append("")
@@ -1060,3 +1060,111 @@ def cleanup_stale_knowledge(auto_fix: bool = True) -> list[AuditFinding]:
                 ))
 
     return findings
+
+
+# ── 报告持久化 ────────────────────────────────────────────────────────────────
+
+AUDIT_REPORTS_DIR = LAMIX_DIR / "audit_reports"
+
+
+def _serialize_report(report: AuditReport) -> dict:
+    """将 AuditReport 序列化为 dict（用于 JSON 持久化）。"""
+    return {
+        "timestamp": report.timestamp,
+        "duration_seconds": report.duration_seconds,
+        "skills_scanned": report.skills_scanned,
+        "projects_scanned": report.projects_scanned,
+        "modules_scanned": report.modules_scanned,
+        "findings": [
+            {
+                "severity": f.severity,
+                "category": f.category,
+                "target": f.target,
+                "message": f.message,
+                "suggestion": f.suggestion,
+                "fixed": f.fixed,
+                "fix_detail": f.fix_detail,
+            }
+            for f in report.findings
+        ],
+    }
+
+
+def _deserialize_report(data: dict) -> AuditReport:
+    """从 dict 反序列化回 AuditReport。"""
+    findings = [
+        AuditFinding(
+            severity=f["severity"],
+            category=f["category"],
+            target=f["target"],
+            message=f["message"],
+            suggestion=f.get("suggestion", ""),
+            fixed=f.get("fixed", False),
+            fix_detail=f.get("fix_detail", ""),
+        )
+        for f in data.get("findings", [])
+    ]
+    return AuditReport(
+        timestamp=data["timestamp"],
+        duration_seconds=data["duration_seconds"],
+        skills_scanned=data.get("skills_scanned", 0),
+        projects_scanned=data.get("projects_scanned", 0),
+        modules_scanned=data.get("modules_scanned", 0),
+        findings=findings,
+    )
+
+
+def save_report(report: AuditReport) -> Path:
+    """保存审计报告到磁盘，返回文件路径。
+
+    文件命名：{timestamp}.json，例如 2026-05-12T04-00.json
+    """
+    import json
+
+    AUDIT_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    # 用时间戳中的冒号替换为连字符，使文件名合法
+    safe_ts = report.timestamp.replace(":", "-").replace(" ", "T")
+    filename = f"{safe_ts}.json"
+    path = AUDIT_REPORTS_DIR / filename
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(_serialize_report(report), f, ensure_ascii=False, indent=2)
+    return path
+
+
+def list_reports(limit: int = 10) -> list[dict]:
+    """列出最近的审计报告（按时间倒序）。
+
+    返回每个报告的摘要信息：{path, timestamp, skills, projects, modules, findings_count}
+    """
+    if not AUDIT_REPORTS_DIR.exists():
+        return []
+    import json
+
+    reports = []
+    for path in sorted(AUDIT_REPORTS_DIR.glob("*.json"), reverse=True)[:limit]:
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            reports.append({
+                "path": str(path),
+                "timestamp": data.get("timestamp", ""),
+                "skills_scanned": data.get("skills_scanned", 0),
+                "projects_scanned": data.get("projects_scanned", 0),
+                "modules_scanned": data.get("modules_scanned", 0),
+                "findings_count": len(data.get("findings", [])),
+            })
+        except Exception:
+            continue
+    return reports
+
+
+def load_report(path: str | Path) -> AuditReport | None:
+    """从磁盘加载指定路径的审计报告。"""
+    import json
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return _deserialize_report(data)
+    except Exception:
+        return None

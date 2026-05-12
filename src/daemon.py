@@ -33,6 +33,7 @@ from src.core.session_manager import get_session_manager
 from src.core.self_audit import (
     run_audit,
     format_report_detail,
+    save_report,
     _audit_log,
 )
 from src.core.constants import DEFAULT_AUDIT_HOUR, DEFAULT_AUDIT_MINUTE, AUDIT_CHECK_INTERVAL, REPORT_MAX_LENGTH
@@ -79,12 +80,14 @@ def _notify_user(text: str, config: dict | None = None) -> None:
 
 
 def _self_audit_callback() -> None:
-    """审计任务：根据用户活跃度判断是否触发。
+    """审计任务：根据用户活跃度 + 日历日期判断是否触发。
 
-    触发逻辑：
-    - 用户 24 小时没有使用 → 触发审计
-    - 用户有使用 → 等最后一次使用 1 小时后触发
-    - 发过一次审计后，重新开始计时
+    触发逻辑（任意满足即触发）：
+    1. 今天还没审计过（按日历日期判断，每天至少一次）
+    2. 用户 24 小时没有使用 → 触发审计
+    3. 用户有使用 → 等最后一次使用 1 小时后触发
+
+    发过一次审计后，重新开始计时。
     """
     from datetime import datetime, timedelta
     from src.core.heartbeat import get_last_activity_time
@@ -94,33 +97,37 @@ def _self_audit_callback() -> None:
     last_audit_file = LAMIX_DIR / "logs" / ".last_audit_time"
 
     # 读取上次审计时间
-    last_audit_time = None
+    last_audit_time: datetime | None = None
+    last_audit_date: str | None = None
     try:
         if last_audit_file.exists():
             ts = last_audit_file.read_text().strip()
             last_audit_time = datetime.fromisoformat(ts)
+            last_audit_date = last_audit_time.date().isoformat()
     except Exception:
         pass
+
+    today_str = now.date().isoformat()
 
     # 判断是否应该触发
     should_run = False
     reason = ""
 
     if last_activity is None:
-        # 没有活动记录（刚启动），跳过
-        return
+        # heartbeat 文件不存在：降级为按日历日期判断（每天最多一次）
+        if last_audit_date != today_str:
+            should_run = True
+            reason = "每日例行审计（heartbeat记录缺失，降级为日历日期判断）"
     elif now - last_activity >= timedelta(hours=24):
-        # 24 小时没有使用
-        if last_audit_time and now - last_audit_time < timedelta(hours=24):
-            return  # 24小时内已审计过，跳过
-        should_run = True
-        reason = "用户24小时未使用"
+        # 24 小时没有使用：立即触发（每天最多一次）
+        if last_audit_date != today_str:
+            should_run = True
+            reason = "用户24小时未使用"
     elif now - last_activity >= timedelta(hours=1):
-        # 有使用，但最后使用已过 1 小时
-        if last_audit_time and last_audit_time > last_activity:
-            return  # 上次审计在最后活动之后，跳过
-        should_run = True
-        reason = "用户最后使用后1小时"
+        # 有使用，但最后使用已过 1 小时：触发（每天最多一次）
+        if last_audit_date != today_str:
+            should_run = True
+            reason = "用户最后使用后1小时"
 
     if not should_run:
         return
@@ -131,7 +138,10 @@ def _self_audit_callback() -> None:
         if len(report_content) > REPORT_MAX_LENGTH:
             report_content = report_content[:REPORT_MAX_LENGTH] + "\n\n...（报告过长已截断）"
         _audit_log(f"[self_audit] 审计完成（{reason}），开始发送报告")
-        _notify_user(f"🕐 Lamix 自我审计报告\n\n{report_content}")
+        _notify_user(f"[Lamix] 自我审计报告\n\n{report_content}")
+        # 同时持久化到磁盘，供 /audit-report 命令查阅
+        report_path = save_report(report)
+        _audit_log(f"[self_audit] 报告已保存至 {report_path}")
         logger.info(f"[self_audit] 审计完成（{reason}）")
         # 记录审计时间
         last_audit_file.parent.mkdir(parents=True, exist_ok=True)

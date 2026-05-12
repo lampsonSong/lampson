@@ -245,7 +245,7 @@ daemon 启动后读取 boot_tasks.json，把任务注入 session 执行，完成
 | 类型 | 说明 | 示例 |
 |------|------|------|
 | `interval` | 固定间隔 | 每 30 分钟检查一次 |
-| `cron` | 定时执行 | 每天凌晨 4 点自我审计 |
+| `cron` | 定时执行 | 每天凌晨 4 点触发（需配合触发逻辑） |
 | `delayed` | 一次性延迟 | 5 分钟后提醒 |
 
 ```bash
@@ -264,19 +264,32 @@ task_schedule(action="cancel", task_id="monitor")
 
 ### 9.3 自我审计与知识生命周期
 
-daemon 通过定时审计（每天凌晨 4 点）和空闲触发（24h 空闲 / 最后使用后 1h，每 4h 检查）扫描 skills/projects/info 的健康状态：
+daemon 每 4 小时检查一次是否需要审计，**每天（按日历日期）至少执行一次**。触发条件（满足任意即触发）：
 
-**自动修复**：
-- 空目录删除、散落 .md 合并到 SKILL.md、缺失 frontmatter 自动生成
-- 重叠检测：检查 skill 之间的职责重叠，建议合并
+1. 今天还未审计过（每天最多一次）
+2. 用户 24 小时没有使用
+3. 用户有使用，但最后使用已超过 1 小时
+
+若 `heartbeat` 记录缺失，审计自动降级为按日历日期判断，保证每天至少一次。
+
+审计内容：skills/projects/learned_modules 的健康状态扫描。
+
+**自动修复**：空目录删除、散落 .md 合并到 SKILL.md、缺失 frontmatter 自动生成、重叠检测。
 
 **知识归档**：
 - 7 天未使用且调用次数为 0 → 自动归档
 - 30 天未使用 → 自动归档
-- 归档不删除，移入 `~/.lamix/archived/`，可通过 `list_archived` 查看、`restore_archived` 恢复
+- 归档不删除，移入 `archived/` 子目录，保留可恢复
 - `last_used_at` 在每次 skill view、info 加载、project_context 加载时自动更新
 
-**问题报告**：通过飞书发送审计结果
+**报告**：
+- 通过飞书发送审计结果
+- 报告持久化到 `~/.lamix/audit_reports/` 目录，可通过 `/audit-report` 命令查阅历史
+
+可用命令：
+- `/self-audit` — 立即触发审计
+- `/audit-report` — 列出最近 10 份历史报告
+- `/audit-report <path>` — 查看指定报告详情
 
 可在 `config.yaml` 中关闭：
 
