@@ -1,0 +1,46 @@
+# 当推送 v 开头的 tag（如 v1.0、v2.1.0）时，
+# 自动在 Windows 上打包 exe 并上传到 GitHub Releases。
+name: Build Windows exe
+
+on:
+  push:
+    tags:
+      - 'v*'          # v1.0, v2.1.0, v0.3.0-beta 等
+
+permissions:
+  contents: write      # 需要写入 Release 的权限
+
+jobs:
+  build:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python-version: ['3.12']
+
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -e .          # 安装项目自身（依赖来自 pyproject.toml）
+
+      - name: 构建 exe
+        run: python scripts/build_exe.py
+
+      - name: 上传到 GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/lamix.exe
+            dist/lamix-uninstall.exe
+          fail_on_unmatched_files: true
+          # 自动从 git tag 生成 release notes（如有）
+          generate_release_notes: true
