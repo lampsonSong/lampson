@@ -2,9 +2,9 @@
 # 复制到 ~/.lamix/config.yaml 并填写相应字段
 
 llm:
-  api_key: ""                                        # 智谱 API Key（必填）
-  base_url: "https://open.bigmodel.cn/api/paas/v4/" # LLM API 地址
-  model: "glm-5.1"                               # 模型名称
+  api_key: ""                                        # DeepSeek API Key（必填）
+  base_url: "https://api.deepseek.com/"              # LLM API 地址
+  model: "deepseek-v4-flash"                         # 模型名称
   context_window: 131072                           # 模型 context window（token 数），各模型不同，需按实际填写
 
 feishu:
@@ -22,12 +22,13 @@ skills_management:
   cleanup_min_invocations: 0   # 调用次数不超过此值的参与清理
 
 # Embedding 配置（语义检索 & session 搜索）
-# 不配 base_url 则不启用 embedding，降级为纯关键词搜索
+# 配置有效的 provider（如 DeepSeek、OpenAI 等）启用语义检索；
+# 留空则降级为纯关键词搜索。
 embedding:
-  provider: "zhipu"
-  model: "embedding-3"
-  # base_url: "https://open.bigmodel.cn/api/paas/v4/"  # 必须显式配置
-  # api_key: ""                                        # 必须显式配置
+  provider: ""
+  model: ""
+  # base_url: ""                                          # 必须显式配置
+  # api_key: ""                                           # 必须显式配置
 
 # 检索配置
 retrieval:

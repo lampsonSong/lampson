@@ -33,8 +33,8 @@ _DEFAULT_RETRIEVAL: dict[str, Any] = {
 }
 
 _DEFAULT_EMBEDDING: dict[str, Any] = {
-    "provider": "zhipu",
-    "model": "embedding-3",
+    "provider": "",
+    "model": "",
 }
 
 _DEFAULT_SKILLS_MANAGEMENT: dict[str, Any] = {
@@ -46,8 +46,8 @@ _DEFAULT_SKILLS_MANAGEMENT: dict[str, Any] = {
 DEFAULT_CONFIG: dict[str, Any] = {
     "llm": {
         "api_key": "",
-        "base_url": "https://open.bigmodel.cn/api/paas/v4/",
-        "model": "glm-5.1",
+        "base_url": "https://api.deepseek.com/",
+        "model": "deepseek-v4-flash",
     },
     "models": [],
     "feishu": {
@@ -68,25 +68,25 @@ _ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
 # Provider presets for setup wizard
 PROVIDER_PRESETS = {
     "1": {
-        "name": "智谱 GLM",
-        "base_url": "https://open.bigmodel.cn/api/paas/v4/",
-        "models": ["glm-5.1", "glm-5-turbo", "glm-4-plus"],
-        "default_model": "glm-5.1",
-        "key_hint": "在 open.bigmodel.cn 获取",
-    },
-    "2": {
-        "name": "MiniMax",
-        "base_url": "https://api.minimaxi.com/v1/",
-        "models": ["MiniMax-M2.5", "MiniMax-M2.7-highspeed"],
-        "default_model": "MiniMax-M2.5",
-        "key_hint": "在 platform.minimaxi.com 获取",
-    },
-    "3": {
         "name": "DeepSeek",
         "base_url": "https://api.deepseek.com/",
         "models": ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"],
         "default_model": "deepseek-v4-flash",
         "key_hint": "在 platform.deepseek.com 获取",
+    },
+    "2": {
+        "name": "智谱 GLM",
+        "base_url": "https://api.deepseek.com/",
+        "models": ["glm-5.1", "glm-5-turbo", "glm-4-plus"],
+        "default_model": "glm-5.1",
+        "key_hint": "在 open.bigmodel.cn 获取",
+    },
+    "3": {
+        "name": "MiniMax",
+        "base_url": "https://api.minimaxi.com/v1/",
+        "models": ["MiniMax-M2.5", "MiniMax-M2.7-highspeed"],
+        "default_model": "MiniMax-M2.5",
+        "key_hint": "在 platform.minimaxi.com 获取",
     },
 }
 
@@ -399,7 +399,7 @@ def _setup_fallback_models(config: dict) -> None:
         choice = _select(
             f"选择 {label} 的供应商（回车跳过）：",
             [
-                ("1", "智谱 GLM（推荐）"),
+                ("1", "DeepSeek（推荐）"),
                 ("2", "MiniMax"),
                 ("3", "DeepSeek"),
                 ("4", "自定义"),
@@ -571,9 +571,9 @@ def run_setup_wizard(*, title: str | None = None) -> dict[str, Any]:
     try:
         # 1. 选择 Provider
         provider_choice = _select("请选择 LLM 供应商：", [
-            ("1", "智谱 GLM（推荐）"),
-            ("2", "MiniMax"),
-            ("3", "DeepSeek"),
+            ("1", "DeepSeek（推荐）"),
+            ("2", "智谱 GLM"),
+            ("3", "MiniMax"),
             ("4", "自定义（手动填写 URL）"),
         ])
         if provider_choice is None:

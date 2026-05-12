@@ -166,8 +166,8 @@ def process_chat(text: str, llm_config: dict) -> str:
         return "❌ OpenAI SDK 未安装。请先安装: pip install openai"
 
     api_key = llm_config.get("api_key", "")
-    base_url = llm_config.get("base_url", "https://open.bigmodel.cn/api/paas/v4/")
-    model = llm_config.get("model", "glm-5.1")
+    base_url = llm_config.get("base_url", "https://api.deepseek.com/")
+    model = llm_config.get("model", "deepseek-v4-flash")
 
     if not base_url:
         return "❌ LLM 未配置 base_url"

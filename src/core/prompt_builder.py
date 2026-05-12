@@ -471,10 +471,10 @@ def build_model_guidance(model: str) -> list[str]:
     lower = model.lower()
     layers = []
 
-    if "glm" in lower:
+    if "deepseek" in lower:
         layers.append(
-            "你正在使用 GLM 模型。请直接使用工具调用，"
-            "GLM 对 tool_calls 支持良好，不要尝试用文本描述工具调用。"
+            "你正在使用 DeepSeek 模型。请使用工具调用（tool_calls）完成任务，"
+            "不要尝试用文本描述工具调用。"
         )
 
     return layers

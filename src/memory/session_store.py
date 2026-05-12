@@ -86,7 +86,7 @@ CREATE TABLE IF NOT EXISTS messages_embedding (
     session_id TEXT NOT NULL,
     ts INTEGER NOT NULL,
     embedding BLOB NOT NULL,
-    provider TEXT NOT NULL DEFAULT 'zhipu',
+    provider TEXT NOT NULL DEFAULT '',
     indexed_at INTEGER NOT NULL
 );
 
