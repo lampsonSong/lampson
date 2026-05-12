@@ -17,6 +17,11 @@ import sys
 from pathlib import Path
 
 
+def _print(msg: str) -> None:
+    """Print with UTF-8 encoding (Windows console fix)."""
+    print(msg, flush=True)
+
+
 def build_one(name: str, entry_script: str, project_root: Path) -> Path | None:
     """构建单个 exe。"""
     cmd = [
@@ -30,16 +35,16 @@ def build_one(name: str, entry_script: str, project_root: Path) -> Path | None:
         entry_script,
     ]
 
-    print(f"\n正在构建 {name}.exe...")
-    subprocess.run(cmd, cwd=str(project_root), check=True)
+    _print(f"\n>>> Building {name}.exe...")
+    subprocess.run(cmd, cwd=str(project_root), check=True, encoding="utf-8", errors="replace")
 
     exe_path = project_root / "dist" / f"{name}.exe"
     if exe_path.exists():
         size_mb = exe_path.stat().st_size / 1024 / 1024
-        print(f"  ✓ {exe_path} ({size_mb:.1f} MB)")
+        _print(f"  [OK] {exe_path} ({size_mb:.1f} MB)")
         return exe_path
     else:
-        print(f"  ✗ {name}.exe 构建失败")
+        _print(f"  [FAIL] {name}.exe build failed")
         return None
 
 
@@ -61,14 +66,14 @@ def is_admin():
 
 def uninstall():
     print("=" * 50)
-    print(" Lamix 卸载程序")
+    print(" Lamix Uninstall")
     print("=" * 50)
 
     if not is_admin():
-        print("注意：某些操作可能需要管理员权限")
+        print("Note: Some operations may require admin rights")
     print()
 
-    # 删除任务计划
+    # Delete scheduled task
     task_name = "Lamix"
     try:
         result = subprocess.run(
@@ -76,43 +81,43 @@ def uninstall():
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0:
-            print(f"已删除开机自启动任务：{task_name}")
-        elif "找不到" in result.stderr or "not found" in result.stderr.lower():
-            print(f"任务 {task_name} 不存在，跳过")
+            print(f"Deleted task: {task_name}")
+        elif "not found" in result.stderr.lower():
+            print(f"Task {task_name} not found, skipping")
         else:
-            print(f"删除任务失败：{result.stderr.strip()}")
+            print(f"Failed to delete task: {result.stderr.strip()}")
     except Exception as e:
-        print(f"删除任务时出错：{e}")
+        print(f"Error deleting task: {e}")
 
-    # 询问是否删除配置目录
+    # Ask about config directory
     print()
     data_dir = Path.home() / ".lamix"
     if data_dir.exists():
-        print(f"配置目录：{data_dir}")
-        print("  保留：下次安装可直接使用，配置、记忆、技能全部保留。")
-        print("  删除：彻底清除所有个人数据。")
-        choice = input("\\n是否删除配置目录？(y/N): ").strip().lower()
+        print(f"Config dir: {data_dir}")
+        print("  Keep: Next install will reuse config, memory, skills.")
+        print("  Delete: Remove all personal data.")
+        choice = input("\\nDelete config dir? (y/N): ").strip().lower()
         if choice in ("y", "yes"):
             try:
                 shutil.rmtree(data_dir)
-                print(f"已删除配置目录：{data_dir}")
+                print(f"Deleted: {data_dir}")
             except Exception as e:
-                print(f"删除失败：{e}")
-                print(f"请手动删除：{data_dir}")
+                print(f"Delete failed: {e}")
+                print(f"Please delete manually: {data_dir}")
         else:
-            print(f"已保留配置目录：{data_dir}")
+            print(f"Kept: {data_dir}")
     else:
-        print("配置目录不存在，无需清理。")
+        print("Config dir not found, nothing to clean.")
 
     print()
-    print("卸载完成。项目代码需手动删除。")
+    print("Uninstall complete. Please delete project code manually.")
 
 if __name__ == "__main__":
     try:
         uninstall()
     except Exception as e:
-        print(f"卸载出错：{e}")
-    input("\\n按回车键退出...")
+        print(f"Error: {e}")
+    input("\\nPress Enter to exit...")
 """,
         encoding="utf-8",
     )
@@ -121,11 +126,11 @@ if __name__ == "__main__":
 def main():
     project_root = Path(__file__).resolve().parent.parent
 
-    # 检查 PyInstaller
+    # Check PyInstaller
     try:
         import PyInstaller  # noqa: F401
     except ImportError:
-        print("PyInstaller 未安装，正在安装...")
+        _print("PyInstaller not installed, installing...")
         subprocess.run(
             [sys.executable, "-m", "pip", "install", "pyinstaller"],
             check=True,
@@ -133,26 +138,26 @@ def main():
 
     results = []
 
-    # 1. 构建 lamix.exe
+    # 1. Build lamix.exe
     cli_entry = str(project_root / "src" / "cli.py")
     results.append(build_one("lamix", cli_entry, project_root))
 
-    # 2. 构建 lamix-uninstall.exe
+    # 2. Build lamix-uninstall.exe
     uninstall_entry = build_uninstall_entry(project_root)
     results.append(build_one("lamix-uninstall", str(uninstall_entry), project_root))
 
-    # 汇总
-    print("\n" + "=" * 50)
+    # Summary
+    _print("\n" + "=" * 50)
     successes = [r for r in results if r is not None]
     if successes:
-        print(f"构建完成！产出 {len(successes)} 个文件：")
+        _print(f"Build complete! {len(successes)} file(s):")
         for p in successes:
-            print(f"  {p}")
-        print("\n用户使用方式：")
-        print("  双击 lamix.exe -> 启动配置向导和交互式 CLI")
-        print("  双击 lamix-uninstall.exe -> 卸载 Lamix")
+            _print(f"  {p}")
+        _print("\nUsage:")
+        _print("  Double-click lamix.exe -> Start config wizard and CLI")
+        _print("  Double-click lamix-uninstall.exe -> Uninstall Lamix")
     else:
-        print("构建失败。")
+        _print("Build failed.")
         sys.exit(1)
 
 
