@@ -536,7 +536,7 @@ def main() -> None:
         prog="lamix gateway",
         description="Lamix 常驻 daemon：多平台消息网关 + 飞书 WebSocket 长连接监听。",
     )
-    parser.parse_args()
+    parser.parse_known_args()
 
     config = load_config()
     if not is_config_complete(config):

@@ -451,11 +451,7 @@ def _setup_fallback_models(config: dict) -> None:
             api_key = primary_key
             print(f"  使用主模型的 API Key")
         else:
-            try:
-                from getpass import getpass
-                api_key = getpass(f"请输入 {provider_name} 的 API Key（回车跳过）: ").strip()
-            except (EOFError, KeyboardInterrupt):
-                api_key = input(f"请输入 API Key: ").strip()
+            api_key = input(f"请输入 {provider_name} 的 API Key（回车跳过）: ").strip()
             if not api_key:
                 print("  未输入 Key，跳过")
                 continue
@@ -502,13 +498,14 @@ def is_config_complete(config: dict[str, Any]) -> bool:
 def _select(prompt_text: str, options: list[tuple[str, str]]) -> str | None:
     """用 prompt_toolkit 实现上下箭头选择菜单。
 
-    Args:
-        prompt_text: 显示在菜单上方的提示文字
-        options: [(value, label), ...] 选项列表
-
-    Returns:
-        选中项的 value，Esc/Ctrl+C 返回 None
+    当 stdin 不是真实终端时（管道/pty），fallback 到数字输入模式。
     """
+    import sys
+
+    # 非 tty：用数字输入 fallback
+    if not sys.stdin.isatty():
+        return _select_fallback(prompt_text, options)
+
     from prompt_toolkit import Application
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.layout import Layout
@@ -561,6 +558,23 @@ def _select(prompt_text: str, options: list[tuple[str, str]]) -> str | None:
     return result[0]
 
 
+def _select_fallback(prompt_text: str, options: list[tuple[str, str]]) -> str | None:
+    """非 tty 环境下的数字输入选择。"""
+    print(f"\n{prompt_text}")
+    for i, (_, label) in enumerate(options):
+        print(f"  {i + 1}. {label}")
+    try:
+        choice = input("请输入序号: ").strip()
+        if not choice:
+            return None
+        idx = int(choice) - 1
+        if 0 <= idx < len(options):
+            return options[idx][0]
+        return None
+    except (ValueError, EOFError, KeyboardInterrupt):
+        return None
+
+
 def run_setup_wizard(*, title: str | None = None) -> dict[str, Any]:
     """首次运行引导用户填写配置，返回配置字典。"""
     _title = title or '欢迎使用 Lamix！首次运行需要配置 LLM 供应商信息。'
@@ -602,11 +616,7 @@ def run_setup_wizard(*, title: str | None = None) -> dict[str, Any]:
         print(f"\n{_cyan('已选择：' + provider_name)}")
         print(f"{_cyan('API 地址：' + base_url)}")
 
-        try:
-            api_key = getpass(f"请输入 API Key（{key_hint}）: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            # getpass 在某些环境可能失败，降级为普通 input
-            api_key = input(f"请输入 API Key（{key_hint}）: ").strip()
+        api_key = input(f"请输入 API Key（{key_hint}）: ").strip()
 
         config["llm"]["api_key"] = api_key
         config["llm"]["base_url"] = base_url

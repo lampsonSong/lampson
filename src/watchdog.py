@@ -89,8 +89,9 @@ def _restart_daemon(pm) -> None:
     try:
         # 优先使用 lamix 命令，确保 ps aux | grep lamix 能搜到
         lamix_bin = _get_lamix_bin()
+        # 用 python -m src.daemon 启动，避免走 lamix gateway 的 REPL 流程
         if lamix_bin:
-            daemon_command = [lamix_bin, "gateway"]
+            daemon_command = [sys.executable, "-m", "src.daemon"]
         else:
             daemon_command = [sys.executable, "-m", "src.daemon"]
 

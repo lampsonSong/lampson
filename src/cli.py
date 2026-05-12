@@ -224,84 +224,179 @@ def _run_repl(config: dict) -> None:
         print_success("再见！")
 
 
-def _ensure_daemon_running() -> None:
-    """检查 daemon 是否在运行，没有则在后台启动。"""
-    import subprocess
-    from pathlib import Path
-
+def _is_daemon_running() -> bool:
+    """检查 daemon 是否在运行。"""
     pid_path = Path.home() / ".lamix" / "logs" / "daemon.pid"
+    if not pid_path.exists():
+        return False
+    try:
+        pid = int(pid_path.read_text().strip())
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, OSError, ValueError):
+        return False
+
+
+def _is_watchdog_running() -> bool:
+    """检查 watchdog 是否在运行。"""
+    # 先看 pid 文件
+    pid_path = Path.home() / ".lamix" / "logs" / "watchdog.pid"
     if pid_path.exists():
         try:
             pid = int(pid_path.read_text().strip())
-            # 检查进程是否存活
-            try:
-                if sys.platform == "win32":
-                    import ctypes
-                    kernel32 = ctypes.windll.kernel32
-                    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-                    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-                    if handle:
-                        kernel32.CloseHandle(handle)
-                        print_info(f"daemon 已在运行 (PID={pid})")
-                        return
-                else:
-                    os.kill(pid, 0)  # 不发信号，只检查进程存在
-                    print_info(f"daemon 已在运行 (PID={pid})")
-                    # Windows 上确保 watchdog 也在运行
-                    if sys.platform == "win32" and not getattr(sys, "frozen", False):
-                        try:
-                            _ensure_watchdog_on_windows()
-                        except Exception:
-                            pass
-                    return
-            except (ProcessLookupError, OSError):
-                pass  # 进程不存在，继续启动
-        except (ValueError, OSError):
+            os.kill(pid, 0)
+            return True
+        except (ProcessLookupError, OSError, ValueError):
             pass
+    # 兜底：看进程名
+    import subprocess
+    result = subprocess.run(
+        ["ps", "aux"], capture_output=True, text=True
+    )
+    for line in result.stdout.splitlines():
+        if "src.watchdog" in line and "grep" not in line:
+            return True
+    return False
 
-    # 启动 daemon
-    print_info("daemon 未运行，正在后台启动...")
-    log_dir = Path.home() / ".lamix" / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    daemon_log = log_dir / "daemon.log"
 
-    python_exe = sys.executable
-    # PyInstaller 打包后 sys.executable 是 lamix.exe，不能用 -m，
-    # 直接用 lamix gateway 子命令启动 daemon
-    import importlib.util
+def _daemon_start_cmd() -> list[str]:
+    """构造 daemon 启动命令。"""
+    import importlib.util, shutil
+
     _is_frozen = getattr(sys, "frozen", False)
+    python_exe = sys.executable
 
     if _is_frozen:
-        daemon_cmd = [python_exe, "gateway"]
+        return [python_exe, "gateway"]
+    elif sys.platform == "win32":
+        pythonw = python_exe.replace("python.exe", "pythonw.exe")
+        if Path(pythonw).exists():
+            python_exe = pythonw
+        return [python_exe, "-m", "src.daemon"]
     else:
-        # Windows 上用 pythonw.exe 避免弹窗
-        if sys.platform == "win32":
-            pythonw = python_exe.replace("python.exe", "pythonw.exe")
-            if Path(pythonw).exists():
-                python_exe = pythonw
-        daemon_cmd = [python_exe, "-m", "src.daemon"]
+        lamix_path = shutil.which("lamix")
+        if lamix_path:
+            return [lamix_path, "gateway"]
+        return [python_exe, "-m", "src.daemon"]
 
-    try:
-        if sys.platform == "win32" and not _is_frozen:
-            subprocess.Popen(
-                daemon_cmd,
-                stdout=open(daemon_log, "a"),
-                stderr=subprocess.STDOUT,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-                close_fds=True,
-            )
-        else:
-            subprocess.Popen(
-                daemon_cmd,
-                stdout=open(daemon_log, "a"),
-                stderr=subprocess.STDOUT,
-                close_fds=True,
-            )
-        import time
+
+def _start_watchdog() -> None:
+    """启动 watchdog（后台常驻）。"""
+    import subprocess
+
+    log_dir = Path.home() / ".lamix" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    watchdog_log = log_dir / "watchdog.log"
+    watchdog_err = log_dir / "watchdog.err.log"
+
+    subprocess.Popen(
+        [sys.executable, "-m", "src.watchdog"],
+        cwd=str(Path(__file__).resolve().parent.parent),
+        stdout=open(watchdog_log, "a", encoding="utf-8"),
+        stderr=open(watchdog_err, "a", encoding="utf-8"),
+        start_new_session=True,
+    )
+    import time
+    time.sleep(3)
+
+
+def _wait_daemon_ready(timeout: int = 15) -> bool:
+    """等待 daemon 心跳文件出现。"""
+    import time
+
+    log_dir = Path.home() / ".lamix" / "logs"
+    daemon_pid_path = log_dir / "daemon.pid"
+    for _ in range(timeout):
         time.sleep(1)
-        print_success("daemon 已在后台启动")
-    except Exception as e:
-        print_error(f"启动 daemon 失败: {e}")
+        if daemon_pid_path.exists():
+            try:
+                pid = int(daemon_pid_path.read_text().strip())
+                os.kill(pid, 0)
+                return True
+            except (ProcessLookupError, OSError, ValueError):
+                pass
+    return False
+
+
+def gateway_start() -> None:
+    """lamix gateway start: 启动 watchdog + daemon，不进 CLI。"""
+    import subprocess
+
+    # 检查是否已在跑
+    if _is_daemon_running() or _is_watchdog_running():
+        print_info("Lamix 已在运行，无需重复启动。")
+        return
+
+    # 配置检查：LLM 未配置则走 setup wizard（含 LLM + fallback + 飞书全套引导）
+    config = load_config()
+    if not is_config_complete(config):
+        print_info("Lamix 未配置，开始引导配置...\n")
+        try:
+            config = run_setup_wizard()
+        except (KeyboardInterrupt, EOFError):
+            print_info("配置已取消，退出。")
+            sys.exit(0)
+        if not is_config_complete(config):
+            print_error("API Key 未填写，退出。")
+            sys.exit(1)
+
+    # 启动 watchdog（由 watchdog 管理 daemon）
+    print_info("正在启动 watchdog...")
+    _start_watchdog()
+
+    # 4. 等待 daemon 就绪
+    print_info("正在等待 daemon 启动...")
+    if _wait_daemon_ready():
+        print_success("Lamix 已就绪 (PID 见 ~/.lamix/logs/daemon.pid)")
+        print_info("可通过 'lamix cli' 或飞书私聊开始对话。")
+    else:
+        print_warning(
+            "daemon 启动超时，请检查日志: ~/.lamix/logs/daemon_error.log"
+        )
+
+
+def gateway_stop() -> None:
+    """lamix gateway stop: 停止 daemon + watchdog。"""
+    import subprocess, signal, time
+
+    log_dir = Path.home() / ".lamix" / "logs"
+
+    # 停止 daemon
+    daemon_pid_path = log_dir / "daemon.pid"
+    if daemon_pid_path.exists():
+        try:
+            pid = int(daemon_pid_path.read_text().strip())
+            os.kill(pid, signal.SIGTERM)
+            print_info(f"daemon (PID={pid}) 正在停止...")
+        except (ProcessLookupError, OSError, ValueError):
+            pass
+
+    # 停止 watchdog
+    watchdog_pid_path = log_dir / "watchdog.pid"
+    if watchdog_pid_path.exists():
+        try:
+            pid = int(watchdog_pid_path.read_text().strip())
+            os.kill(pid, signal.SIGTERM)
+            print_info(f"watchdog (PID={pid}) 正在停止...")
+        except (ProcessLookupError, OSError, ValueError):
+            pass
+
+    # 等一下让进程自己退出，再强杀
+    time.sleep(3)
+
+    # 强杀残留进程
+    for name in ["src.daemon", "src.watchdog"]:
+        result = subprocess.run(
+            ["pgrep", "-f", name], capture_output=True, text=True
+        )
+        for pid_str in result.stdout.strip().split("\n"):
+            if pid_str:
+                try:
+                    subprocess.run(["kill", "-9", pid_str])
+                except Exception:
+                    pass
+
+    print_success("Lamix 已停止。")
 
 
 def _ensure_watchdog_on_windows() -> None:
@@ -396,8 +491,10 @@ def run_cli(args: argparse.Namespace) -> None:
 
     _init_platform(config)
 
-    # 后台启动 daemon
-    _ensure_daemon_running()
+    # 检查 daemon 是否在跑，没跑则提示先启动
+    if not _is_daemon_running():
+        print_error("daemon 未运行，请先执行: lamix gateway start")
+        sys.exit(1)
 
     # 单条查询模式
     if non_interactive_input:
@@ -422,12 +519,15 @@ def _init_platform(config: dict) -> None:
     """初始化平台相关组件。"""
     # 初始化飞书
     feishu_config = config.get("feishu", {})
-    if feishu_config.get("enabled", False):
+    if feishu_config.get("app_id") and feishu_config.get("app_secret"):
         try:
-            from src.feishu.bot import get_feishu_bot
-            bot = get_feishu_bot(feishu_config)
+            from src.platforms.adapters.feishu import FeishuAdapter
+            adapter = FeishuAdapter({
+                "app_id": feishu_config["app_id"],
+                "app_secret": feishu_config["app_secret"],
+            })
             import threading
-            threading.Thread(target=bot.start, daemon=True).start()
+            threading.Thread(target=adapter.start, daemon=True).start()
         except Exception as e:
             print_error(f"飞书初始化失败: {e}")
 
@@ -576,12 +676,10 @@ def _build_parser() -> argparse.ArgumentParser:
     cli_parser.add_argument("--update", nargs="*", help="自更新命令")
 
     # lamix gateway
-    gateway_parser = subparsers.add_parser("gateway", help="仅启动 daemon")
-    gateway_parser.add_argument(
-        "-p", "--predicate",
-        default="",
-        help="控制选项，逗号分隔: no-feishu, no-repl, no-sandbox"
-    )
+    gateway_parser = subparsers.add_parser("gateway", help="管理 daemon")
+    gateway_sub = gateway_parser.add_subparsers(dest="gateway_action", title="gateway 子命令")
+    start_parser = gateway_sub.add_parser("start", help="启动 watchdog + daemon")
+    stop_parser = gateway_sub.add_parser("stop", help="停止 daemon + watchdog")
 
     # lamix model
     model_parser = subparsers.add_parser("model", help="重新配置 LLM 模型")
@@ -625,7 +723,14 @@ def main() -> None:
     if args.command == "cli":
         run_cli(args)
     elif args.command == "gateway":
-        run_gateway(args)
+        action = getattr(args, "gateway_action", None)
+        if action == "start":
+            gateway_start()
+        elif action == "stop":
+            gateway_stop()
+        else:
+            # 无子命令：走原来逻辑（Windows exe 兼容）
+            run_gateway(args)
     elif args.command == "model":
         run_model(args)
     elif args.command == "update":

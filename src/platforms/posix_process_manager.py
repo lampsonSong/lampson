@@ -91,10 +91,9 @@ class PosixProcessManager(ProcessManager):
         log_dir: Path,
         cwd: Path | None = None,
     ) -> bool:
-        """重启 daemon。
+        """重启 daemon：通过 kill 旧进程 + Popen 拉起新进程（macOS/Linux 通用）。
 
-        macOS: 通过 launchctl kickstart。
-        Linux: 通过 Popen 拉起新进程。
+        不使用 launchctl kickstart，因为 macOS 上它可能找不到 service 导致失败。
         """
         # 先尝试终止旧进程
         old_pid = None
@@ -105,10 +104,7 @@ class PosixProcessManager(ProcessManager):
             except (ValueError, OSError):
                 pass
 
-        if sys.platform == "darwin":
-            return self._restart_via_launchctl()
-        else:
-            return self._restart_via_popen(daemon_command, pid_file, log_dir, cwd)
+        return self._restart_via_popen(daemon_command, pid_file, log_dir, cwd)
 
     def _restart_via_launchctl(self) -> bool:
         """macOS: 通过 launchctl kickstart 重启。"""
