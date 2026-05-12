@@ -400,8 +400,8 @@ def _setup_fallback_models(config: dict) -> None:
             f"选择 {label} 的供应商（回车跳过）：",
             [
                 ("1", "DeepSeek（推荐）"),
-                ("2", "MiniMax"),
-                ("3", "DeepSeek"),
+                ("2", "智谱 GLM"),
+                ("3", "MiniMax"),
                 ("4", "自定义"),
                 ("skip", "跳过，不配置 fallback"),
             ],
