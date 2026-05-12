@@ -163,8 +163,21 @@ def test_update_project_downgrade_to_create(temp_projects: Path):
 
 
 def test_create_skill(temp_skills: Path):
+    # _create_skill 要求内容 >=300 字符且包含 >=3 个编号步骤
+    content = "\n".join(
+        [
+            "这是一个测试技能内容，需要足够长度来满足 300 字符的最低要求。"
+            "这段文字会反复填充以确保总字符数超过阈值。"
+            "在实际使用中，skill 内容通常是一段完整的工作流程描述，"
+            "包含环境准备、执行步骤、验证结果、错误排查等多个环节。"
+            "下面列出具体的操作步骤，每一步都有明确的说明和可执行的命令。",
+            "1. 第一步：执行初始化命令 `init --all`，确保所有依赖安装完毕且环境变量配置正确。",
+            "2. 第二步：运行主程序 `run --config default.yaml`，使用默认配置文件启动服务并监听端口。",
+            "3. 第三步：验证输出结果 `check --verbose`，确认服务健康检查通过且日志无异常。",
+        ]
+    )
     with patch("src.core.reflection.SKILLS_DIR", temp_skills):
-        hint = _create_skill("my-skill", "x" * 200, "测试创建")
+        hint = _create_skill("my-skill", content, "测试创建")
     assert hint is not None
     assert (temp_skills / "my-skill" / "SKILL.md").exists()
 
