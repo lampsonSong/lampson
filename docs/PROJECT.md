@@ -401,7 +401,7 @@ Token 估算 >= context_window * trigger_threshold（默认 90%），且 stop_re
 
 | 轮数 | 处理 |
 |------|------|
-| <= 3 轮 | 对最大轮次的 assistant 回复做摘要（压缩率 >= 30% 才执行，否则跳过） |
+| <= 3 轮 | 对最大轮次做摘要（自动判断 query/assistant 谁长，压缩率 >= 30% 才执行） |
 | > 3 轮 | 进入 Step 3 正常压缩 |
 
 **Step 3: 计算 tail 占比**
@@ -467,7 +467,7 @@ return [summary_msg] + tail_turns
 
 | 场景 | 处理 |
 |------|------|
-| 总轮数 <= 3 轮 | 对最大轮次 assistant 做摘要（压缩率 >= 30% 才执行） |
+| 总轮数 <= 3 轮 | 对最大轮次做摘要（自动判断 query/assistant 谁长，压缩率 >= 30% 才执行） |
 | 只有 1 轮且超长 | 策略 A：对长的一侧做摘要 |
 | assistant 只有 tool_calls 没有文字 | 摘要时跳过，保留原始 tool 消息 |
 | LLM 摘要调用失败 | fallback：保留原始消息，不压缩 |
