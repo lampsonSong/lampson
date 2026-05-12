@@ -106,7 +106,7 @@ Lamix 不是一个用完即走的聊天机器人——它有完整的**自学习
 
 - Python >= 3.11
 - Git
-- [ripgrep](https://github.com/BurntSushi/ripgrep)（搜索功能依赖）
+- [ripgrep](https://github.com/BurntSushi/ripgrep)（可选，搜索性能提升；未安装时自动 fallback 到 Python 实现）
 
 </details>
 
@@ -115,7 +115,7 @@ Lamix 不是一个用完即走的聊天机器人——它有完整的**自学习
 <details>
 <summary><strong>macOS / Linux</strong></summary>
 
-**1. 安装 ripgrep**
+**1. （可选）安装 ripgrep**
 
 ```bash
 brew install ripgrep        # macOS
@@ -179,7 +179,7 @@ lamix gateway
 1. 访问 https://git-scm.com/download/win 下载安装，默认选项即可
 2. 安装时确保勾选 "Add to PATH"（默认已勾选）。装完后打开 CMD 输入 `git --version` 验证
 
-**3. 安装 ripgrep**
+**3. （可选）安装 ripgrep**
 
 1. 从 https://github.com/BurntSushi/ripgrep/releases 下载 `ripgrep-x.x.x-x86_64-pc-windows-msvc.zip`
 2. 解压，将 `rg.exe` 放到固定目录（如 `C:\Tools\`）

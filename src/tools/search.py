@@ -1,11 +1,17 @@
-"""统一搜索工具：合并 search_files + search_content，通过 mode 参数区分。底层使用 ripgrep (rg)。"""
+"""统一搜索工具：合并 search_files + search_content，通过 mode 参数区分。
+优先使用 ripgrep (rg)，不可用时 fallback 到纯 Python 实现。
+"""
 from __future__ import annotations
 
 import os
 import re
 import shutil
 import subprocess
+from pathlib import Path
 from typing import Any
+
+
+# ── ripgrep 查找 ─────────────────────────────────────────────────────────────
 
 def _find_rg() -> str | None:
     """查找 ripgrep 可执行文件路径（跨平台）。"""
@@ -37,6 +43,7 @@ def _find_rg() -> str | None:
 
 # rg 路径解析：优先 PATH 查找，兜底常见安装位置（launchd 不继承 shell PATH）
 _RG_PATH: str | None = _find_rg()
+_has_rg: bool = _RG_PATH is not None
 
 # ReDoS 简单防护：嵌套量词
 _REDOS_RE = re.compile(r"(\([^)]*[+*][^)]*\))[+*]")
@@ -55,7 +62,8 @@ SEARCH_SCHEMA: dict[str, Any] = {
         "name": "search",
         "description": (
             "按文件名或内容搜索。mode='files' 按文件名/glob 搜索（替代 find），"
-            "mode='content' 按文本/正则搜索（替代 grep）。底层用 ripgrep，自动尊重 .gitignore。"
+            "mode='content' 按文本/正则搜索（替代 grep）。"
+            "优先使用 ripgrep (rg)，未安装时自动 fallback 到纯 Python 实现。"
         ),
         "parameters": {
             "type": "object",
@@ -107,22 +115,18 @@ SEARCH_SCHEMA: dict[str, Any] = {
 # 辅助函数
 # ---------------------------------------------------------------------------
 
-def _check_rg() -> str | None:
-    """返回 rg 可执行路径，不可用时为 None。"""
-    return _RG_PATH
-
-
 def _rg_missing_msg() -> str:
     import sys
+    if _has_rg:
+        return ""  # 有 rg，不会调用这个
     if sys.platform == "win32":
         return (
-            "[错误] ripgrep (rg) 未安装。"
-            "请运行 winget install BurntSushi.ripgrep 或从 "
-            "https://github.com/BurntSushi/ripgrep/releases 下载。"
+            "[提示] 当前使用 Python 搜索实现（ripgrep 未安装）。"
+            "安装 rg 可提升搜索性能：winget install BurntSushi.ripgrep"
         )
     return (
-        "[错误] ripgrep (rg) 未安装，无法使用搜索功能。"
-        "请运行 brew install ripgrep 安装。"
+        "[提示] 当前使用 Python 搜索实现（ripgrep 未安装）。"
+        "安装 rg 可提升搜索性能：brew install ripgrep"
     )
 
 
@@ -170,7 +174,7 @@ def _run_rg(args: list[str], abs_path: str) -> tuple[list[str] | None, str | Non
     - 其他执行错误：(None, 错误信息)
     """
     if _RG_PATH is None:
-        return None, _rg_missing_msg()
+        return None, None  # caller 负责 fallback
 
     cmd = [_RG_PATH, "--no-messages"] + args + [abs_path]
     try:
@@ -212,6 +216,185 @@ def _rg_output_match_count(lines: list[str]) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Python Fallback 实现
+# ---------------------------------------------------------------------------
+
+def _load_gitignore(root: Path) -> set[str]:
+    """读取 .gitignore 模式，返回需要忽略的目录/文件集合。"""
+    gi_path = root / ".gitignore"
+    if not gi_path.is_file():
+        return set()
+
+    ignored = set()
+    try:
+        for line in gi_path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            # 简单处理：只处理目录级模式
+            if line.endswith("/"):
+                ignored.add(line.rstrip("/"))
+            else:
+                ignored.add(line)
+    except Exception:
+        pass
+    return ignored
+
+
+def _should_ignore(rel_path: str, gitignore: set[str]) -> bool:
+    """简单判断路径是否应该被忽略。"""
+    parts = rel_path.split(os.sep)
+    for part in parts:
+        if part in gitignore:
+            return True
+        if part == ".git":
+            return True
+    return False
+
+
+def _py_search_files(
+    pattern: str,
+    abs_path: str,
+    max_depth: int,
+    max_results: int,
+) -> str:
+    """Python 实现：按文件名 glob 搜索。"""
+    root = Path(abs_path)
+    gitignore = _load_gitignore(root)
+
+    results = []
+    depth_limit = max_depth
+
+    try:
+        # 使用 Path.glob 搜索
+        for p in root.rglob(pattern):
+            if not p.is_file():
+                continue
+            try:
+                rel = p.relative_to(root)
+            except ValueError:
+                continue
+
+            # 检查深度
+            depth = len(rel.parts) - 1
+            if depth > depth_limit:
+                continue
+
+            # 检查 gitignore
+            rel_str = str(rel)
+            if _should_ignore(rel_str, gitignore):
+                continue
+
+            results.append(rel_str)
+            if len(results) >= max_results:
+                break
+    except Exception as e:
+        return f"[错误] 搜索失败：{e}"
+
+    n = len(results)
+    if n == 0:
+        hint = _rg_missing_msg()
+        return f"未找到匹配 '{pattern}' 的文件（搜索路径：{abs_path}）。{hint}"
+
+    out_lines, truncated = _truncate_lines(sorted(results), max_results)
+    text = f"找到 {n} 个文件（搜索路径：{abs_path}）：\n\n" + "\n".join(out_lines)
+    if truncated:
+        text += f"\n\n...（结果过多，已截断到 {max_results} 条，请缩小搜索范围）"
+    return text
+
+
+def _py_search_content(
+    pattern: str,
+    abs_path: str,
+    max_results: int,
+    context_lines: int,
+    file_glob: str | None,
+) -> str:
+    """Python 实现：按内容正则搜索。"""
+    root = Path(abs_path)
+    gitignore = _load_gitignore(root)
+
+    # 编译正则
+    try:
+        regex = re.compile(pattern)
+    except re.error as e:
+        return f"[错误] 正则表达式错误：{e}"
+
+    # 确定是否使用固定字符串（无正则元字符）
+    use_fixed = not bool(_RE_META.search(pattern))
+    if use_fixed:
+        search_func = lambda line: pattern in line
+    else:
+        search_func = regex.search
+
+    results: list[str] = []
+    total_matches = 0
+    file_count = 0
+    line_cap = min(2000, max(100, max_results * (2 * max(context_lines, 0) + 4)))
+
+    try:
+        # 确定搜索范围
+        if file_glob:
+            files = list(root.rglob(file_glob))
+        else:
+            files = list(root.rglob("*"))
+
+        for fpath in files:
+            if not fpath.is_file():
+                continue
+
+            try:
+                rel = fpath.relative_to(root)
+            except ValueError:
+                continue
+
+            rel_str = str(rel)
+            if _should_ignore(rel_str, gitignore):
+                continue
+
+            # 跳过二进制文件
+            try:
+                content = fpath.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                continue
+
+            file_count += 1
+            if file_count > 1000:  # 限制文件数量防止太慢
+                break
+
+            lines = content.splitlines()
+            for i, line in enumerate(lines):
+                if search_func(line):
+                    total_matches += 1
+                    # 生成类似 rg 的输出格式
+                    for j in range(max(0, i - context_lines), min(len(lines), i + context_lines + 1)):
+                        line_no = j + 1
+                        prefix = ">" if j == i else " "
+                        results.append(f"{rel_str}:{line_no}:{prefix}{lines[j]}")
+                        if len(results) >= line_cap:
+                            break
+                    results.append("---")
+                    if total_matches >= max_results:
+                        break
+            if total_matches >= max_results or len(results) >= line_cap:
+                break
+
+    except Exception as e:
+        return f"[错误] 搜索失败：{e}"
+
+    hint = _rg_missing_msg()
+    if not results:
+        return f"未找到包含 '{pattern}' 的内容（搜索路径：{abs_path}）。{hint}"
+
+    mcount = min(total_matches, max_results)
+    head = f'在 {abs_path} 中搜索 "{pattern}"（共 {mcount} 处匹配）'
+    text = f"{head}（Python 实现）\n\n" + "\n".join(results[:line_cap])
+    if len(results) >= line_cap or total_matches > max_results:
+        text += f"\n\n...（结果过多，已截断，请缩小搜索范围）"
+    return text
+
+
+# ---------------------------------------------------------------------------
 # 搜索核心
 # ---------------------------------------------------------------------------
 
@@ -221,30 +404,31 @@ def _search_files(
     max_depth: int,
     max_results: int,
 ) -> str:
-    """按文件名搜索，一次到底。"""
-    if not _check_rg():
-        return _rg_missing_msg()
+    """按文件名搜索。优先用 rg，不可用时 fallback 到 Python。"""
+    if _has_rg:
+        args = [
+            "--files",
+            "--glob", pattern,
+            "--max-depth", str(max_depth),
+            "--max-count", str(max_results),
+        ]
+        lines, err = _run_rg(args, abs_path)
 
-    args = [
-        "--files",
-        "--glob", pattern,
-        "--max-depth", str(max_depth),
-        "--max-count", str(max_results),
-    ]
-    lines, err = _run_rg(args, abs_path)
+        if err is not None:
+            return err
 
-    if err is not None:
-        return err
+        if lines:
+            out_lines, truncated = _truncate_lines(lines, max_results)
+            n = len(out_lines)
+            text = f"找到 {n} 个文件（搜索路径：{abs_path}）：\n\n" + "\n".join(out_lines)
+            if truncated:
+                text += f"\n\n...（结果过多，已截断到 {max_results} 条，请缩小搜索范围）"
+            return text
 
-    if lines:
-        out_lines, truncated = _truncate_lines(lines, max_results)
-        n = len(out_lines)
-        text = f"找到 {n} 个文件（搜索路径：{abs_path}）：\n\n" + "\n".join(out_lines)
-        if truncated:
-            text += f"\n\n...（结果过多，已截断到 {max_results} 条，请缩小搜索范围）"
-        return text
+        return f"未找到匹配 '{pattern}' 的文件（搜索路径：{abs_path}）。"
 
-    return f"未找到匹配 '{pattern}' 的文件（搜索路径：{abs_path}）。"
+    # Fallback 到 Python 实现
+    return _py_search_files(pattern, abs_path, max_depth, max_results)
 
 
 def _search_content(
@@ -254,32 +438,33 @@ def _search_content(
     context_lines: int,
     file_glob: str | None,
 ) -> str:
-    """按内容搜索，一次到底。"""
-    if not _check_rg():
-        return _rg_missing_msg()
+    """按内容搜索。优先用 rg，不可用时 fallback 到 Python。"""
+    if _has_rg:
+        args: list[str] = [
+            "--line-number",
+            "--max-depth", "10",
+            "--max-count", str(max_results),
+        ]
+        if context_lines > 0:
+            args.extend(["--context", str(context_lines)])
+        if file_glob:
+            args.extend(["--glob", file_glob])
+        if _use_fixed_strings(pattern):
+            args.append("--fixed-strings")
+        args.append(pattern)
 
-    args: list[str] = [
-        "--line-number",
-        "--max-depth", "10",
-        "--max-count", str(max_results),
-    ]
-    if context_lines > 0:
-        args.extend(["--context", str(context_lines)])
-    if file_glob:
-        args.extend(["--glob", file_glob])
-    if _use_fixed_strings(pattern):
-        args.append("--fixed-strings")
-    args.append(pattern)
+        lines, err = _run_rg(args, abs_path)
 
-    lines, err = _run_rg(args, abs_path)
+        if err is not None:
+            return err
 
-    if err is not None:
-        return err
+        if lines:
+            return _format_content_output(pattern, abs_path, lines, max_results, context_lines)
 
-    if lines:
-        return _format_content_output(pattern, abs_path, lines, max_results, context_lines)
+        return f"未找到包含 '{pattern}' 的内容（搜索路径：{abs_path}）。"
 
-    return f"未找到包含 '{pattern}' 的内容（搜索路径：{abs_path}）。"
+    # Fallback 到 Python 实现
+    return _py_search_content(pattern, abs_path, max_results, context_lines, file_glob)
 
 
 def _format_content_output(
