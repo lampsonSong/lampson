@@ -903,6 +903,8 @@ class Session:
             llm.messages[1:1] = inject_msgs
         else:
             llm.messages[:0] = inject_msgs
+        # 重置上次 token 计数，让 _estimate_context_tokens 基于实际 messages 重新计算
+        self.agent.last_prompt_tokens = 0
 
         content_display = "\n".join(content_lines)
         result_text = (

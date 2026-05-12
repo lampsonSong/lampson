@@ -612,10 +612,12 @@ class FeishuAdapter(BasePlatformAdapter):
             # 处理完毕后检查：如果 session 仍为空（无 user/assistant 消息），立即清理
             # 典型场景：daemon 重启后积压的 /resume /compaction 等命令，
             # 走 _handle_command 不写 JSONL，留下空 session
+            # 但如果 llm.messages 中已有加载的消息（如 /resume），跳过清理
             if session.session_id:
                 try:
                     from src.memory import session_store as ss
-                    if ss.is_session_empty(session.session_id):
+                    _has_memory_msgs = hasattr(session, "agent") and hasattr(session.agent, "llm") and len(session.agent.llm.messages) > 1
+                    if ss.is_session_empty(session.session_id) and not _has_memory_msgs:
                         self.session_manager.remove_session("feishu", open_id)
                 except Exception:
                     pass
