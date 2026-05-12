@@ -487,7 +487,7 @@ class Session:
             )
             if cr is not None:
                 if cr.success:
-                    compaction_msg = f"[上下文压缩] 已完成，归档 {cr.archived_count} 条内容。"
+                    compaction_msg = f"[上下文压缩] 已完成，归档 {cr.archived_count} 条内容，{cr.tokens_before} → {cr.tokens_after} token。"
                     self._current_segment += 1
                     collector.record_compaction()
                 else:
@@ -617,7 +617,7 @@ class Session:
                 )
                 if cr is not None:
                     if cr.success:
-                        compaction_msg = f"[上下文压缩] 已完成，归档 {cr.archived_count} 条内容。"
+                        compaction_msg = f"[上下文压缩] 已完成，归档 {cr.archived_count} 条内容，{cr.tokens_before} → {cr.tokens_after} token。"
                         self._current_segment += 1
                         collector.record_compaction()
                     else:
@@ -1058,7 +1058,7 @@ class Session:
             if cr.success:
                 self._current_segment += 1
                 return HandleResult(
-                    reply=f"[上下文压缩] 已完成，归档 {cr.archived_count} 条内容。",
+                    reply=f"[上下文压缩] 已完成，归档 {cr.archived_count} 条内容，{cr.tokens_before} → {cr.tokens_after} token。",
                     is_command=True,
                     compaction_msg="",
                 )

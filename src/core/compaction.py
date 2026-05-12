@@ -76,6 +76,8 @@ class CompactionResult:
     archived_count: int = 0
     archive_details: str = ""
     archive_targets: list[dict[str, Any]] = field(default_factory=list)
+    tokens_before: int = 0  # 压缩前 token 估算数
+    tokens_after: int = 0   # 压缩后 token 估算数
     error: str | None = None
 
 
@@ -732,4 +734,8 @@ def apply_compaction(
             f"system prompt 可能过长"
         )
 
+
+    # 记录压缩前后 token 数
+    result.tokens_before = estimated_tokens
+    result.tokens_after = final_estimated
     return result

@@ -164,7 +164,7 @@ def _run_repl(config: dict) -> None:
                         if cr is not None:
                             if cr.success:
                                 print(
-                                    f"[上下文压缩] 已完成，归档 {cr.archived_count} 条内容。"
+                                    f"[上下文压缩] 已完成，归档 {cr.archived_count} 条内容，{cr.tokens_before} → {cr.tokens_after} token。"
                                 )
                             else:
                                 print(f"[上下文压缩] 失败: {cr.error}")
