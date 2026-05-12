@@ -389,6 +389,3 @@ lamix/
 
 </details>
 
----
-
-<sub>Lamix 使用 MIT 协议，详情见 [LICENSE](LICENSE)。</sub>
