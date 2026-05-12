@@ -76,7 +76,7 @@ def _cli_progress_callback(event: dict) -> None:
 
 
 def _maybe_greet_first_run(session) -> None:
-    """首次运行时自动发一句问候，不追问个人信息，从自然对话中学习。"""
+    """首次运行时固定问候语。"""
     user_path = LAMIX_DIR / "USER.md"
     if not user_path.exists():
         return
@@ -86,14 +86,8 @@ def _maybe_greet_first_run(session) -> None:
         return
     # 判断是否仍是默认内容（只包含"称呼：用户"之类的占位）
     if "称呼：用户" in user_content or len(user_content) < 30:
-        result = session.handle_input("[系统] 这是首次运行，请用一句话简短问候用户，不要追问任何个人信息。")
-        if result.reply:
-            # 去掉可能的 "Lamix>" 前缀
-            reply = result.reply
-            if reply.startswith("Lamix> "):
-                reply = reply[7:]
-            print()
-            print_bot(reply)
+        print()
+        print_bot("你好！我是 Lamix，随时帮你探索这个世界的 AI 伙计 🚀")
 
 
 def _run_repl(config: dict) -> None:
