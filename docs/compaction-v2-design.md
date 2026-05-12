@@ -1,5 +1,7 @@
 # Compaction V2 方案设计
 
+> **状态：已实现**（commit `5cc9333`）
+
 ## 1. 现状问题
 
 当前 compaction 实现的核心问题：
