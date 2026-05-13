@@ -72,6 +72,7 @@ class TestPlatformManager:
                         platform="unknown",
                         sender_id="test",
                         chat_id="test",
+                        thread_id=None,
                         message_id="1",
                         text="hello",
                     )
@@ -103,6 +104,7 @@ class TestPlatformManager:
                     platform="feishu",
                     sender_id="user123",
                     chat_id="chat456",
+                    thread_id=None,
                     message_id="msg789",
                     text="hello",
                 )
