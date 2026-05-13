@@ -250,12 +250,22 @@ def _is_watchdog_running() -> bool:
             pass
     # 兜底：看进程名
     import subprocess
-    result = subprocess.run(
-        ["ps", "aux"], capture_output=True, text=True
-    )
-    for line in result.stdout.splitlines():
-        if "src.watchdog" in line and "grep" not in line:
-            return True
+    import sys
+
+    if sys.platform == "win32":
+        result = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq python.exe"], capture_output=True, text=True
+        )
+        for line in result.stdout.splitlines():
+            if "watchdog" in line.lower():
+                return True
+    else:
+        result = subprocess.run(
+            ["ps", "aux"], capture_output=True, text=True
+        )
+        for line in result.stdout.splitlines():
+            if "src.watchdog" in line and "grep" not in line:
+                return True
     return False
 
 
