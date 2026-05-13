@@ -43,7 +43,7 @@ MEMORY_GUIDANCE = (
     "\n"
     "三层内容可能重叠，没关系，重复不影响，按需加载即可。优先记能减少未来重复沟通的内容。\n"
     "\n"
-    "用户的性格、称呼、偏好、纠错等统一写在 ~/.lamix/user.md。"
+    "用户的性格、称呼、偏好、纠错等统一写在 ~/.lamix/USER.md。"
 )
 
 SKILLS_GUIDANCE = (
@@ -189,13 +189,13 @@ def _projects_mtime_fingerprint() -> frozenset[tuple[str, float]]:
 def _extract_project_info(path: Path) -> tuple[str, str]:
     """从 project md 文件提取项目名和一句话描述。"""
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        raw = path.read_text(encoding="utf-8")
     except OSError:
         return path.stem, ""
 
     # 取第一行作为名字（去掉 # 号）
     name = ""
-    for line in lines:
+    for line in raw.splitlines():
         stripped = line.strip()
         if stripped.startswith("# "):
             name = stripped[2:].strip()
@@ -203,15 +203,13 @@ def _extract_project_info(path: Path) -> tuple[str, str]:
     if not name:
         name = path.stem
 
-    # 取第一段非空内容作为描述，跳过表格行
-    desc = ""
-    for line in lines:
+    # 用 frontmatter 解析器跳过 meta，从 body 取第一段描述
+    _meta, body = _parse_frontmatter(raw)
+    for line in body.splitlines():
         stripped = line.strip()
         if stripped and not stripped.startswith("#") and not stripped.startswith("|"):
-            desc = stripped
-            break
-
-    return name, desc
+            return name, stripped
+    return name, ""
 
 
 def build_project_index() -> str:
@@ -309,7 +307,7 @@ def _info_mtime_fingerprint() -> frozenset[tuple[str, float]]:
 
 
 def build_info_index() -> str:
-    """扫描 info/*.md，生成信息索引。"""
+    """扫描 ~/.lamix/info/*.md，生成信息索引。"""
     global _info_index_cache
     if not INFO_DIR.exists():
         _info_index_cache = (frozenset(), "")
@@ -319,24 +317,29 @@ def build_info_index() -> str:
     if _info_index_cache is not None and _info_index_cache[0] == key_before:
         return _info_index_cache[1]
 
-    lines = [
+    lines: list[str] = [
         "## Info（按需加载）",
         "以下是你已记录的知识性信息，可通过 info(name=\"文件名\") 加载。",
         "",
     ]
     for p in sorted(INFO_DIR.glob("*.md")):
         try:
-            raw = p.read_text(encoding="utf-8")
+            meta, body = _parse_frontmatter(p.read_text(encoding="utf-8"))
         except OSError:
             continue
-        meta, body = _parse_frontmatter(raw)
-        desc = meta.get("description", "")
-        name = meta.get("name", p.stem)
-        if desc:
-            lines.append(f"- **{name}**: {desc}")
+        if meta:
+            name = str(meta.get("name", "") or p.stem)
+            desc = str(meta.get("description", ""))
         else:
-            first_line = body.split("\n")[0].lstrip("# ").strip()
-            lines.append(f"- **{name}**: {first_line[:80]}")
+            name = p.stem
+            # 取第一段非空内容作为描述
+            desc = ""
+            for line in p.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if stripped and not stripped.startswith("#"):
+                    desc = stripped
+                    break
+        lines.append(f"- **{name}**: {desc}")
 
     text = "\n".join(lines)
     _info_index_cache = (key_before, text)
@@ -344,84 +347,84 @@ def build_info_index() -> str:
 
 
 def load_info(name: str) -> str:
-    """加载指定 info 文件内容。"""
+    """加载 info/xxx.md 内容。"""
     if not name:
-        return 'info 需要 name 参数，例如：info(name="some-info")'
+        return "info 需要 name 参数，例如：info(name=\"api-reference\")"
 
     if not INFO_DIR.exists():
         return f"[info 目录不存在：{INFO_DIR}]"
 
-    path = INFO_DIR / f"{name}.md"
-    if not path.is_file():
-        candidates = list(INFO_DIR.glob(f"*{name}*.md"))
-        if len(candidates) == 1:
-            path = candidates[0]
-        elif len(candidates) > 1:
-            names = ", ".join(f.stem for f in candidates)
-            return f"[名称 '{name}' 不唯一，请更具体：{names}]"
+    # 精确匹配
+    for md_file in INFO_DIR.glob("*.md"):
+        if md_file.stem.lower() == name.lower():
+            try:
+                content = md_file.read_text(encoding="utf-8").strip()
+                # 去掉 frontmatter
+                _meta, body = _parse_frontmatter(content)
+                if body.strip():
+                    return body.strip()
+                return content
+            except OSError:
+                pass
 
-    if not path.is_file():
-        available = [f.stem for f in INFO_DIR.glob("*.md")]
-        avail_str = ", ".join(available) if available else "(none)"
-        return f"[info '{name}' not found]\n\nAvailable: {avail_str}"
+    # 模糊匹配
+    for md_file in INFO_DIR.glob("*.md"):
+        if name.lower() in md_file.stem.lower():
+            try:
+                content = md_file.read_text(encoding="utf-8").strip()
+                _meta, body = _parse_frontmatter(content)
+                if body.strip():
+                    return body.strip()
+                return content
+            except OSError:
+                pass
 
-    try:
-        content = path.read_text(encoding="utf-8").strip()
-        if not content:
-            return f"[info '{name}' 内容为空]"
-        meta, body = _parse_frontmatter(content)
-        # 更新 last_used_at
-        from datetime import date
-        meta["last_used_at"] = str(date.today())
-        write_info_with_frontmatter(path, meta, body if body else content)
-        return body.strip() if body.strip() else content
-    except OSError as e:
-        return f"[读取失败：{e}]"
+    available = [f.stem for f in INFO_DIR.glob("*.md")]
+    avail_str = ", ".join(available) if available else "(none)"
+    return f"[info '{name}' not found]\n\nAvailable: {avail_str}"
 
 
 def write_info_with_frontmatter(path: Path, meta: dict, body: str) -> None:
-    """将 meta + body 写回 info 文件。"""
-    import yaml
+    """将 YAML frontmatter + 正文写入 info 文件。"""
     fm = yaml.dump(meta, allow_unicode=True, default_flow_style=False).strip()
     path.write_text(f"---\n{fm}\n---\n\n{body}\n", encoding="utf-8")
 
 
-# ── Identity & User 加载 ─────────────────────────────────────────────────────
-
 def _read_config_template(path: Path) -> str:
-    """读取配置模板文件，失败返回空字符串。"""
     try:
-        content = path.read_text(encoding="utf-8").strip()
-        return content
+        return path.read_text(encoding="utf-8")
     except OSError:
         return ""
-
-
-def _ensure_user_file() -> None:
-    """首次运行时将 default_user.md 模板复制为 ~/.lamix/USER.md。"""
-    if USER_PATH.exists():
-        return
-    template = _read_config_template(_DEFAULT_USER_PATH)
-    if template:
-        USER_PATH.parent.mkdir(parents=True, exist_ok=True)
-        USER_PATH.write_text(template, encoding="utf-8")
 
 
 def load_identity() -> str:
     """加载 ~/.lamix/MEMORY.md，不存在则用 config/default_memory.md。"""
     if MEMORY_PATH.exists():
         try:
-            content = MEMORY_PATH.read_text(encoding="utf-8").strip()
-            if content:
-                return content
+            return MEMORY_PATH.read_text(encoding="utf-8").strip()
         except OSError:
             pass
-    # 兜底：读仓库配置模板
-    fallback = _read_config_template(_DEFAULT_IDENTITY_PATH)
-    return fallback or "你是 Lamix，一个 CLI 智能助手。"
+    return _read_config_template(_DEFAULT_IDENTITY_PATH)
 
 
-USER_MD_MAX_LENGTH = 2000  # USER.md 最大字符数
+# ── User ──────────────────────────────────────────────────────────────────────
+
+# 硬编码的默认值（不可用户配置）
+_IDENTITY_DEFAULTS = {
+    "你是 Lamix。",
+    "你是 Lamix",
+    "你是 lamix。",
+    "你是 lamix",
+}
+
+_fallback_identity = "\n".join([
+    "你是 Lamix，一个 CLI 智能助手。",
+    "你擅长自动化、代码、数据分析和系统运维。",
+    "你的记忆分为三层：skills（工作流程）、info（零散信息）、projects（项目上下文）。",
+    "三层内容可能重叠，没关系，重复不影响，按需加载即可。优先记能减少未来重复沟通的内容。",
+    "用户的性格、称呼、偏好、纠错等统一写在 ~/.lamix/USER.md。",
+])
+
 
 def load_user() -> str:
     """加载 ~/.lamix/USER.md，不存在则从模板复制后读取。
@@ -460,22 +463,31 @@ def _notify_user_md_oversize(length: int) -> None:
             return
     except Exception:
         pass
-    logger.warning(warning)
+    # fallback: 打印到 stderr（CLI 场景）
+    import sys
+    print(warning, file=sys.stderr)
 
-
-# ── Model Guidance ────────────────────────────────────────────────────────────
 
 def build_model_guidance(model: str) -> list[str]:
-    """根据模型类型返回对应的行为指引。"""
-    layers = []
+    """根据模型返回对应指引（目前仅做占位符扩展）。"""
+    # TODO: 可扩展为按模型注入特定提示，如 GLM 的 tool_calls 格式要求
+    return []
 
-    # 所有现代模型都支持 tool_calls，统一告知使用工具调用
-    layers.append(
-        "请使用工具调用（tool_calls）完成任务，"
-        "不要尝试用文本描述工具调用。"
-    )
 
-    return layers
+def _ensure_user_file() -> None:
+    """首次运行时将 default_user.md 模板复制为 ~/.lamix/USER.md。"""
+    if USER_PATH.exists():
+        return
+    default = _read_config_template(_DEFAULT_USER_PATH)
+    if not default:
+        return
+    try:
+        USER_PATH.write_text(default, encoding="utf-8")
+    except OSError:
+        pass
+
+
+USER_MD_MAX_LENGTH = 2000  # USER.md 最大字符数
 
 
 # ── PromptBuilder ────────────────────────────────────────────────────────────
@@ -525,3 +537,16 @@ class PromptBuilder:
             layers.append("# Channel Context\n\n当前消息来源: " + self.channel)
 
         return "\n\n".join(layer for layer in layers if layer.strip())
+
+
+# ── 一次性清理旧 index 文件（2025-05 前无 .index_cache）────────────────────
+def _cleanup_old_index_files():
+    """删除旧的 .index 文件（已被 frozenset 缓存取代）。"""
+    for dir_path in (SKILLS_DIR, PROJECTS_DIR, INFO_DIR):
+        if not dir_path.exists():
+            continue
+        for f in dir_path.glob("*.index"):
+            try:
+                f.unlink()
+            except OSError:
+                pass
