@@ -733,7 +733,9 @@ def main() -> None:
                 if not is_config_complete(config):
                     sys.exit(1)
             _init_platform(config)
-            _ensure_daemon_running()
+            if not _is_daemon_running() and not _is_watchdog_running():
+                print_error("daemon 未运行，请先执行: lamix gateway start")
+                sys.exit(1)
             _run_repl(config)
         else:
             # macOS/Linux 开发环境：显示帮助
