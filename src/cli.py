@@ -739,8 +739,8 @@ def main() -> None:
         elif action == "stop":
             gateway_stop()
         else:
-            # 无子命令：走原来逻辑（Windows exe 兼容）
-            run_gateway(args)
+            # 无子命令：显示 gateway 子命令帮助
+            gateway_parser.print_help()
     elif args.command == "model":
         run_model(args)
     elif args.command == "update":
