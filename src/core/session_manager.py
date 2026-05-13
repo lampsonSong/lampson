@@ -219,6 +219,18 @@ class SessionManager:
             except Exception as e:
                 logger.error(f"[session_manager] 清理空 session {sid} 失败: {e}")
 
+    def refresh_all_indices(self) -> None:
+        """通知所有活跃 Session 重建索引（memory 目录文件变更时调用）。"""
+        with self._lock:
+            sessions = list(self._sessions.values())
+            if self._cli_session is not None:
+                sessions.append(self._cli_session)
+        for session in sessions:
+            try:
+                session.refresh_indices()
+            except Exception as e:
+                logger.error(f"[session_manager] refresh_indices 失败: {e}")
+
     def close_all(self) -> None:
         """关闭所有 Session（进程退出时调用）。"""
         from src.memory import session_store as ss

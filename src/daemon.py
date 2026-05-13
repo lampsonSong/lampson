@@ -570,6 +570,24 @@ def main() -> None:
             _heartbeat_mgr.stop(user_initiated=True)
             return
 
+    # ── 启动时强制刷新索引 ──────────────────────────────────────────────
+    from src.core.indexer import ProjectIndex, SkillIndex
+    from src.core.config import INDEX_DIR, SKILLS_DIR, PROJECTS_DIR
+
+    try:
+        skills_path = Path(str(config.get("skills_path", str(SKILLS_DIR)))).expanduser()
+        projects_path = Path(str(config.get("projects_path", str(PROJECTS_DIR)))).expanduser()
+        embedding_cfg = config.get("retrieval", {})
+
+        skill_index = SkillIndex(skills_path, INDEX_DIR)
+        skill_index.load_or_build()
+        project_index = ProjectIndex(projects_path, INDEX_DIR, embedding_config=embedding_cfg)
+        project_index.load_or_build()
+        logger.info("[daemon] 索引已强制刷新 (skill=%d, project=%d)",
+                     len(skill_index._entries), len(project_index._entries))
+    except Exception as e:
+        logger.warning(f"[daemon] 索引刷新失败: {e}")
+
     # ── 初始化 SessionManager ──────────────────────────────────────────────
     mgr = get_session_manager(config)
     session = mgr.get_or_create("cli", "default")
@@ -625,6 +643,9 @@ def main() -> None:
     # ── Config 热重载检测 ────────────────────────────────────────────────
     _start_config_watcher(pm, config)
 
+    # ── Memory 目录变更检测（自动刷新索引）─────────────────────────────
+    _start_memory_watcher(mgr)
+
     # ── 主事件循环 ────────────────────────────────────────────────────────
     try:
         asyncio.run(pm.run())
@@ -671,6 +692,46 @@ def _get_feishu_credentials(config_path) -> tuple[str, str]:
         )
     except Exception:
         return ("", "")
+
+
+def _start_memory_watcher(mgr) -> None:
+    """监听 memory/skills、memory/projects、memory/info 目录的 .md 文件变化，自动刷新索引。"""
+    from src.core.config import SKILLS_DIR, PROJECTS_DIR, INFO_DIR
+
+    watch_dirs = [SKILLS_DIR, PROJECTS_DIR, INFO_DIR]
+
+    def _snapshot() -> dict:
+        state: dict[str, float] = {}
+        for d in watch_dirs:
+            if d.exists():
+                # skills 是嵌套结构：skills/xxx/SKILL.md，需要递归
+                if d == SKILLS_DIR:
+                    for p in d.rglob("*.md"):
+                        state[str(p)] = p.stat().st_mtime
+                else:
+                    # projects/info 是平铺结构
+                    for p in d.glob("*.md"):
+                        state[str(p)] = p.stat().st_mtime
+        return state
+
+    def _watcher() -> None:
+        last_state = _snapshot()
+        while not _shutdown.is_set():
+            _shutdown.wait(5)
+            if _shutdown.is_set():
+                break
+            try:
+                current = _snapshot()
+                if current != last_state:
+                    last_state = current
+                    logger.info("[daemon] memory 目录变更，触发索引刷新")
+                    mgr.refresh_all_indices()
+            except Exception as e:
+                logger.error(f"[daemon] memory watcher 异常: {e}")
+
+    t = threading.Thread(target=_watcher, daemon=True, name="memory-watcher")
+    t.start()
+    logger.info("[daemon] memory watcher 已启动")
 
 
 def _start_config_watcher(pm, config: dict) -> None:

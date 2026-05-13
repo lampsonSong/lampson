@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from openai import OpenAI, APITimeoutError, APIConnectionError, RateLimitError
 from openai.types.chat import ChatCompletion
 
+from src.core.config import SKILLS_DIR, PROJECTS_DIR, INFO_DIR
 from src.core.prompt_builder import MEMORY_PATH, USER_PATH, PromptBuilder
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,22 @@ def _get_identity_mtimes() -> tuple[float, float]:
     memory_mtime = MEMORY_PATH.stat().st_mtime if MEMORY_PATH.exists() else 0.0
     user_mtime = USER_PATH.stat().st_mtime if USER_PATH.exists() else 0.0
     return (memory_mtime, user_mtime)
+
+
+def _get_index_fingerprint() -> frozenset[tuple[str, float]]:
+    """获取 skills/projects/info 目录所有 .md 文件的 mtime 指纹。"""
+    items: list[tuple[str, float]] = []
+    for d in (SKILLS_DIR, PROJECTS_DIR, INFO_DIR):
+        if not d.exists():
+            continue
+        # skills 是嵌套结构，需要递归
+        matcher = d.rglob if d == SKILLS_DIR else d.glob
+        for p in matcher("*.md"):
+            try:
+                items.append((str(p), p.stat().st_mtime))
+            except OSError:
+                pass
+    return frozenset(items)
 
 
 class LLMClient:
@@ -50,12 +67,14 @@ class LLMClient:
         self.messages: list[dict[str, Any]] = []
         self._prompt_builder = PromptBuilder(model=model, channel=channel)
         self._identity_mtimes: tuple[float, float] = _get_identity_mtimes()
+        self._index_fingerprint: frozenset[tuple[str, float]] = _get_index_fingerprint()
 
     def set_system_context(self) -> None:
         """设置 system prompt（通过 PromptBuilder 分层构建，含 MEMORY.md）。"""
         content = self._prompt_builder.build()
         self.messages = [{"role": "system", "content": content}]
         self._identity_mtimes = _get_identity_mtimes()
+        self._index_fingerprint = _get_index_fingerprint()
 
     def refresh_system_prompt(self) -> None:
         """原地刷新 system prompt 内容（不丢弃对话历史）。
@@ -71,15 +90,26 @@ class LLMClient:
             self.messages.insert(0, {"role": "system", "content": new_content})
 
     def auto_refresh_if_needed(self) -> None:
-        """检测 MEMORY.md / USER.md 是否变化，若是则刷新 system prompt。
+        """检测 MEMORY.md / USER.md 以及 skills/projects/info 是否变化，若是则刷新 system prompt。
 
         每次 LLM API 调用前由 Adapter.chat() 触发。
         """
-        current = _get_identity_mtimes()
-        if current != self._identity_mtimes:
+        # 检测 identity 文件变更
+        current_identity = _get_identity_mtimes()
+        identity_changed = current_identity != self._identity_mtimes
+
+        # 检测 skills/projects/info 目录文件变更
+        current_index = _get_index_fingerprint()
+        index_changed = current_index != self._index_fingerprint
+
+        if identity_changed or index_changed:
             self.refresh_system_prompt()
-            self._identity_mtimes = current
-            logger.debug("检测到 identity 文件变更，已刷新 system prompt")
+            self._identity_mtimes = current_identity
+            self._index_fingerprint = current_index
+            logger.debug(
+                "检测到 %s 变更，已刷新 system prompt",
+                "identity 文件" if identity_changed else "skills/projects/info 目录",
+            )
 
     def migrate_from(self, source: "LLMClient") -> None:
         """从另一个 LLMClient 迁移对话历史（保留自身的 system prompt）。

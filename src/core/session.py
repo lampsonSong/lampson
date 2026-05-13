@@ -734,6 +734,23 @@ class Session:
             self.agent.skill_index = self.skill_index
             skills_tools_reg.set_retrieval_indices(self.skill_index, self.project_index)
 
+    def refresh_indices(self) -> None:
+        """skills/projects/info 目录文件变更后重建索引并刷新 system prompt。"""
+        if self.skill_index is not None:
+            try:
+                self.skill_index.load_or_build()
+                self.agent.skill_index = self.skill_index
+            except Exception:
+                pass
+        if self.project_index is not None:
+            try:
+                self.project_index.load_or_build()
+                self.agent.project_index = self.project_index
+            except Exception:
+                pass
+        skills_tools_reg.set_retrieval_indices(self.skill_index, self.project_index)
+        self._refresh_system_prompt()
+
     def _refresh_system_prompt(self) -> None:
         """skills/projects 变更后刷新 system prompt，让后续轮次感知。"""
         try:
