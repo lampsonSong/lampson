@@ -18,6 +18,8 @@ import concurrent.futures
 import json
 import queue
 import re
+
+from src.feishu.client import FeishuClient
 import threading
 import time
 from typing import Any
@@ -103,6 +105,7 @@ class FeishuAdapter(BasePlatformAdapter):
             .app_secret(self.app_secret)
             .build()
         )
+        self._feishu_client = FeishuClient(self.app_id, self.app_secret)
         self._shutdown_callback: callable | None = None
         self._executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=4, thread_name_prefix="feishu-handler"
@@ -188,10 +191,8 @@ class FeishuAdapter(BasePlatformAdapter):
 
     def _send_reply_as_card(self, chat_id: str, text: str) -> None:
         """用 Markdown 卡片发送回复（表格/指标等结构化数据）。"""
-        from src.feishu.client import FeishuClient
-
         try:
-            client = FeishuClient(self.app_id, self.app_secret)
+            client = self._feishu_client
             title = "Lamix 回复"
             m = re.search(r"##\s*(.+)", text) or re.search(r"\*\*(.+?)\*\*", text)
             if m:
@@ -232,10 +233,8 @@ class FeishuAdapter(BasePlatformAdapter):
 
     def _send_card_sync(self, chat_id: str, card: dict) -> None:
         """同步发送卡片（在线程池中执行）。"""
-        from src.feishu.client import FeishuClient
-
         try:
-            client = FeishuClient(self.app_id, self.app_secret)
+            client = self._feishu_client
             client.send_card(receive_id=chat_id, card=card, receive_id_type="chat_id")
             logger.info(f"[feishu] 卡片发送成功 to={chat_id}")
         except Exception as e:
@@ -270,12 +269,10 @@ class FeishuAdapter(BasePlatformAdapter):
 
     def _send_progress_card(self, chat_id: str, lines: list[str], finished: bool = False) -> str | None:
         """发送进度卡片，返回 message_id。失败时 fallback 到文本消息。"""
-        from src.feishu.client import FeishuClient
-
         card = self._make_progress_card(lines, finished=finished)
         logger.info(f"[feishu] _send_progress_card: lines={len(lines)}, finished={finished}")
         try:
-            client = FeishuClient(self.app_id, self.app_secret)
+            client = self._feishu_client
             data = client.send_card(receive_id=chat_id, card=card, receive_id_type="chat_id")
             logger.info(f"[feishu] progress card sent ok")
             return data.get("data", {}).get("message_id")
@@ -283,7 +280,7 @@ class FeishuAdapter(BasePlatformAdapter):
             resp_body = getattr(getattr(e, "response", None), "text", "N/A")
             logger.error(f"[feishu] 发送进度卡片失败: {e}\n  response: {resp_body[:500]}")
             try:
-                client = FeishuClient(self.app_id, self.app_secret)
+                client = self._feishu_client
                 status = "已完成" if finished else "处理中"
                 text_lines = [f"[Lamix 工作进度 - {status} ({len(lines)} 个工具调用)]"]
                 for line in lines[-10:]:
@@ -295,10 +292,8 @@ class FeishuAdapter(BasePlatformAdapter):
 
     def _update_progress_card(self, message_id: str, lines: list[str], finished: bool = False) -> None:
         """更新已有的进度卡片；失败时 re-raise 供熔断计数。"""
-        from src.feishu.client import FeishuClient
-
         card = self._make_progress_card(lines, finished=finished)
-        client = FeishuClient(self.app_id, self.app_secret)
+        client = self._feishu_client
         try:
             client.update_message(message_id=message_id, card=card)
         except Exception as e:
