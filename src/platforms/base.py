@@ -6,27 +6,31 @@
 
 from __future__ import annotations
 
-import time
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from datetime import datetime
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from src.core.session_manager import SessionManager
+    pass
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
 class PlatformMessage:
-    """平台消息的统一数据结构，所有 adapter 收到消息后转换为此格式。"""
+    """跨平台统一消息结构。"""
 
-    platform: str  # "feishu" / "telegram" / "discord"
-    sender_id: str  # 用户在平台上的 ID
+    platform: str  # feishu / cli / ...
+    sender_id: str  # 用户 open_id / user_id
     chat_id: str  # 会话 ID
-    thread_id: str | None = None  # 线程 / topic ID（无则 None）
-    message_id: str = ""  # 消息 ID（去重用）
-    text: str = ""  # 消息文本
-    timestamp: float = field(default_factory=time.time)
-    reaction_id: str | None = None  # 表情回复 ID（用于处理完成后删除）
+    thread_id: str | None  # 线程 ID（飞书支持）
+    message_id: str  # 平台消息 ID（用于去重）
+    text: str  # 消息正文
+    timestamp: float = field(default_factory=lambda: datetime.now().timestamp())
+    reaction_id: str | None = None  # 消息所属 reaction_id（飞书专用）
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class BasePlatformAdapter(ABC):
@@ -44,8 +48,9 @@ class BasePlatformAdapter(ABC):
     """
 
     platform: str = ""
-    session_manager: "SessionManager | None" = None
-    safe_mode_callback: callable | None = None
+
+    session_manager: Any = None
+    safe_mode_callback: Any = None
 
     @abstractmethod
     def start(self) -> None:
@@ -67,4 +72,12 @@ class BasePlatformAdapter(ABC):
         """平台收到消息时调用，推给 PlatformManager 调度。"""
         from src.platforms.manager import PlatformManager
 
-        PlatformManager.instance().dispatch(msg)
+        try:
+            manager = PlatformManager.instance()
+        except RuntimeError:
+            logger.warning(
+                f"[{self.platform}] PlatformManager 未初始化，消息暂被丢弃: {msg.message_id}"
+            )
+            return
+
+        manager.dispatch(msg)
