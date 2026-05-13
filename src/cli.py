@@ -462,6 +462,17 @@ def _handle_gateway_predicate(predicate: str, config: dict) -> None:
 
 def run_cli(args: argparse.Namespace) -> None:
     """'lamix cli' 子命令：继承原 main() 的所有逻辑。"""
+    # 抑制第三方库的启动日志（jieba / lark_oapi），避免污染 CLI 输出
+    import logging
+    for _lib_logger in ("jieba", "Lark"):
+        _log = logging.getLogger(_lib_logger)
+        _log.setLevel(logging.WARNING)
+        for _h in _log.handlers[:]:
+            _log.removeHandler(_h)
+        _sh = logging.StreamHandler()
+        _sh.setLevel(logging.WARNING)
+        _log.addHandler(_sh)
+
     # 确定非交互输入
     non_interactive_input: str | None = None
     is_slash_command = False
