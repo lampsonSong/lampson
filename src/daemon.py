@@ -40,6 +40,8 @@ from src.core.constants import DEFAULT_AUDIT_HOUR, DEFAULT_AUDIT_MINUTE, AUDIT_C
 from src.core.task_scheduler import TaskScheduler, TaskType, TaskConfig, schedule, start as scheduler_start, shutdown as scheduler_shutdown
 from src.core.tools import load_skill_scripts
 import logging
+import setproctitle
+
 logger = logging.getLogger(__name__)
 
 LOG_DIR = LAMIX_DIR / "logs"
@@ -534,6 +536,12 @@ def _patch_websockets_ssl() -> None:
 
 def main() -> None:
     global _heartbeat_mgr, _scheduler
+
+    # 设置进程名为 lamix，方便 ps/任务管理器识别
+    try:
+        setproctitle.setproctitle("lamix")
+    except Exception:
+        pass
 
     # 单实例检测：防止多个 daemon 同时运行争抢飞书消息
     _check_single_instance()
