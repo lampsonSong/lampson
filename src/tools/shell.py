@@ -78,6 +78,8 @@ def execute_shell(command: str, timeout: int = 30) -> str:
             shell=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
         output_parts = []

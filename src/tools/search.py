@@ -179,7 +179,7 @@ def _run_rg(args: list[str], abs_path: str) -> tuple[list[str] | None, str | Non
     cmd = [_RG_PATH, "--no-messages"] + args + [abs_path]
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=_SEARCH_TIMEOUT,
+            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=_SEARCH_TIMEOUT,
         )
     except subprocess.TimeoutExpired:
         return None, f"[超时] 搜索超过 {_SEARCH_TIMEOUT} 秒，已终止。"

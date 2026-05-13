@@ -182,7 +182,7 @@ end tell
     try:
         result = subprocess.run(
             ["osascript", "-e", script],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
             env={**os.environ, "NSHighQualityMagnificationFilter": "1"},
         )
         if result.returncode != 0:
@@ -223,7 +223,7 @@ return $result -join "`n"
     try:
         result = subprocess.run(
             ["powershell", "-Command", script],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
         )
         if result.returncode != 0:
             return f"[错误] PowerShell 执行失败：{result.stderr.strip()}"
