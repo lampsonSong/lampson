@@ -80,7 +80,9 @@ Lamix 不是一个用完即走的聊天机器人——它有完整的**自学习
 
 | 组件 | 说明 |
 |------|------|
-| 消息网关 | 飞书 WebSocket + CLI，接收消息、分发回复 |
+| PlatformManager | 多渠道消息分发中心，管理 FeishuAdapter 和 CliAdapter |
+| FeishuAdapter | 飞书 WebSocket 长连接，接收消息、发送回复 |
+| CliAdapter | CLI 标准输入输出适配器 |
 | Prompt Builder | 5 层分层构建 system prompt |
 | Agent 核心 | Tool loop、轮次分段压缩（Compaction V2）、反思沉淀 |
 | 知识系统 | Skills + Info + Projects + Skill Scripts |
@@ -316,6 +318,30 @@ vision:
   model: "glm-4.6v"
 ```
 
+### Embedding 配置（可选）
+
+配置 embedding 可启用语义检索能力，提升 skills/projects 的匹配精度：
+
+```yaml
+embedding:
+  provider: ""      # 如 "openai"、"dashscope"
+  model: ""         # embedding 模型名
+  # base_url: ""    # API 地址（如使用代理）
+  # api_key: ""     # API Key
+```
+
+### LLM 配置
+
+首次配置需要设置 LLM API Key 和模型：
+
+```yaml
+llm:
+  api_key: ""                           # LLM API Key
+  base_url: "https://api.deepseek.com/" # API 地址
+  model: "deepseek-v4-flash"            # 模型名称
+  context_window: 131072                # 模型 context window（token 数）
+```
+
 未配置时，视觉分析工具会提示用户配置对应模型。
 
 ### 开机自启
@@ -389,7 +415,9 @@ lamix/
 │   │   ├── heartbeat.py       # 心跳机制（watchdog 依赖）
 │   │   ├── self_audit.py      # 自我审计
 │   │   └── task_scheduler.py  # 定时任务调度器
-│   ├── platforms/             # 多平台 adapter
+│   ├── platforms/             # 多平台 adapter（FeishuAdapter、CliAdapter）
+│   │   └── adapters/          # 平台适配器实现
+│   ├── core/adapters/         # 模型适配器（OpenAI 兼容、MiniMax 等）
 │   ├── feishu/                # 飞书 SDK 封装
 │   ├── memory/                # 长期记忆存储
 │   ├── skills/                # 技能知识库
