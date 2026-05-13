@@ -510,12 +510,12 @@ def run_cli(args: argparse.Namespace) -> None:
             print_error("API Key 未填写，无法启动。")
             sys.exit(1)
 
-    _init_platform(config)
-
     # 检查 daemon 是否在跑，没跑则提示先启动
     if not _is_daemon_running():
         print_error("daemon 未运行，请先执行: lamix gateway start")
         sys.exit(1)
+
+    _init_platform(config)
 
     # 单条查询模式
     if non_interactive_input:
