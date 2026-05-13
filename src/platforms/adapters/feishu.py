@@ -40,6 +40,26 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _suppress_lark_stdout() -> None:
+    """抑制 Lark SDK 的 stdout 日志，避免污染终端输出。
+
+    lark_oapi 在 core/log.py 中自动为「Lark」logger 添加了 StreamHandler(sys.stdout)，
+    且不设置 handler level（默认 NOTSET，所有级别通放）。
+    WS 客户端创建时又调用 logger.setLevel(INFO)，导致 INFO 级日志直出 stdout。
+
+    本函数移除 Lark 的全部现有 handler，替换为一个 WARNING 级别的 stderr handler。
+    日志仍会通过 propagate 流向 root logger（daemon 的 stderr 日志不受影响）。
+    """
+    import logging as _logging
+    _lark = _logging.getLogger("Lark")
+    _lark.setLevel(_logging.WARNING)
+    for _h in _lark.handlers[:]:
+        _lark.removeHandler(_h)
+    _sh = _logging.StreamHandler()
+    _sh.setLevel(_logging.WARNING)
+    _lark.addHandler(_sh)
+
+
 class MessageDeduplicator:
     """消息去重器：基于 message_id 防止重复处理。"""
 
@@ -106,6 +126,8 @@ class FeishuAdapter(BasePlatformAdapter):
             event_handler=handler,
             log_level=lark.LogLevel.INFO,
         )
+        # 抑制 Lark SDK 的 stdout 日志（lark_oapi 导入时自动添加了 stdout handler）
+        _suppress_lark_stdout()
         t = threading.Thread(target=self._ws_client.start, daemon=True, name="feishu-ws")
         self._ws_thread = t
         t.start()

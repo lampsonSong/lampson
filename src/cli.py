@@ -224,6 +224,30 @@ def _run_repl(config: dict) -> None:
         print_success("再见！")
 
 
+def _process_exists(pid: int) -> bool:
+    """跨平台检查 PID 是否存活。
+    
+    Windows 上用 tasklist（os.kill(pid, 0) 在该平台不可靠，
+    进程已死仍可能返回 True），其他平台用 os.kill(pid, 0)。
+    """
+    if sys.platform == "win32":
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, timeout=5,
+            )
+            return str(pid) in result.stdout
+        except (subprocess.SubprocessError, OSError):
+            return False
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+
 def _is_daemon_running() -> bool:
     """检查 daemon 是否在运行。"""
     pid_path = Path.home() / ".lamix" / "logs" / "daemon.pid"
@@ -231,9 +255,8 @@ def _is_daemon_running() -> bool:
         return False
     try:
         pid = int(pid_path.read_text().strip())
-        os.kill(pid, 0)
-        return True
-    except (ProcessLookupError, OSError, ValueError):
+        return _process_exists(pid)
+    except ValueError:
         return False
 
 
@@ -244,13 +267,12 @@ def _is_watchdog_running() -> bool:
     if pid_path.exists():
         try:
             pid = int(pid_path.read_text().strip())
-            os.kill(pid, 0)
-            return True
-        except (ProcessLookupError, OSError, ValueError):
+            if _process_exists(pid):
+                return True
+        except ValueError:
             pass
     # 兜底：看进程名
     import subprocess
-    import sys
 
     if sys.platform == "win32":
         result = subprocess.run(
@@ -321,9 +343,9 @@ def _wait_daemon_ready(timeout: int = 15) -> bool:
         if daemon_pid_path.exists():
             try:
                 pid = int(daemon_pid_path.read_text().strip())
-                os.kill(pid, 0)
-                return True
-            except (ProcessLookupError, OSError, ValueError):
+                if _process_exists(pid):
+                    return True
+            except ValueError:
                 pass
     return False
 
@@ -395,16 +417,39 @@ def gateway_stop() -> None:
     time.sleep(3)
 
     # 强杀残留进程
-    for name in ["src.daemon", "src.watchdog"]:
-        result = subprocess.run(
-            ["pgrep", "-f", name], capture_output=True, text=True
-        )
-        for pid_str in result.stdout.strip().split("\n"):
-            if pid_str:
-                try:
-                    subprocess.run(["kill", "-9", pid_str])
-                except Exception:
-                    pass
+    if sys.platform == "win32":
+        for name in ["src.daemon", "src.watchdog"]:
+            try:
+                result = subprocess.run(
+                    ["wmic", "process", "where", f"(CommandLine like '%{name}%')", "get", "ProcessId"],
+                    capture_output=True, text=True, timeout=10
+                )
+                for line in result.stdout.strip().split("\n"):
+                    line = line.strip()
+                    if line.isdigit():
+                        subprocess.run(["taskkill", "/F", "/PID", line], capture_output=True)
+            except Exception:
+                pass
+    else:
+        for name in ["src.daemon", "src.watchdog"]:
+            result = subprocess.run(
+                ["pgrep", "-f", name], capture_output=True, text=True
+            )
+            for pid_str in result.stdout.strip().split("\n"):
+                if pid_str:
+                    try:
+                        subprocess.run(["kill", "-9", pid_str])
+                    except Exception:
+                        pass
+
+    # 清理 PID 文件，避免 stale pid 导致 _is_daemon_running() 误判
+    for pid_file in ["daemon.pid", "watchdog.pid"]:
+        p = log_dir / pid_file
+        if p.exists():
+            try:
+                p.unlink()
+            except OSError:
+                pass
 
     print_success("Lamix 已停止。")
 
@@ -418,9 +463,9 @@ def _ensure_watchdog_on_windows() -> None:
     if watchdog_pid_path.exists():
         try:
             pid = int(watchdog_pid_path.read_text().strip())
-            os.kill(pid, 0)
-            return
-        except (ProcessLookupError, OSError, ValueError):
+            if _process_exists(pid):
+                return
+        except ValueError:
             pass
 
     # 启动 watchdog

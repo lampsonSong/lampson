@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -191,12 +193,26 @@ def read_all_heartbeats() -> dict[int, HeartbeatRecord]:
 
 
 def is_process_alive(pid: int) -> bool:
-    """检查进程是否存活（通过 os.kill 试探）。"""
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
+    """跨平台检查进程是否存活。
+    
+    Windows 上用 tasklist（os.kill(pid, 0) 在该平台不可靠，
+    进程已死仍可能返回 True），其他平台用 os.kill(pid, 0)。
+    """
+    if sys.platform == "win32":
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, timeout=5,
+            )
+            return str(pid) in result.stdout
+        except (subprocess.SubprocessError, OSError):
+            return False
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
 
 
 def cleanup_stale_heartbeats() -> list[int]:

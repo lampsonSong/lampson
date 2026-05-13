@@ -56,7 +56,7 @@ class LamixCompleter(Completer):
                     yield Completion(
                         cmd_prefix,
                         start_position=-len(text),
-                        display=f"[bold cyan]/{cmd}[/bold cyan]",
+                        display=[("bold cyan", f"/{cmd}")],
                         display_meta=desc,
                     )
         # 否则提供历史补全
