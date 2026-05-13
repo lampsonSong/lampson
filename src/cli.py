@@ -753,7 +753,9 @@ def main() -> None:
             gateway_stop()
         else:
             # 无子命令：显示 gateway 子命令帮助
-            gateway_parser.print_help()
+            print("用法: lamix gateway <子命令>")
+            print("  start  启动 watchdog + daemon")
+            print("  stop   停止 daemon + watchdog")
     elif args.command == "model":
         run_model(args)
     elif args.command == "update":
