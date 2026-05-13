@@ -134,8 +134,12 @@ class BaseModelAdapter(ABC):
     ) -> ChatCompletion:
         """调用 chat.completions.create；不修改 messages。
 
+        每次调用前自动检测 MEMORY.md / USER.md 是否变更，若是则刷新 system prompt。
         抛出自定义异常，保留原始错误信息供上层决策。
         """
+        # 自动检测 identity 文件变更并刷新 system prompt
+        self.llm.auto_refresh_if_needed()
+
         kwargs: dict[str, Any] = {
             "model": self.llm.model,
             "messages": messages,
@@ -217,13 +221,13 @@ class BaseModelAdapter(ABC):
             )
         elif status_code == 403:
             raise LLMFatalError(
-                f"权限不足（{model}）：{body[:200]}",
+                f"权限不足（{model}）：{body}",
                 original_error=original_error,
                 status_code=status_code,
             )
         elif status_code == 404:
             raise LLMFatalError(
-                f"模型不存在（{model}）：{body[:200]}",
+                f"模型不存在（{model}）：{body}",
                 original_error=original_error,
                 status_code=status_code,
             )

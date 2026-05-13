@@ -32,7 +32,7 @@ class PosixProcessManager(ProcessManager):
         pid_file = LAMIX_DIR / "logs" / "daemon.pid"
         if pid_file.exists():
             try:
-                pid = int(pid_file.read_text().strip())
+                pid = int(pid_file.read_text(encoding="utf-8").strip())
                 if self.is_alive(pid):
                     return pid
             except (ValueError, OSError):
@@ -99,7 +99,7 @@ class PosixProcessManager(ProcessManager):
         old_pid = None
         if pid_file.exists():
             try:
-                old_pid = int(pid_file.read_text().strip())
+                old_pid = int(pid_file.read_text(encoding="utf-8").strip())
                 self.kill_process(old_pid, graceful=True)
             except (ValueError, OSError):
                 pass
@@ -153,7 +153,7 @@ class PosixProcessManager(ProcessManager):
 
             # 写入 pid 文件
             pid_file.parent.mkdir(parents=True, exist_ok=True)
-            pid_file.write_text(str(proc.pid))
+            pid_file.write_text(str(proc.pid), encoding="utf-8")
 
             logger.info("daemon 已启动 (PID=%d)", proc.pid)
             return True
