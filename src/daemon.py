@@ -181,6 +181,26 @@ def _signal_handler(signum: int, _frame: object | None) -> None:
     _shutdown.set()
 
 
+def _check_single_instance() -> None:
+    """检查是否已有 daemon 实例在运行，若有则退出。"""
+    if not _DAEMON_PID_PATH.exists():
+        return
+    try:
+        old_pid = int(_DAEMON_PID_PATH.read_text(encoding="utf-8").strip())
+    except (ValueError, OSError):
+        return
+    if old_pid == os.getpid():
+        return
+    # 检查旧进程是否还活着
+    try:
+        os.kill(old_pid, 0)  # 发信号0，不实际杀，只检测存活
+    except (ProcessLookupError, PermissionError):
+        # 旧进程已死，可以启动
+        return
+    logger.error(f"[daemon] 已有 daemon 实例在运行 (PID={old_pid})，退出")
+    sys.exit(0)
+
+
 def _write_daemon_pid() -> None:
     """写 daemon pid 到文件，供 watchdog 查找。"""
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -514,6 +534,10 @@ def _patch_websockets_ssl() -> None:
 
 def main() -> None:
     global _heartbeat_mgr, _scheduler
+
+    # 单实例检测：防止多个 daemon 同时运行争抢飞书消息
+    _check_single_instance()
+
     # 配置 logging：daemon 模式下输出 INFO 及以上级别到 stderr（launchd 重定向到 launchd.err.log）
     logging.basicConfig(
         level=logging.INFO,
