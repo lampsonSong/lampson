@@ -57,7 +57,7 @@ class LamixCompleter(Completer):
                         cmd_prefix,
                         start_position=-len(text),
                         display=f"[bold cyan]/{cmd}[/bold cyan]",
-                        display_meta=f"dim][{desc}[/dim]",
+                        display_meta=desc,
                     )
         # 否则提供历史补全
         elif word:
