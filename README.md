@@ -69,6 +69,8 @@ Lamix 不是一个用完即走的聊天机器人——它有完整的**自学习
 | 层 | 机制 | 说明 |
 |------|------|------|
 | **Shell 拦截** | 危险命令黑名单 | `rm -rf /`、`mkfs`、`dd of=/dev` 等命令执行前拦截确认 |
+| **Shell 长度限制** | 命令长度上限 100KB | 防止超长命令注入 |
+| **通配符滥用检测** | 拦截 `cat *.py`、`rm src/*` 等 | 引导使用 `search`/`file_read` 工具 |
 | **自更新保护** | 保护文件清单 | `agent.py`、`llm.py`、`cli.py` 等核心文件在自更新时不可覆盖 |
 | **自更新回滚** | git 分支管理 | 每次自更新创建独立分支，`/update rollback` 一键回退 |
 | **上下文保护** | 紧急截断 | Compaction 后仍超阈值时只保留最近 2 轮，防止 API 400 导致会话崩溃 |
@@ -98,6 +100,7 @@ Lamix 不是一个用完即走的聊天机器人——它有完整的**自学习
 - 自我审计与知识生命周期（自动扫描修复 + 归档未使用知识，可关闭）
 - Boot Tasks（重启后自动验证改动）
 - Config 热重载（改配置无需重启 daemon）
+- CLI 模式 Ctrl+C 中断支持
 
 </details>
 
@@ -227,13 +230,24 @@ lamix cli "帮我查一下今天天气"
 
 首次运行会进入配置向导，引导填写 LLM API Key 和飞书凭证。
 
+**CLI 交互技巧**：
+- 输入 `/` 触发命令补全（Tab/上下键选择）
+- Ctrl+C 中断正在执行的命令
+- Escape 键清空当前输入
+
 ### 常用命令
 
 ```bash
-lamix model           # 重新配置 LLM 模型（供应商/模型/API Key）
-lamix update          # 从 GitHub 拉取最新代码并重启 daemon
-lamix config          # 查看当前配置
-lamix -V              # 查看版本号
+lamix model              # 重新配置 LLM 模型（供应商/模型/API Key）
+lamix update             # 从 GitHub 拉取最新代码并重启 daemon
+lamix config             # 查看当前配置
+lamix -V                 # 查看版本号
+
+# Gateway 管理命令
+lamix gateway            # 启动 gateway daemon
+lamix gateway start      # 启动 gateway daemon
+lamix gateway stop       # 停止 gateway daemon
+lamix gateway restart    # 重启 gateway daemon
 ```
 
 ### Daemon 模式（后台常驻）
@@ -389,3 +403,20 @@ lamix/
 
 </details>
 
+<details>
+<summary><strong>Windows 特殊说明</strong></summary>
+
+### 跨平台进程检测
+
+Windows 上 `os.kill(pid, 0)` 不可靠，Lamix 使用 `tasklist` 命令检测进程是否存在，确保 gateway 状态检测准确。
+
+### Gateway 管理
+
+```cmd
+lamix gateway        # 启动 daemon
+lamix gateway start  # 启动 daemon
+lamix gateway stop   # 停止 daemon
+lamix gateway restart # 重启 daemon
+```
+
+</details>

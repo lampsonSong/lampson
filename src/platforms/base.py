@@ -75,8 +75,9 @@ class BasePlatformAdapter(ABC):
         try:
             manager = PlatformManager.instance()
         except RuntimeError:
-            logger.warning(
-                f"[{self.platform}] PlatformManager 未初始化，消息暂被丢弃: {msg.message_id}"
+            # PlatformManager 未初始化时静默丢弃（CLI 模式下正常）
+            logger.debug(
+                f"[{self.platform}] PlatformManager 未初始化，消息已丢弃: {msg.message_id}"
             )
             return
 

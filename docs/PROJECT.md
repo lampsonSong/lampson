@@ -88,7 +88,7 @@ Fallback 模型配置流程：
 
 | 工具名 | 功能 |
 |--------|------|
-| `shell` | 执行 shell 命令（危险命令拦截） |
+| `shell` | 执行 shell 命令（危险命令拦截，支持 Ctrl+C 中断） |
 | `search` | ripgrep 文件名/内容搜索（mode=files/content） |
 | `file_read` | 读文件（100KB 限制） |
 | `file_write` | 写文件（自动创建父目录） |
@@ -189,6 +189,9 @@ skills_management:
 |------|------|
 | `lamix cli [query]` | 交互式 CLI（含 daemon），可跟查询内容直接对话 |
 | `lamix gateway` | 仅启动 daemon（后台常驻，飞书消息接收） |
+| `lamix gateway start` | 启动 gateway daemon |
+| `lamix gateway stop` | 停止 gateway daemon |
+| `lamix gateway restart` | 重启 gateway daemon |
 | `lamix model` | 重新配置 LLM 模型（供应商/模型/API Key） |
 | `lamix update` | 从 GitHub 拉取最新代码，自动重启 daemon |
 | `lamix config` | 显示当前配置 |
@@ -216,6 +219,15 @@ skills_management:
 | `/metrics` | 任务统计 |
 | `/safemode` | 安全模式 |
 | `/exit` | 退出 |
+
+### Shell 工具特性
+
+| 特性 | 说明 |
+|------|------|
+| 命令长度限制 | 最大 100KB，防止超长命令注入 |
+| 危险命令拦截 | `rm -rf /`、`mkfs`、`dd` 等命令执行前拦截 |
+| 通配符滥用检测 | `cat *.py`、`rm src/*` 等命令被拦截，引导使用 `search`/`file_read` |
+| Ctrl+C 中断 | CLI 模式下支持中断正在执行的命令 |
 
 ---
 
@@ -335,220 +347,39 @@ cd ~/lamix && pip install -e .
 # CLI 交互
 lamix cli
 
-# 单条查询
-lamix cli "你好"
-
 # 后台 daemon
 lamix gateway
 
-# macOS：Daemon 由 launchd 管理
-launchctl kickstart -k gui/$(id -u)/com.lamix.gateway
-
-# 重启（不要用 unload && load）
-launchctl kickstart -k gui/$(id -u)/com.lamix.gateway && sleep 1 && launchctl load ~/Library/LaunchAgents/com.lamix.gateway.plist
-
-# 自更新
-lamix update
-
-# 重新配置模型
-lamix model
+# Windows 开机自启（管理员）
+python scripts/install_windows.py
 ```
 
-### Windows 移植
+### Windows 特殊说明
 
-Phase 1-4 已完成（ProcessManager 抽象、Desktop 工具拆分、Shell 编码修复、安装脚本）。核心设计决策：
+**跨平台进程检测**：Windows 上 `os.kill(pid, 0)` 不可靠，改用 `tasklist` 命令检测进程是否存在。
 
-- **进程管理**：`ProcessManager` 抽象基类，`PosixProcessManager`（launchctl + SIGTERM）/ `WindowsProcessManager`（stop.flag 优雅终止）
-- **UI 查询**：macOS 用 AppleScript，Windows 用 PowerShell UI Automation
-- **daemon 化**：Windows 用 `pythonw.exe` + `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS`
-- **自更新文件锁定**：下载到临时目录 + flag 文件，下次启动替换
-- **安装**：`scripts/install_windows.py`（schtasks 注册开机自启）+ `scripts/build_exe.py`（PyInstaller 打包）
-
-Phase 0/5（环境搭建 + 端到端测试）需要实际 Windows 机器验证。
+**Gateway 管理命令**：
+```cmd
+lamix gateway start   # 启动
+lamix gateway stop   # 停止
+lamix gateway restart # 重启
+```
 
 ---
 
-## 十一、上下文压缩（Compaction）
+## 十一、版本历史
 
-### 设计思路
+### v0.2.x
+- 新增 `gateway start/stop/restart` 命令
+- CLI 模式 Ctrl+C 中断支持
+- Shell 工具通配符滥用检测（`cat *.py` 等）
+- Shell 命令长度限制 100KB
+- 跨平台 `_process_exists()` 函数（Windows 用 tasklist）
+- 首次运行自动问候语
+- CLI 工具调用实时进度显示
 
-以"轮"（turn）为单位处理，不逐条分类，保证消息序列完整性。
-
-```
-原始消息序列（以 10 轮为例）：
-Turn 1: [user] → [assistant] → [tool_call] → [tool_result] → [assistant]
-Turn 2: [user] → [assistant] → [tool_call] → [tool_result] → ... → [assistant]
-...
-Turn 9: [user] → [assistant]
-Turn 10: [user] → [assistant] → [tool_call] → [tool_result] → [assistant]
-```
-
-### 触发条件
-
-Token 估算 >= context_window * trigger_threshold（默认 90%），且 stop_reason 为 end_turn / aborted / stop / stop_sequence。
-
-### 算法流程
-
-**Step 1: 分轮**
-
-以 user query 为锚点，将 messages 切分为若干轮（turn）：
-
-```
-每轮 = 一条 user 消息 + 后续所有非 user 消息
-```
-
-**Step 2: 轮数太少处理**
-
-| 轮数 | 处理 |
-|------|------|
-| <= 3 轮 | 对最大轮次做摘要（自动判断 query/assistant 谁长，压缩率 >= 30% 才执行） |
-| > 3 轮 | 进入 Step 3 正常压缩 |
-
-**Step 3: 计算 tail 占比**
-
-```
-tail_count = ceil(total_turns * 0.2)    # 最后 20% 轮数
-tail_ratio = tail_bytes / total_bytes    # tail 占比
-```
-
-**Step 4: 分支决策**
-
-```
-if tail_ratio > 50%:
-    策略 A：尾部逐轮摘要
-    - 前 80% 轮原封不动
-    - 后 20% 轮按实际占比决定压缩 user 或 assistant
-else:
-    策略 B：前段合并 + 后段保留
-    - 前 80% 轮 → 生成一条整体 summary
-    - 后 20% 轮 → 原封不动
-```
-
-**策略 A（tail_ratio > 50%）**
-
-每轮按实际占比决定压缩谁：
-- assistant 文字更长 → 摘要 assistant（输入含 user_query 上下文）
-- user query 更长 → 摘要 user query
-- tool_calls / tool_results 原封不动
-
-**策略 B（tail_ratio <= 50%）**
-
-```
-head_summary = llm_summarize([
-    f"[Round {i}] User: {t.user_query}\nAssistant: {t.assistant_text}"
-    for i, t in enumerate(head_turns)
-])
-return [summary_msg] + tail_turns
-```
-
-### 摘要输入
-
-只取：
-- user query（完整内容）
-- assistant 文字回复（不含 tool_calls）
-
-**不包含**：tool_calls、tool_results、thinking blocks。理由：assistant 回复已消化 tool result 信息，tool result 是膨胀主因。
-
-### 消息序列完整性
-
-以轮为单位操作，天然保证完整性：
-- 不会出现 assistant(tool_calls) 缺少 tool result
-- 轮内部消息顺序不变
-
-### 紧急截断
-
-压缩后仍超阈值时，强制只保留最近 2 轮，防止 API 400 错误。
-
-### 任务上下文注入
-
-压缩完成后自动生成任务进度摘要（<= 200 字），注入为一条 is_task_context=True 的 user 消息，防止多次压缩后任务上下文丢失。
-
-### 边界情况
-
-| 场景 | 处理 |
-|------|------|
-| 总轮数 <= 3 轮 | 对最大轮次做摘要（自动判断 query/assistant 谁长，压缩率 >= 30% 才执行） |
-| 只有 1 轮且超长 | 策略 A：对长的一侧做摘要 |
-| assistant 只有 tool_calls 没有文字 | 摘要时跳过，保留原始 tool 消息 |
-| LLM 摘要调用失败 | fallback：保留原始消息，不压缩 |
-| 压缩后仍超阈值 | 紧急截断只保留最近 2 轮 |
-
-### 数据结构
-
-```python
-@dataclass
-class Turn:
-    index: int                           # 轮次序号（0-based）
-    messages: list[dict[str, Any]]       # 原始消息列表
-    user_query: str                      # user query 文本
-    user_query_len: int                  # user query 字节长度
-    assistant_texts: list[str]           # assistant 文字回复
-    assistant_texts_len: int             # assistant 文字回复字节长度
-    byte_length: int                     # 整轮字节长度（含 tool 层）
-```
-
-### 配置参数
-
-```yaml
-compaction:
-  context_window: 131072          # 模型 context window
-  trigger_threshold: 0.9          # 触发阈值（90%）
-  tail_ratio: 0.2                 # tail 占比（20%）
-  tail_threshold: 0.5             # 策略A/B 分界线（50%）
-  compaction_log_max_bytes: 10485760  # 压缩日志轮转大小（10MB）
-```
-
-### 相关文件
-
-| 文件 | 职责 |
-|------|------|
-| `src/core/compaction.py` | Compactor + split_into_turns + 策略 A/B + LLM 摘要 |
-| `src/core/agent.py` | maybe_compact / force_compact 触发入口，last_prompt_tokens 管理 |
-| `src/core/session.py` | `/compact` 命令路由，`/context-size` 命令 |
-| `tests/test_compaction.py` | 测试覆盖分轮/策略A/策略B/边界 |
-
-
-
-## 十二、已知问题
-
-- 飞书 WebSocket 断线后不会自动重连
-- `_cosine_sim` 使用 `zip(strict=True)` 需要 Python 3.10+
-- SkillIndex 增量构建时 config.yaml 路径可能过时（已有自动修正逻辑）
-- Planning replan 场景 prompt 待优化
-
-
-## 十三、设计决策
-
-### 13.1 Skills 统一承载 scripts
-
-**背景**：Skills（markdown 工作流）和 Learned Modules（Python 工具）功能重叠，维护分散。实际 learned_modules 为空，决定合并。
-
-**合并方案**：skill 目录结构：
-
-```
-~/.lamix/skills/<skill-name>/
-├── SKILL.md              # 知识/流程描述（必须）
-├── scripts/              # 可选：附属 Python 脚本
-│   ├── main.py           # 定义 TOOL_SCHEMA + TOOL_RUNNER，自动注册为工具
-│   └── helper.py         # 辅助模块，不注册
-├── templates/            # 可选：模板文件
-└── references/           # 可选：参考文档
-```
-
-**核心变化**：
-- `scripts/` 下的 .py 文件如果定义了 `TOOL_SCHEMA` + `TOOL_RUNNER`，自动注册为工具
-- 沙箱约束（禁止 import src）复用到 scripts/
-- `~/.lamix/learned_modules/` 废弃，不再扫描
-
-**涉及文件改动**：
-- `src/tools/learned_modules.py` — 扫描路径从 `learned_modules/*.py` 改为 `skills/*/scripts/*.py`
-- `src/core/reflection.py` — 沉淀逻辑删除 learned_module 相关函数
-- `src/core/self_audit.py` — `scan_learned_modules()` 改为 `scan_skill_scripts()`
-- `src/core/tools.py` — 工具描述更新
-- `src/tools/task_scheduler_tool.py` — 参数描述更新
-
-**验收标准**：
-1. `pytest tests/ -x` 全部通过
-2. `/self-audit` 正常执行，扫描范围包含 scripts
-3. skill 的 scripts/ 下放一个带 TOOL_SCHEMA 的 .py，重启 daemon 后工具自动注册
-4. `grep -r "learned_module" src/` 只有注释和历史说明
+### v0.1.x
+- 初始版本
+- 飞书 WebSocket 支持
+- 基础 CLI REPL
+- Skill/Project/Info 知识系统

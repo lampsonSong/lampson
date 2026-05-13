@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 import shlex
 import re
+import time
 from typing import Any
 
 
@@ -56,8 +57,20 @@ def _has_glob_abuse(command: str) -> bool:
     return bool(_GLOB_ABUSE_RE.search(command))
 
 
+def _is_cli_interrupted() -> bool:
+    """检查 CLI 是否收到中断信号（Ctrl+C）。"""
+    try:
+        from src.cli import _check_interrupt
+        return _check_interrupt()
+    except (ImportError, AttributeError):
+        return False
+
+
 def execute_shell(command: str, timeout: int = 30) -> str:
-    """执行 shell 命令，返回 stdout + stderr 合并字符串。"""
+    """执行 shell 命令，返回 stdout + stderr 合并字符串。
+    
+    支持 Ctrl+C 中断：在命令执行期间按 Ctrl+C 可终止进程并返回中断提示。
+    """
     if len(command) > MAX_COMMAND_LENGTH:
         return (
             f"[拒绝执行] 命令过长（{len(command)} 字符），上限为 {MAX_COMMAND_LENGTH}，"
@@ -73,25 +86,63 @@ def execute_shell(command: str, timeout: int = 30) -> str:
         )
 
     try:
-        result = subprocess.run(
+        # 使用 Popen 以支持轮询检查中断标志
+        process = subprocess.Popen(
             command,
             shell=True,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=timeout,
         )
+        
+        start_time = time.time()
+        stdout_chunks = []
+        stderr_chunks = []
+        
+        while True:
+            # 检查是否被 Ctrl+C 中断
+            if _is_cli_interrupted():
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                return "[中断] 命令已被 Ctrl+C 终止。"
+            
+            # 检查超时
+            if timeout and (time.time() - start_time) > timeout:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                return f"[超时] 命令执行超过 {timeout} 秒，已终止。"
+            
+            # 检查进程是否结束
+            returncode = process.poll()
+            if returncode is not None:
+                # 进程已结束，读取剩余输出
+                stdout, stderr = process.communicate()
+                if stdout:
+                    stdout_chunks.append(stdout)
+                if stderr:
+                    stderr_chunks.append(stderr)
+                break
+            
+            # 非阻塞读取（避免 CPU 占用过高）
+            time.sleep(0.05)
+        
         output_parts = []
-        if result.stdout:
-            output_parts.append(result.stdout)
-        if result.stderr:
-            output_parts.append(f"[stderr]\n{result.stderr}")
+        if stdout_chunks:
+            output_parts.append("".join(stdout_chunks))
+        if stderr_chunks:
+            output_parts.append(f"[stderr]\n{''.join(stderr_chunks)}")
         if not output_parts:
-            output_parts.append(f"[命令执行完毕，退出码 {result.returncode}]")
+            output_parts.append(f"[命令执行完毕，退出码 {returncode}]")
         return "\n".join(output_parts).strip()
-    except subprocess.TimeoutExpired:
-        return f"[超时] 命令执行超过 {timeout} 秒，已终止。"
+        
     except Exception as e:
         return f"[错误] 命令执行失败：{e}"
 
@@ -103,6 +154,7 @@ SCHEMA: dict[str, Any] = {
         "description": (
             "在终端执行 shell 命令，返回输出结果。"
             "适用于运行脚本、安装包、启动进程等。"
+            "支持 Ctrl+C 中断正在执行的命令。"
             "禁止用此工具执行 find/grep/rg 搜索文件或内容，请改用 search 工具。"
             "禁止用 cat/head/tail 读取文件，请改用 file_read。"
         ),

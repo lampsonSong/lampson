@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
+import threading
 import sys
 import textwrap
 from pathlib import Path
@@ -46,6 +48,28 @@ PROMPT_STYLE = Style.from_dict({
     "prompt": "ansigreen bold",
     "command": "ansigreen",
 })
+
+# ── 全局中断标志（用于 Ctrl+C 退出正在执行的命令） ──
+_cli_interrupt_flag = threading.Event()
+_cli_interrupted = False
+
+def _set_interrupt():
+    """由 signal handler 调用，设置中断标志。"""
+    global _cli_interrupted
+    _cli_interrupted = True
+    _cli_interrupt_flag.set()
+
+def _clear_interrupt():
+    """清除中断标志（每次 prompt 前调用）。"""
+    global _cli_interrupted
+    _cli_interrupted = False
+    _cli_interrupt_flag.clear()
+
+def _check_interrupt():
+    """检查是否收到中断信号。"""
+    return _cli_interrupted
+
+
 
 
 def _get_version() -> str:
@@ -125,7 +149,15 @@ def _run_repl(config: dict) -> None:
     
     # 创建补全器
     completer = LamixCompleter(history=history_content)
-    key_bindings = create_key_bindings()
+    # Ctrl+C 中断回调
+    def _on_ctrl_c():
+        _set_interrupt()
+    
+    key_bindings = create_key_bindings(interrupt_callback=_on_ctrl_c)
+    
+    # 设置 signal handler（用于 shell 命令执行期间）
+    if sys.platform != "win32":
+        signal.signal(signal.SIGINT, lambda s, f: _set_interrupt())
 
     prompt_session: PromptSession = PromptSession(
         history=FileHistory(str(history_file)),
@@ -139,6 +171,7 @@ def _run_repl(config: dict) -> None:
 
     try:
         while True:
+            _clear_interrupt()
             try:
                 user_input = prompt_session.prompt(
                     [("class:prompt", "you> ")],
@@ -146,6 +179,8 @@ def _run_repl(config: dict) -> None:
             except (KeyboardInterrupt, EOFError):
                 break
 
+            if _check_interrupt():
+                break
             if not user_input:
                 continue
 
@@ -155,7 +190,7 @@ def _run_repl(config: dict) -> None:
 
             result = session.handle_input(user_input)
 
-            if result.is_exit:
+            if result.is_exit or _check_interrupt():
                 break
 
             if result.is_new:
@@ -454,6 +489,22 @@ def gateway_stop() -> None:
     print_success("Lamix 已停止。")
 
 
+def gateway_restart() -> None:
+    """lamix gateway restart: 停止后再启动 daemon + watchdog。"""
+    import time
+
+    # 先停止
+    print_info("正在停止 Lamix...")
+    gateway_stop()
+
+    # 等待进程完全退出
+    print_info("等待进程退出...")
+    time.sleep(2)
+
+    # 再启动
+    print_info("正在启动 Lamix...")
+    gateway_start()
+
 def _ensure_watchdog_on_windows() -> None:
     """Windows 上确保 watchdog 在运行。"""
     import subprocess
@@ -582,16 +633,29 @@ def run_cli(args: argparse.Namespace) -> None:
 
 
 def _init_platform(config: dict) -> None:
-    """初始化平台相关组件。"""
+    """初始化平台相关组件：创建 PlatformManager 单例，注册并启动飞书 adapter。"""
+    from src.platforms.manager import PlatformManager
+    from src.platforms.adapters.feishu import FeishuAdapter
+
+    # 如果已有实例，跳过
+    if PlatformManager._instance is not None:
+        return
+
+    # 创建并设置 PlatformManager 单例
+    pm = PlatformManager(config)
+    PlatformManager._instance = pm
+
     # 初始化飞书
     feishu_config = config.get("feishu", {})
     if feishu_config.get("app_id") and feishu_config.get("app_secret"):
         try:
-            from src.platforms.adapters.feishu import FeishuAdapter
             adapter = FeishuAdapter({
                 "app_id": feishu_config["app_id"],
                 "app_secret": feishu_config["app_secret"],
             })
+            # 注册 adapter（注入 session_manager）
+            pm.register(adapter)
+            # 启动 adapter（后台线程）
             import threading
             threading.Thread(target=adapter.start, daemon=True).start()
         except Exception as e:
@@ -746,6 +810,7 @@ def _build_parser() -> argparse.ArgumentParser:
     gateway_sub = gateway_parser.add_subparsers(dest="gateway_action", title="gateway 子命令")
     start_parser = gateway_sub.add_parser("start", help="启动 watchdog + daemon")
     stop_parser = gateway_sub.add_parser("stop", help="停止 daemon + watchdog")
+    restart_parser = gateway_sub.add_parser("restart", help="重启 daemon + watchdog")
 
     # lamix model
     model_parser = subparsers.add_parser("model", help="重新配置 LLM 模型")
@@ -796,11 +861,14 @@ def main() -> None:
             gateway_start()
         elif action == "stop":
             gateway_stop()
+        elif action == "restart":
+            gateway_restart()
         else:
             # 无子命令：显示 gateway 子命令帮助
             print("用法: lamix gateway <子命令>")
             print("  start  启动 watchdog + daemon")
             print("  stop   停止 daemon + watchdog")
+            print("  restart 重启 daemon + watchdog")
     elif args.command == "model":
         run_model(args)
     elif args.command == "update":

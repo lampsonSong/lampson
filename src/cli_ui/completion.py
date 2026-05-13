@@ -74,20 +74,29 @@ class LamixCompleter(Completer):
                     )
 
 
-def create_key_bindings() -> KeyBindings:
-    """创建按键绑定。"""
+def create_key_bindings(interrupt_callback=None) -> KeyBindings:
+    """创建按键绑定。
+    
+    Args:
+        interrupt_callback: Ctrl+C 按下时的回调函数，用于触发 CLI 退出
+    """
     kb = KeyBindings()
     
     @kb.add(Keys.ControlC)
     def _(event):
-        """Ctrl+C 清空当前输入。"""
+        """Ctrl+C 触发中断，退出 CLI。"""
         event.current_buffer.text = ""
         event.current_buffer.cursor_position = 0
+        # 调用中断回调（如果提供了）
+        if interrupt_callback:
+            interrupt_callback()
     
     @kb.add(Keys.Escape, eager=True)
     def _(event):
         """Escape 键清空输入并取消补全。"""
         event.current_buffer.text = ""
         event.current_buffer.cursor_position = 0
+    
+    # Mac 上的 Command+C (复制) 不需要特殊处理，终端默认行为
     
     return kb
