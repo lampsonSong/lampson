@@ -415,6 +415,9 @@ class Session:
         import time as _time_module
 
         self.last_activity_at = _time_module.time()
+        # 记录用户最后活跃日期，归档逻辑依赖此日期而非 date.today()
+        from src.core.self_audit import touch_last_active_date
+        touch_last_active_date()
         if user_input.startswith("/"):
             return self._handle_command(user_input)
 

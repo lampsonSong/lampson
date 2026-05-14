@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from src.core.config import LAMIX_DIR, SKILLS_DIR, PROJECTS_DIR, load_config
@@ -864,10 +864,52 @@ def format_report_detail(report: AuditReport) -> str:
 
 # ── 基于使用频率的归档清理 ──────────────────────────────────────────────────
 
+_LAST_ACTIVE_FILE = LAMIX_DIR / ".last_active_date"
+
+
+def touch_last_active_date() -> None:
+    """记录用户最后活跃日期（每次 handle_input 调用）。"""
+    try:
+        _LAST_ACTIVE_FILE.write_text(date.today().isoformat(), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _get_last_active_date() -> date | None:
+    """读取用户最后活跃日期。
+
+    优先级：
+    1. ~/.lamix/.last_active_date 文件（最可靠）
+    2. heartbeat 中的 get_last_activity_time()（fallback）
+    3. None（无记录）
+    """
+    # 优先读文件
+    try:
+        text = _LAST_ACTIVE_FILE.read_text(encoding="utf-8").strip()
+        if text:
+            return date.fromisoformat(text)
+    except (OSError, ValueError):
+        pass
+
+    # fallback: heartbeat
+    try:
+        from src.core.heartbeat import get_last_activity_time
+        dt = get_last_activity_time()
+        if dt is not None:
+            return dt.date()
+    except Exception:
+        pass
+
+    return None
+
+
 def cleanup_stale_knowledge(auto_fix: bool = True) -> list[AuditFinding]:
     """根据使用频率归档长期未用的 skill/info/project。
 
-    规则：
+    基准日期：基于用户最后活跃日期（而非 date.today()），
+    避免用户一段时间没用后回来发现知识被归档。
+
+    规则（三类统一）：
     - 7天内有调用的，留着
     - 7天内没调用，且总调用次数0次的，归档
     - 7天内没调用，但总调用次数>0的，暂时留着
@@ -878,8 +920,15 @@ def cleanup_stale_knowledge(auto_fix: bool = True) -> list[AuditFinding]:
 
     findings: list[AuditFinding] = []
     today = date.today()
-    stale_7 = today - timedelta(days=7)
-    stale_30 = today - timedelta(days=30)
+
+    # ── 活跃基准日期：优先取用户最后活跃日期，fallback 到今天 ──
+    anchor_date = _get_last_active_date()
+    if anchor_date is None:
+        anchor_date = today
+        logger.debug("[归档] 无活跃记录，使用 today=%s 作为基准", today)
+
+    stale_7 = anchor_date - timedelta(days=7)
+    stale_30 = anchor_date - timedelta(days=30)
 
     def _parse_date(s: str) -> date | None:
         try:
@@ -980,14 +1029,15 @@ def cleanup_stale_knowledge(auto_fix: bool = True) -> list[AuditFinding]:
             should_archive = False
             reason = ""
             anchor = last_used or created
+            invocation_count = int(meta.get("invocation_count", 0))
 
             if anchor and anchor <= stale_30:
                 should_archive = True
                 reason = f"30天未使用（最后使用: {anchor}）"
-            elif anchor and anchor <= stale_7:
-                # info 没有 invocation_count，7天没用直接归档
+            elif anchor and anchor <= stale_7 and invocation_count == 0:
+                # info 有 invocation_count 时跟 skill 同规则
                 should_archive = True
-                reason = f"7天未使用（最后使用: {anchor}）"
+                reason = f"7天未使用且从未被调用（创建于: {created}）"
 
             if should_archive and auto_fix:
                 archive_dir = _info_dir / ".archived"
@@ -1036,10 +1086,14 @@ def cleanup_stale_knowledge(auto_fix: bool = True) -> list[AuditFinding]:
             should_archive = False
             reason = ""
             anchor = last_used or created
+            invocation_count = int(meta.get("invocation_count", 0))
 
             if anchor and anchor <= stale_30:
                 should_archive = True
                 reason = f"30天未使用（最后使用: {anchor}）"
+            elif anchor and anchor <= stale_7 and invocation_count == 0:
+                should_archive = True
+                reason = f"7天未使用且从未被调用（创建于: {created}）"
 
             if should_archive and auto_fix:
                 archive_dir = PROJECTS_DIR / ".archived"
