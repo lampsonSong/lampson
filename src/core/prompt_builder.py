@@ -103,15 +103,95 @@ def _ensure_skill_index_fields(path: Path) -> None:
     write_skill_with_frontmatter(path, meta, body)
 
 
-def _skill_md_paths_under_skills() -> list[Path]:
-    """返回所有 skill md 文件路径（平铺 .md 格式）。"""
+# ── 双层 Skill 结构 ─────────────────────────────────────────────────────────
+
+_SKILL_ENTRY_FILE = "SKILL.md"
+
+
+def _scan_skills_dir() -> list[dict[str, Any]]:
+    """扫描 skills/ 目录，返回所有 skill 条目。
+
+    双层优先：skills/<name>/SKILL.md
+    向后兼容：skills/<name>.md（等价于 skills/<name>/SKILL.md）
+    """
     if not SKILLS_DIR.exists():
         return []
-    out: list[Path] = []
-    for p in sorted(SKILLS_DIR.glob("*.md")):
-        if ".archived" not in str(p):
-            out.append(p)
-    return out
+
+    entries: list[dict[str, Any]] = []
+
+    # 优先：双层目录结构 skills/<name>/SKILL.md
+    for skill_dir in sorted(SKILLS_DIR.iterdir()):
+        if not skill_dir.is_dir():
+            continue
+        if skill_dir.name.startswith("."):
+            continue
+        entry_file = skill_dir / _SKILL_ENTRY_FILE
+        if entry_file.is_file():
+            _ensure_skill_index_fields(entry_file)
+            sub_items = _collect_skill_sub_items(skill_dir)
+            entries.append({
+                "name": skill_dir.name,
+                "path": entry_file,
+                "sub_items": sub_items,
+                "is_legacy": False,
+            })
+
+    # 向后兼容：平铺单文件 skills/<name>.md
+    for md_file in sorted(SKILLS_DIR.glob("*.md")):
+        if ".archived" in str(md_file):
+            continue
+        # 如果同名目录已存在，跳过（双层优先）
+        dir_path = SKILLS_DIR / md_file.stem
+        if dir_path.is_dir():
+            continue
+        _ensure_skill_index_fields(md_file)
+        entries.append({
+            "name": md_file.stem,
+            "path": md_file,
+            "sub_items": [],
+            "is_legacy": True,
+        })
+
+    return entries
+
+
+def _collect_skill_sub_items(skill_dir: Path) -> dict[str, list[str]]:
+    """收集 skill 目录下各子目录的文件清单。"""
+    sub_items: dict[str, list[str]] = {}
+    for subdir_name in ("references", "templates", "scripts", "assets"):
+        subdir = skill_dir / subdir_name
+        if not subdir.is_dir():
+            continue
+        files: list[str] = []
+        if subdir_name == "scripts":
+            files = sorted(f.name for f in subdir.glob("*.py") if not f.name.startswith("_"))
+        elif subdir_name == "assets":
+            files = sorted(f.name for f in subdir.iterdir() if f.is_file())
+        else:
+            files = sorted(f.stem for f in subdir.glob("*.md"))
+        if files:
+            sub_items[subdir_name] = files
+    return sub_items
+
+
+def _skill_entry_fingerprint(entries: list[dict[str, Any]]) -> frozenset[tuple[str, float]]:
+    """生成 skill 条目的 mtime 指纹（用于缓存失效检测）。"""
+    items: list[tuple[str, float]] = []
+    for e in entries:
+        try:
+            items.append((str(e["path"].resolve()), e["path"].stat().st_mtime))
+            # 子目录也加入指纹
+            skill_dir = e["path"].parent
+            for subdir in skill_dir.iterdir():
+                if subdir.is_dir() and not subdir.name.startswith("."):
+                    for f in subdir.iterdir():
+                        try:
+                            items.append((str(f.resolve()), f.stat().st_mtime))
+                        except OSError:
+                            pass
+        except OSError:
+            items.append((str(e["path"]), 0.0))
+    return frozenset(items)
 
 
 def _skills_mtime_fingerprint(paths: list[Path]) -> frozenset[tuple[str, float]]:
@@ -125,19 +205,20 @@ def _skills_mtime_fingerprint(paths: list[Path]) -> frozenset[tuple[str, float]]
 
 
 def build_skills_index() -> str:
-    """扫描 skills/ 下平铺 .md 文件，生成注入 system prompt 的技能目录块。"""
+    """扫描 skills/ 目录，生成注入 system prompt 的技能目录块。
+
+    双层结构优先：skills/<name>/SKILL.md
+    向后兼容平铺：skills/<name>.md
+    """
     global _skills_index_cache
-    paths = _skill_md_paths_under_skills()
-    if not paths:
+    entries = _scan_skills_dir()
+    if not entries:
         _skills_index_cache = (frozenset(), "")
         return ""
-    key_before = _skills_mtime_fingerprint(paths)
-    if _skills_index_cache is not None and _skills_index_cache[0] == key_before:
+    key = _skill_entry_fingerprint(entries)
+    if _skills_index_cache is not None and _skills_index_cache[0] == key:
         return _skills_index_cache[1]
-    for p in paths:
-        _ensure_skill_index_fields(p)
-    paths = _skill_md_paths_under_skills()
-    key = _skills_mtime_fingerprint(paths)
+
     lines: list[str] = [
         "## Skills（按需加载）",
         "以下是你已掌握的技能目录，每项包含名称和描述。",
@@ -145,7 +226,9 @@ def build_skills_index() -> str:
         "如果任务不涉及任何已列出的技能，直接回答即可。",
         "",
     ]
-    for path in paths:
+    for e in entries:
+        path = e["path"]
+        sub_items = e["sub_items"]
         try:
             raw_file = path.read_text(encoding="utf-8")
         except OSError:
@@ -155,12 +238,36 @@ def build_skills_index() -> str:
             name = str(meta.get("name", "") or path.stem)
             desc = str(meta.get("description", ""))
         else:
-            name = path.stem
+            name = e["name"]
             desc = ""
-        lines.append(f"- **{name}**: {desc}")
+
+        # 子项摘要
+        if sub_items:
+            parts = []
+            for subdir, items in sub_items.items():
+                parts.append(f"{subdir}/[{len(items)}]")
+            sub_label = f" ({', '.join(parts)})"
+        else:
+            sub_label = ""
+
+        lines.append(f"- **{name}**: {desc}{sub_label}")
+
     text = "\n".join(lines)
     _skills_index_cache = (key, text)
     return text
+
+
+# ── 遗留：保持旧的 glob 路径函数（供外部如 indexer 调用） ──────────────────
+
+
+def _skill_md_paths_under_skills() -> list[Path]:
+    """返回所有 skill 主文件的路径（SKILL.md 优先，否则 .md）。"""
+    if not SKILLS_DIR.exists():
+        return []
+    out: list[Path] = []
+    for e in _scan_skills_dir():
+        out.append(e["path"])
+    return out
 
 
 # ── Project Index & Context ───────────────────────────────────────────────────

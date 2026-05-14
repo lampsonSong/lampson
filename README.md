@@ -16,7 +16,7 @@ Lamix 把这些能力拆成三层：
 
 | 层 | 说明 | 例子 |
 |------|------|------|
-| **Skills** | 把反复出现的任务标准化成可复用工作流，包含工作步骤、决策依据，以及配套的脚本/工具代码 | debug 流程、Claude Code 派发规范；配套脚本放在 `scripts/` 下，下次启动自动注册为工具 |
+| **Skills** | 把反复出现的任务标准化成可复用工作流。目录结构为 `skills/<name>/SKILL.md` + 可选的 `references/`、`templates/`、`scripts/`、`assets/` 子目录。scripts/ 下的 `.py` 文件自动注册为工具 | debug 流程、code-review 规范；参考资料放 `references/`，配套脚本放 `scripts/` |
 | **Info** | 通用、零散但长久的知识信息 | 机器 IP 映射、TTS 服务调用方式、环境配置 |
 | **Projects** | 专注于某个项目的所有上下文 | 项目路径、技术栈、部署方式、约定规范 |
 
@@ -58,7 +58,7 @@ graph TB
 
 Lamix 不是一个用完即走的聊天机器人——它有完整的**自学习闭环**：
 
-- **Skills**：把反复出现的任务标准化成可复用工作流。每个 skill 目录下可以有 `SKILL.md`（工作步骤、决策依据）和 `scripts/`（配套工具脚本）。脚本在下一次 daemon 启动时自动注册为原生工具，下次遇到类似问题自动加载——不用从头教
+- **Skills**：把反复出现的任务标准化成可复用工作流。每个 skill 目录下有 `SKILL.md`（工作步骤、决策依据）和可选的 `references/`、`templates/`、`scripts/`、`assets/` 子目录。scripts/ 下的脚本在 daemon 启动时自动注册为原生工具
 - **Info / Projects**：通用知识和项目上下文分别归档，按需注入 prompt
 - **Skill Scripts**：检测到固定调用模式后，Lamix 会自动生成 Python 工具脚本（存放在 skills/*/scripts/ 下），下次启动直接注册为原生工具——从"用工具"进化到"造工具"
 - **Reflection**：每次任务完成后自主反思，判断有没有值得记住的东西。被用户纠正的错误、过时的方案同样会触发更新
@@ -359,41 +359,21 @@ python scripts/install_windows.py --uninstall
 
 ### 对话命令
 
-在飞书或 CLI 对话中可使用以下命令：
+在飞书或 CLI 对话中可使用以下命令（输入 `/` 触发补全）：
 
 | 命令 | 说明 |
 |------|------|
 | `/help` | 显示帮助 |
-| `/config` | 查看当前配置（敏感信息脱敏） |
-| `/model` | 显示当前模型和可用模型列表 |
-| `/model <name>` | 切换到指定模型 |
-| `/model all <question>` | 同时向所有可用模型提问，对比回答 |
-| `/memory show` | 查看长期记忆 |
-| `/memory add <text>` | 添加记忆条目 |
-| `/memory search <keyword>` | 搜索记忆 |
-| `/memory forget <keyword>` | 删除含关键词的记忆条目 |
-| `/search <keyword>` | 搜索历史对话记录 |
-| `/resume` | 列出最近 5 个 session |
-| `/resume <id>` | 加载指定 session 到当前对话 |
-| `/skills list` | 列出所有技能 |
-| `/skills show <name>` | 查看技能详情 |
-| `/skills create <name>` | 创建新技能 |
-| `/skills consolidate` | 分析并合并重复/耦合的技能 |
-| `/background <prompt>` | 后台运行任务，完成后推送结果 |
-| `/tasks` | 查看运行中的后台任务 |
-| `/cancel <task_id>` | 取消后台任务 |
+| `/new` | 开始新 session（清空当前对话上下文） |
+| `/resume` | 列出并加载历史 session |
 | `/compact` | 手动触发上下文压缩 |
 | `/context-size` | 查看当前上下文长度和占比 |
-| `/self-audit` | 立即触发自我审计 |
-| `/audit-report` | 列出历史审计报告 |
-| `/audit-report <path>` | 查看指定审计报告详情 |
-| `/update <需求描述>` | 触发自更新 |
-| `/update rollback` | 回滚自更新 |
-| `/update list` | 列出自更新分支 |
-| `/feishu send <id> <msg>` | 发送飞书消息 |
-| `/feishu read <chat_id>` | 读取飞书消息 |
-| `/metrics` | 查看最近任务指标统计 |
-| `/new` | 开始新 session（清空当前对话上下文） |
+| `/status` | 显示系统状态 |
+| `/config` | 查看当前配置（敏感信息脱敏） |
+| `/update` | 检查并执行自更新 |
+| `/skills` | 查看和管理技能 |
+| `/memory` | 查看和管理记忆 |
+| `/feishu` | 飞书相关操作 |
 | `/exit` | 退出 |
 
 </details>
@@ -404,29 +384,40 @@ python scripts/install_windows.py --uninstall
 ```
 lamix/
 ├── src/
-│   ├── cli.py                 # 命令分发器（cli/gateway/model/update/config）
+│   ├── cli.py                 # 命令行入口（lamix cli / gateway / model / update / config）
 │   ├── daemon.py              # Daemon 主进程
 │   ├── watchdog.py            # 进程守护
-│   ├── core/
-│   │   ├── agent.py           # LLM Agent 核心
-│   │   ├── config.py          # 配置加载/热重载
-│   │   ├── session.py         # 会话管理
-│   │   ├── tools/             # 内置工具集
-│   │   ├── heartbeat.py       # 心跳机制（watchdog 依赖）
+│   ├── safe_mode.py           # 安全模式
+│   ├── core/                  # 核心模块
+│   │   ├── agent.py           # LLM Agent 主循环
+│   │   ├── session.py         # Session 管理
+│   │   ├── session_manager.py  # 多 Session 路由
+│   │   ├── llm.py             # LLM 调用封装
+│   │   ├── tools.py           # 工具注册与分发
+│   │   ├── prompt_builder.py   # 分层 System Prompt 构建
+│   │   ├── skills_tools.py     # skill / info / project_context 工具
+│   │   ├── reflection.py       # 反思沉淀
+│   │   ├── compaction.py      # 上下文压缩
 │   │   ├── self_audit.py      # 自我审计
-│   │   └── task_scheduler.py  # 定时任务调度器
-│   ├── platforms/             # 多平台 adapter（FeishuAdapter、CliAdapter）
-│   │   └── adapters/          # 平台适配器实现
-│   ├── core/adapters/         # 模型适配器（OpenAI 兼容、MiniMax 等）
-│   ├── feishu/                # 飞书 SDK 封装
-│   ├── memory/                # 长期记忆存储
-│   ├── skills/                # 技能知识库
-│   ├── selfupdate/            # 自更新模块
-│   └── cli.py                 # 命令分发器（cli/gateway/model/update/config）
+│   │   ├── heartbeat.py       # 心跳（Watchdog 依赖）
+│   │   ├── indexer.py         # Skill / Project 索引
+│   │   ├── task_scheduler/    # 定时任务调度
+│   │   ├── adapters/          # 模型适配器（OpenAI / MiniMax）
+│   │   └── ...
+│   ├── tools/                  # 内置工具（shell / fileops / search / web / desktop / vision / skill_scripts 等）
+│   ├── platforms/             # 多平台适配
+│   │   ├── adapters/         # FeishuAdapter、CliAdapter
+│   │   ├── manager.py         # PlatformManager
+│   │   └── process_manager.py # 进程管理（跨平台）
+│   ├── feishu/               # 飞书 SDK
+│   ├── memory/                # 长期记忆（session 持久化、跨 session 搜索）
+│   ├── planning/             # 任务规划（Planner + Executor）
+│   ├── selfupdate/           # 自更新
+│   └── mcp/                  # MCP 协议支持
 ├── scripts/                   # 安装/部署脚本
-├── tests/                     # 测试
-├── config.yaml                # 用户配置（自动生成）
-└── pyproject.toml             # 项目配置
+├── config/                    # 默认配置模板
+├── docs/                      # 设计文档
+└── pyproject.toml
 ```
 
 </details>

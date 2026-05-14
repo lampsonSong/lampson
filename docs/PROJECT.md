@@ -88,7 +88,8 @@ lamix 命令 ──→ cli.py（独立 REPL，内嵌 PlatformManager）
 | `file_write` | 写文件（自动创建父目录） |
 | `feishu_send` | 发送飞书消息（text/card） |
 | `feishu_read` | 读取飞书会话消息 |
-| `skill` | 加载/搜索技能（action=view/search） |
+| `skill` | 加载/搜索技能（action=view/search，name 支持 `skill-name` 和 `skill-name/sub-item`） |
+| `skill_scripts` | 扫描 skills/*/scripts/，动态注册脚本为工具 |
 | `info` | 加载 info 知识文件 |
 | `project_context` | 加载项目上下文 |
 | `search_projects` | 语义搜索项目 |
@@ -135,7 +136,7 @@ lamix 命令 ──→ cli.py（独立 REPL，内嵌 PlatformManager）
 | L4 | Model Guidance（模型适配提示） |
 | L5 | Channel Context（非 CLI 时注入消息来源） |
 
-Skills 索引只展示名称和描述。详情通过 `skill(action='view')` 按需加载。
+Skills 索引展示 skill 名称、描述、以及子项数量。详情通过 `skill(action='view')` 按需加载，支持加载子项（如 `skill(name="code-writing/references/python-patterns")`）。
 Tool Groups 索引只展示组名和描述。需要时通过 `activate_tool_group(name)` 激活组内工具。
 
 ---
@@ -149,8 +150,14 @@ Tool Groups 索引只展示组名和描述。需要时通过 `activate_tool_grou
 ├── USER.md                  # 用户画像 + 偏好
 ├── boot_tasks.json          # 重启前待办
 ├── memory/
-│   ├── skills/              # 技能知识文档（*.md，平铺）
-│   │   └── scripts/         # 可执行脚本（动态注册为工具）
+│   ├── skills/              # 技能知识文档（双层目录结构）
+│   │   ├── <skill-name>/     # 每个技能一个目录
+│   │   │   ├── SKILL.md      # 入口文件（技能名称、描述、工作流）
+│   │   │   ├── references/   # 参考资料（*.md）
+│   │   │   ├── templates/    # 模板片段（*.md）
+│   │   │   ├── scripts/     # 可执行脚本（*.py，动态注册为工具）
+│   │   │   └── assets/       # 静态资源（图片、配置文件等）
+│   │   └── *.md              # 向后兼容：旧格式单文件 skill
 │   ├── projects/            # 项目信息（*.md）
 │   ├── info/                # 知识文件（*.md）
 │   ├── sessions/            # 会话 JSONL
@@ -373,7 +380,70 @@ vision:
 
 未配置时，视觉分析工具调用会提示用户配置。
 
-### 9.6 Config 热重载
+### 9.6 双层 Skills 设计
+
+#### 目录结构
+
+```
+skills/
+  <skill-name>/                 # 每个技能一个目录
+    SKILL.md                    # 入口：名称、描述、工作流（必选）
+    references/                 # 参考资料（可选）
+      *.md                      # 多个参考文档
+    templates/                   # 模板片段（可选）
+      *.md                      # 多个模板
+    scripts/                     # 可执行脚本（可选，动态注册为工具）
+      *.py
+    assets/                      # 静态资源（可选）
+      *
+  *.md                          # 向后兼容：旧格式单文件 skill
+```
+
+#### SKILL.md 格式
+
+```yaml
+---
+name: code-writing
+description: 编写高质量代码的标准工作流
+created_at: "2025-01-01"
+invocation_count: 0
+---
+# Code Writing
+
+## 何时使用
+当你需要编写新代码时使用此工作流。
+
+## 工作流
+1. 理解需求
+2. 设计接口
+3. 实现
+4. 测试
+
+## 子项
+- references/：Python/JS 编码规范、常见错误模式
+- templates/：类模板、API 模板
+```
+
+#### 加载规则
+
+| 调用方式 | 加载内容 |
+|---------|---------|
+| `skill(action='view', name='code-writing')` | 加载 `code-writing/SKILL.md` |
+| `skill(action='view', name='code-writing/references/python-patterns')` | 加载 `code-writing/references/python-patterns.md` |
+| `skill(action='search', query='python')` | 在所有 SKILL.md + references/ 下全文搜索 |
+
+#### 渐进加载策略
+
+- **第 1 层**（索引）：`SKILL.md` 的 name + description + 子项摘要（references/ ×N, templates/ ×N）
+- **第 2 层**（按需）：读取 `references/`、`templates/`、`scripts/`、`assets/`
+- **scripts/** 下的 `.py` 文件定义了 `TOOL_SCHEMA` + `TOOL_RUNNER` 时，自动注册为工具
+
+#### 向后兼容
+
+- `skills/*.md`（平铺单文件）仍被识别为一个有效的 skill，等价于 `skills/xxx/SKILL.md`
+- 迁移脚本自动将旧单文件迁移到新目录结构
+
+### 9.7 Config 热重载
 
 daemon 运行中修改 `~/.lamix/config.yaml`（比如改了飞书配置），无需重启。daemon 每 30 秒检测配置文件变化，自动热重载飞书 adapter。
 
@@ -416,6 +486,8 @@ lamix gateway restart # 重启
 - 跨平台 `_process_exists()` 函数（Windows 用 tasklist）
 - 首次运行自动问候语
 - CLI 工具调用实时进度显示
+- Skills 双层目录结构（skills/\<name\>/SKILL.md + references/ + templates/ + scripts/ + assets/）
+- Skill view/search 支持子项路径（如 `skill(name="code-writing/references/python-patterns")`）
 
 ### v0.1.x
 - 初始版本

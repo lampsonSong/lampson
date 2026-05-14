@@ -13,10 +13,13 @@ SKILLS_DIR = LAMIX_DIR / "memory" / "skills"
 PROJECTS_DIR = LAMIX_DIR / "memory" / "projects"
 INFO_DIR = LAMIX_DIR / "memory" / "info"
 
-# Session 在启动时通过 set_retrieval_indices 注入，供 skill search/search_projects 使用
+# Session 在启动时通过 set_retrieval_indices 注入，供 skill search/search_projects/info 使用
 _active_skill_index: Any = None
 _active_project_index: Any = None
 _active_info_index: Any = None
+
+# 双层结构入口文件名
+_SKILL_ENTRY_FILE = "SKILL.md"
 
 
 # ── 统一 Skill Schema ────────────────────────────────────────────────────────
@@ -169,6 +172,67 @@ def project_context(params: dict[str, Any]) -> str:
 
 
 
+def _get_skill_entry_by_name(name: str) -> dict[str, Any] | None:
+    """根据 skill 名查找条目（支持双层路径）。返回条目或 None。
+
+    双层结构优先：skills/<name>/SKILL.md
+    向后兼容：skills/<name>.md
+    """
+    from src.core.prompt_builder import _scan_skills_dir
+
+    entries = _scan_skills_dir()
+    for e in entries:
+        skill_name = str(e.get("name", "")).lower()
+        if skill_name == name.lower():
+            return e
+        # 模糊匹配
+        if skill_name == name.lower():
+            return e
+    return None
+
+
+def _resolve_skill_path(name: str) -> tuple[Path | None, bool]:
+    """解析 skill 名称，返回 (文件路径, 是否子项)。
+
+    - name="code-writing" → skills/code-writing/SKILL.md 或 skills/code-writing.md
+    - name="code-writing/references/python-patterns" → skills/code-writing/references/python-patterns.md
+
+    Returns: (path, is_sub_item)
+    """
+    if "/" in name:
+        skill_name, sub_part = name.split("/", 1)
+    else:
+        skill_name, sub_part = name, ""
+
+    if not SKILLS_DIR.exists():
+        return None, False
+
+    skill_dir = SKILLS_DIR / skill_name
+    entry_file = skill_dir / _SKILL_ENTRY_FILE
+
+    if sub_part:
+        # 子项：skills/<name>/<sub_part>.md
+        sub_path = skill_dir / (sub_part + ".md")
+        if sub_path.is_file():
+            return sub_path, True
+        # 尝试不带扩展名（子目录形式）
+        sub_dir = skill_dir / sub_part
+        if sub_dir.is_dir():
+            # 返回目录下的第一个 .md 文件
+            md_files = list(sub_dir.glob("*.md"))
+            if md_files:
+                return md_files[0], True
+        return None, True
+
+    # 主入口：先尝试 SKILL.md，再尝试平铺 .md
+    if entry_file.is_file():
+        return entry_file, False
+    legacy_file = SKILLS_DIR / f"{skill_name}.md"
+    if legacy_file.is_file():
+        return legacy_file, False
+    return None, False
+
+
 def _increment_invocation(skill_path: Path) -> int:
     """递增 skill 文件的 invocation_count 和 last_used_at，保留正文；返回新计数。"""
     from datetime import date
@@ -190,85 +254,116 @@ def _increment_invocation(skill_path: Path) -> int:
 
 
 def _run_skill_view(params: dict[str, Any]) -> str:
-    """按名称加载 skill 文件全文，并递增 invocation_count。"""
+    """按名称加载 skill 文件全文，并递增 invocation_count。
+
+    支持双层路径：
+    - name="code-writing" → 加载 skills/code-writing/SKILL.md
+    - name="code-writing/references/python-patterns" → 加载子项
+    """
     name = str(params.get("name", "")).strip()
     if not name:
         return "[错误] name 参数不能为空"
-    global _active_skill_index
-    if _active_skill_index is None:
-        return "[提示] 技能索引未初始化"
-    entries = getattr(_active_skill_index, "_entries", None)
-    if not entries:
-        return f"[错误] 未找到名为「{name}」的技能"
-    path: Path | None = None
-    for e in entries:
-        if str(e.get("name", "")) == name:
-            path = Path(str(e["path"]))
-            break
-    if path is None:
-        low = name.lower()
-        for e in entries:
-            if str(e.get("name", "")).lower() == low:
-                path = Path(str(e["path"]))
-                break
+
+    path, is_sub_item = _resolve_skill_path(name)
     if path is None or not path.is_file():
-        return f"[错误] 未找到名为「{name}」的技能"
+        # 提供可用的 skill 列表
+        from src.core.prompt_builder import _scan_skills_dir
+        entries = _scan_skills_dir()
+        available = [str(e["name"]) for e in entries]
+        avail_str = ", ".join(available) if available else "(none)"
+        return f"[错误] 未找到名为「{name}」的技能\n\n可用技能: {avail_str}"
+
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as ex:
         return f"[错误] 读取技能文件失败：{ex}"
-    new_c = _increment_invocation(path)
-    for e in entries:
-        if str(e.get("path", "")) == str(path.resolve()):
-            e["invocation_count"] = new_c
-            break
 
-    # 启动 skill 执行审计
-    try:
-        from src.core.skill_audit import start_audit
-        # 解析 body（去掉 frontmatter）
-        body = text
-        fm_match = __import__("re").match(r"^---\s*\n.*?\n---\s*\n", text, __import__("re").DOTALL)
-        if fm_match:
-            body = text[fm_match.end():]
-        start_audit(name, body)
-    except Exception as e:
-        __import__("logging").getLogger(__name__).debug(f"审计启动失败: {e}")
+    # 只对主入口文件递增 invocation_count
+    if not is_sub_item:
+        new_c = _increment_invocation(path)
+        # 同步更新 index 中的计数
+        from src.core.prompt_builder import _scan_skills_dir
+        entries = _scan_skills_dir()
+        for e in entries:
+            if str(e.get("path", "")) == str(path.resolve()):
+                e["invocation_count"] = new_c
+                break
+
+        # 启动 skill 执行审计
+        try:
+            from src.core.skill_audit import start_audit
+            body = text
+            fm_match = __import__("re").match(r"^---\s*\n.*?\n---\s*\n", text, __import__("re").DOTALL)
+            if fm_match:
+                body = text[fm_match.end():]
+            start_audit(name, body)
+        except Exception as e:
+            __import__("logging").getLogger(__name__).debug(f"审计启动失败: {e}")
 
     return text
 
 
 def _run_skill_search(params: dict[str, Any]) -> str:
-    """在 name / description 中做子串匹配，返回匹配的 skill 文件全文。"""
+    """在 skill 内容中做关键词匹配，返回匹配的 skill 文件全文。
+
+    搜索范围：SKILL.md + references/*.md + templates/*.md
+    """
     query = params.get("query", "").strip()
     top_k = int(params.get("top_k", 3))
     if not query:
         return "[错误] query 参数不能为空"
-    global _active_skill_index
-    if _active_skill_index is None:
-        return "[提示] 技能索引未初始化"
+
+    from src.core.prompt_builder import _scan_skills_dir, _parse_frontmatter
+
+    entries = _scan_skills_dir()
+    if not entries:
+        return "[提示] 技能索引为空"
+
     q_lower = query.lower()
-    results: list[str] = []
-    for e in _active_skill_index._entries:  # type: ignore[union-attr]
-        name = str(e.get("name", ""))
-        desc = str(e.get("description", ""))
-        blob = f"{name}\n{desc}"
-        if q_lower not in blob.lower():
-            continue
-        p = str(e.get("path", ""))
-        if not p:
-            continue
-        try:
-            content = Path(p).read_text(encoding="utf-8")
-        except OSError:
-            continue
-        if content.strip():
-            results.append(content)
-        if len(results) >= top_k:
-            break
-    if not results:
+    results: list[tuple[float, str]] = []  # (score, content)
+
+    for e in entries:
+        skill_dir = e["path"].parent
+        skill_name = str(e.get("name", ""))
+
+        # 搜索所有相关文件
+        files_to_search: list[Path] = [e["path"]]  # SKILL.md
+
+        # references/*.md, templates/*.md
+        for subdir in ("references", "templates"):
+            subdir_path = skill_dir / subdir
+            if subdir_path.is_dir():
+                files_to_search.extend(subdir_path.glob("*.md"))
+
+        for fp in files_to_search:
+            try:
+                content = fp.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            if not content.strip():
+                continue
+
+            # 在 name + description + body 中匹配
+            meta, body = _parse_frontmatter(content)
+            name = str(meta.get("name", "")) or fp.stem
+            desc = str(meta.get("description", ""))
+            blob = f"{name}\n{desc}\n{body}"
+            blob_lower = blob.lower()
+
+            if q_lower not in blob_lower:
+                continue
+
+            # 命中出现在靠前位置时加分
+            pos = blob_lower.index(q_lower)
+            score = 1.0 - (pos / max(len(blob_lower), 1))
+            results.append((score, content))
+
+    results.sort(key=lambda x: x[0], reverse=True)
+    top_results = [content for _, content in results[:top_k]]
+
+    if not top_results:
         return "未找到匹配的技能。"
-    return "\n\n---\n\n".join(results)
+    return "\n\n---\n\n".join(top_results)
 
 
 def skill(params: dict[str, Any]) -> str:
