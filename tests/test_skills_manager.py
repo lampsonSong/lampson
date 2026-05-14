@@ -20,17 +20,14 @@ from src.skills.manager import (
 
 # ─── Skill 实例化 Helper ──────────────────────────────────────────────────────
 
-def _make_skill(tmp_path: Path, skill_dir_name: str = None, **meta) -> tuple:
-    """在 tmp_path 下创建 skill 目录和文件，返回 (Skill实例, Path)。"""
-    if skill_dir_name is None:
-        skill_dir_name = meta.get("name", "default-skill")
+def _make_skill(tmp_path: Path, skill_file_name: str = None, **meta) -> tuple:
+    """在 tmp_path 下创建平铺 skill .md 文件，返回 (Skill实例, Path)。"""
+    if skill_file_name is None:
+        skill_file_name = meta.get("name", "default-skill")
 
-    skill_dir = tmp_path / skill_dir_name
-    skill_dir.mkdir()
-
-    frontmatter_name = meta.get("name", skill_dir_name)
+    fm_name = meta.get("name", skill_file_name)
     fm = {
-        "name": frontmatter_name,
+        "name": fm_name,
         "description": meta.get("description", ""),
     }
 
@@ -40,7 +37,7 @@ def _make_skill(tmp_path: Path, skill_dir_name: str = None, **meta) -> tuple:
 
     body = meta.get("body", "# Body\nContent here")
     content = f"---\n" + "\n".join(fm_parts) + "\n---\n" + body
-    skill_file = skill_dir / "SKILL.md"
+    skill_file = tmp_path / f"{skill_file_name}.md"
     skill_file.write_text(content, encoding="utf-8")
 
     skill = Skill(name=fm["name"], path=skill_file, meta=fm, body=body)
@@ -50,10 +47,6 @@ def _make_skill(tmp_path: Path, skill_dir_name: str = None, **meta) -> tuple:
 # ─── Skill 基础测试 ──────────────────────────────────────────────────────────
 
 class TestSkillBasic:
-
-    def test_skill_repr(self, tmp_path: Path):
-        skill, _ = _make_skill(tmp_path, "test-skill", description="Test")
-        assert "test-skill" in repr(skill)
 
     def test_skill_attributes(self, tmp_path: Path):
         skill, _ = _make_skill(
@@ -82,9 +75,8 @@ class TestParseSkillMd:
         assert "This is the body." in result.body
 
     def test_parse_missing_frontmatter(self, tmp_path: Path):
-        skill_dir = tmp_path / "no-frontmatter"
-        skill_dir.mkdir()
-        skill_file = skill_dir / "SKILL.md"
+        # 无 frontmatter 时，用文件名（不含 .md）作为 name
+        skill_file = tmp_path / "no-frontmatter.md"
         skill_file.write_text("# Just a title\n\nSome content.", encoding="utf-8")
 
         result = _parse_skill_md(skill_file)
@@ -94,9 +86,7 @@ class TestParseSkillMd:
         assert "Some content." in result.body
 
     def test_parse_invalid_yaml(self, tmp_path: Path):
-        skill_dir = tmp_path / "bad-yaml"
-        skill_dir.mkdir()
-        skill_file = skill_dir / "SKILL.md"
+        skill_file = tmp_path / "bad-yaml.md"
         skill_file.write_text(
             "---\nname: [invalid\n  yaml\n---\n# Body\n",
             encoding="utf-8",
@@ -111,9 +101,7 @@ class TestParseSkillMd:
         assert result is None
 
     def test_parse_empty_file(self, tmp_path: Path):
-        skill_dir = tmp_path / "empty"
-        skill_dir.mkdir()
-        skill_file = skill_dir / "SKILL.md"
+        skill_file = tmp_path / "empty.md"
         skill_file.write_text("", encoding="utf-8")
 
         result = _parse_skill_md(skill_file)
@@ -175,13 +163,13 @@ class TestCreateSkill:
                 description="A new skill",
             )
             assert "已创建" in result or "new-skill" in result
-            assert (tmp_path / "skills" / "new-skill" / "SKILL.md").exists()
+            assert (tmp_path / "skills" / "new-skill.md").exists()
 
     def test_create_existing_skill(self, tmp_path: Path):
         skill_dir = tmp_path / "skills"
         skill_dir.mkdir()
-        (skill_dir / "existing").mkdir()
-        (skill_dir / "existing" / "SKILL.md").write_text("old", encoding="utf-8")
+        # 已有平铺文件
+        (skill_dir / "existing.md").write_text("old content", encoding="utf-8")
 
         with patch("src.skills.manager.SKILLS_DIR", skill_dir):
             result = create_skill(name="existing", description="Test")

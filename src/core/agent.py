@@ -565,6 +565,10 @@ class Agent:
                     result = tool_registry.dispatch(tc.name, tc.raw_arguments)
                     self._fast_path_tool_count += 1
 
+                    # 如果激活了新工具组，刷新工具列表使新工具可用
+                    if tc.name == "activate_tool_group":
+                        self._tools = tool_registry.get_all_schemas()
+
                     # 记录 tool call 供 skill 审计使用
                     try:
                         from src.core.skill_audit import record_tool_call

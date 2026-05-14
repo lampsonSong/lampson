@@ -24,6 +24,29 @@ ToolRunner = Callable[[dict[str, Any]], str]
 
 _REGISTRY: dict[str, tuple[dict[str, Any], ToolRunner]] = {}
 
+# ── 工具组 ──────────────────────────────────────────────────────────────────
+# auto=True 的组默认加载，auto=False 的组按需激活
+# 前缀匹配：desktop_* → desktop, vision_* → vision, 其余 → core
+GROUP_PROFILES: dict[str, dict[str, Any]] = {
+    "desktop": {
+        "description": "桌面控制（截图、点击、输入、滚动等 GUI 操作）",
+        "auto": False,
+    },
+    "vision": {
+        "description": "图片分析（用视觉模型分析图片内容）",
+        "auto": False,
+    },
+}
+
+# 当前 session 中已激活的组名集合（从 auto=True 的组开始）
+_active_groups: set[str] = {name for name, cfg in GROUP_PROFILES.items() if cfg["auto"]}
+
+
+def _tool_group(name: str) -> str:
+    """根据工具名返回所属组名。前缀匹配，未匹配的归 core。"""
+    prefix = name.split("_")[0]
+    return prefix if prefix in GROUP_PROFILES else "core"
+
 
 def _register(schema: dict[str, Any], runner: ToolRunner) -> None:
     name = schema["function"]["name"]
@@ -300,8 +323,87 @@ def validate_tool_schema(schema: dict[str, Any]) -> list[str]:
 
 
 def get_all_schemas() -> list[dict[str, Any]]:
-    """返回所有工具的 OpenAI function calling schema 列表。"""
-    return [schema for schema, _ in _REGISTRY.values()]
+    """返回所有已激活工具的 schema 列表（core + 已激活组）。"""
+    return [
+        schema for name, (schema, _) in _REGISTRY.items()
+        if _tool_group(name) == "core" or _tool_group(name) in _active_groups
+    ]
+
+
+def activate_tool_group(name: str) -> str:
+    """激活一个工具组，使其工具可用于当前 session。
+
+    Returns:
+        组内工具的描述文本（供 LLM 了解可用工具）。
+    """
+    if name not in GROUP_PROFILES:
+        available = ", ".join(
+            f"{n}（{cfg['description']}）"
+            for n, cfg in GROUP_PROFILES.items()
+            if n not in _active_groups
+        )
+        return f"[未知工具组: {name}]\n\n可激活的组: {available or '(全部已激活)'}"
+
+    if name in _active_groups:
+        return f"[工具组 '{name}' 已处于激活状态]"
+
+    _active_groups.add(name)
+
+    # 收集该组所有工具的名称和描述
+    tool_lines: list[str] = []
+    for tool_name, (schema, _) in _REGISTRY.items():
+        if _tool_group(tool_name) == name:
+            func = schema.get("function", {})
+            desc = func.get("description", "")
+            tool_lines.append(f"- **{tool_name}**: {desc}")
+
+    tools_text = "\n".join(tool_lines) if tool_lines else "(无工具)"
+    return (
+        f"工具组 '{name}' 已激活。以下工具现在可用：\n\n"
+        f"{tools_text}\n\n"
+        f"你现在可以直接调用这些工具。"
+    )
+
+
+def get_inactive_group_profiles() -> dict[str, str]:
+    """返回尚未激活的组的 {组名: 描述}（供 prompt_builder 写索引用）。"""
+    return {
+        name: cfg["description"]
+        for name, cfg in GROUP_PROFILES.items()
+        if name not in _active_groups
+    }
+
+
+# ── activate_tool_group 工具注册 ─────────────────────────────────────────
+
+_ACTIVATE_TOOL_GROUP_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "activate_tool_group",
+        "description": (
+            "按需激活一个工具组。当前只有默认工具可用；"
+            "当你判断任务需要特定能力（如桌面控制、图片分析）时，先调用此工具激活对应组，"
+            "激活后该组所有工具即可在当前会话中使用。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "要激活的工具组名称，如 desktop、vision",
+                },
+            },
+            "required": ["name"],
+        },
+    },
+}
+
+
+def _run_activate_tool_group(params: dict) -> str:
+    return activate_tool_group(params.get("name", ""))
+
+
+_register(_ACTIVATE_TOOL_GROUP_SCHEMA, _run_activate_tool_group)
 
 
 def dispatch(tool_name: str, arguments_raw: str | dict[str, Any]) -> str:

@@ -349,6 +349,19 @@ def _list_archived_impl(category: str) -> str:
     if category in ("skill", "all"):
         archive_dir = SKILLS_DIR / ".archived"
         if archive_dir.exists():
+            # 新格式归档：skills/.archived/*.md
+            for f in sorted(archive_dir.glob("*.md")):
+                try:
+                    raw = f.read_text(encoding="utf-8")
+                    fm = re.match(r"^---\s*\n(.*?)\n---\s*\n", raw, re.DOTALL)
+                    desc = ""
+                    if fm:
+                        meta = yaml.safe_load(fm.group(1)) or {}
+                        desc = meta.get("description", "")[:80]
+                    results.append(f"  📦 skill/{f.stem}: {desc}")
+                except OSError:
+                    results.append(f"  📦 skill/{f.stem}")
+            # 旧格式归档兼容：skills/.archived/*/SKILL.md
             for d in sorted(archive_dir.iterdir()):
                 if d.is_dir():
                     skill_md = d / "SKILL.md"
@@ -358,7 +371,6 @@ def _list_archived_impl(category: str) -> str:
                             fm = re.match(r"^---\s*\n(.*?)\n---\s*\n", raw, re.DOTALL)
                             desc = ""
                             if fm:
-                                import yaml
                                 meta = yaml.safe_load(fm.group(1)) or {}
                                 desc = meta.get("description", "")[:80]
                             results.append(f"  📦 skill/{d.name}: {desc}")
@@ -390,16 +402,22 @@ def _restore_archived_impl(category: str, name: str) -> str:
 
     if category == "skill":
         archive_dir = SKILLS_DIR / ".archived"
-        target_dir = SKILLS_DIR
-        candidates = [d for d in archive_dir.iterdir() if d.is_dir() and d.name.startswith(name)]
+        # 新格式：skills/.archived/foo.md
+        candidates = list(archive_dir.glob(f"{name}*.md")) if archive_dir.exists() else []
+        # 旧格式兼容：skills/.archived/foo/SKILL.md
+        if archive_dir.exists():
+            for d in archive_dir.iterdir():
+                if d.is_dir() and d.name.startswith(name):
+                    candidates.append(d / "SKILL.md")
+        target_path = SKILLS_DIR / f"{name}.md"  # 恢复为平铺格式
     elif category == "info":
         archive_dir = LAMIX_DIR / "memory" / "info" / ".archived"
         target_dir = LAMIX_DIR / "memory" / "info"
-        candidates = [f for f in archive_dir.glob(f"{name}*.md")]
+        candidates = [f for f in archive_dir.glob(f"{name}*.md")] if archive_dir.exists() else []
     elif category == "project":
         archive_dir = LAMIX_DIR / "memory" / "projects" / ".archived"
         target_dir = LAMIX_DIR / "memory" / "projects"
-        candidates = [f for f in archive_dir.glob(f"{name}*.md")]
+        candidates = [f for f in archive_dir.glob(f"{name}*.md")] if archive_dir.exists() else []
     else:
         return f"[错误] 不支持的类别: {category}"
 
@@ -414,7 +432,10 @@ def _restore_archived_impl(category: str, name: str) -> str:
         return f"[错误] 匹配到多个: {names}，请更精确指定"
 
     src = candidates[0]
-    dest = target_dir / src.name
+    if category == "skill":
+        dest = target_path
+    else:
+        dest = target_dir / src.name
     if dest.exists():
         return f"[错误] 目标已存在: {dest}，请先处理冲突"
 

@@ -104,13 +104,26 @@ def _ensure_skill_index_fields(path: Path) -> None:
 
 
 def _skill_md_paths_under_skills() -> list[Path]:
+    """返回所有 skill md 文件路径。
+
+    扫描顺序：先平铺 *.md（优先），再兼容旧格式 */SKILL.md。
+    """
     if not SKILLS_DIR.exists():
         return []
     out: list[Path] = []
+    # 新格式：平铺 *.md
+    for p in sorted(SKILLS_DIR.glob("*.md")):
+        if ".archived" not in str(p):
+            out.append(p)
+    # 旧格式兼容：*/SKILL.md
     for p in sorted(SKILLS_DIR.rglob("SKILL.md")):
-        if ".archived" in p.parts:
+        if ".archived" in str(p):
             continue
-        out.append(p)
+        # 跳过已经以同名 .md 存在的
+        if p.parent != SKILLS_DIR:
+            flat = SKILLS_DIR / f"{p.parent.name}.md"
+            if not flat.exists():
+                out.append(p)
     return out
 
 
@@ -152,10 +165,10 @@ def build_skills_index() -> str:
             continue
         meta, _body = _parse_frontmatter(raw_file)
         if meta:
-            name = str(meta.get("name", "") or path.parent.name)
+            name = str(meta.get("name", "") or path.stem)
             desc = str(meta.get("description", ""))
         else:
-            name = path.parent.name
+            name = path.stem
             desc = ""
         lines.append(f"- **{name}**: {desc}")
     text = "\n".join(lines)
@@ -384,6 +397,24 @@ def write_info_with_frontmatter(path: Path, meta: dict, body: str) -> None:
     path.write_text(f"---\n{fm}\n---\n\n{body}\n", encoding="utf-8")
 
 
+# ── Tool Groups 索引 ────────────────────────────────────────────────────────
+
+def build_tool_groups_index() -> str:
+    """构建未激活工具组的索引（注入 system prompt）。"""
+    from src.core import tools as tool_registry
+    inactive = tool_registry.get_inactive_group_profiles()
+    if not inactive:
+        return ""
+    lines: list[str] = [
+        "## Tool Groups（按需激活）",
+        "以下工具组当前未加载。当你判断任务需要相关能力时，调用 activate_tool_group(name=\"组名\") 激活，激活后该组所有工具即可使用。",
+        "",
+    ]
+    for name, desc in inactive.items():
+        lines.append(f"- **{name}**: {desc}")
+    return "\n".join(lines)
+
+
 def _read_config_template(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
@@ -513,6 +544,10 @@ class PromptBuilder:
         if skills_block.strip():
             l2.append(skills_block)
         l2.append(ACTION_GUIDANCE)
+        # Tool Groups 索引（仅未激活的组）
+        tool_groups_block = build_tool_groups_index()
+        if tool_groups_block:
+            l2.append(tool_groups_block)
         layers.extend(l2)
 
         # L3: Project index

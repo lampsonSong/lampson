@@ -179,7 +179,7 @@ def test_create_skill(temp_skills: Path):
     with patch("src.core.reflection.SKILLS_DIR", temp_skills):
         hint = _create_skill("my-skill", content, "测试创建")
     assert hint is not None
-    assert (temp_skills / "my-skill" / "SKILL.md").exists()
+    assert (temp_skills / "my-skill.md").exists()
 
 
 def test_create_skill_empty_content(temp_skills: Path):

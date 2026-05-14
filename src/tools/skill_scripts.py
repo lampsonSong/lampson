@@ -1,10 +1,10 @@
-"""技能脚本管理器：扫描 ~/.lamix/skills/*/scripts/，动态注册为工具。
+"""技能脚本管理器：扫描 ~/.lamix/skills/scripts/，动态注册为工具。
 
-skills/*/scripts/ 下的 .py 文件如果定义了 TOOL_SCHEMA + TOOL_RUNNER，会自动注册为工具。
+skills/scripts/ 下的 .py 文件如果定义了 TOOL_SCHEMA + TOOL_RUNNER，会自动注册为工具。
 通过在模块中定义 TOOL_SCHEMA + TOOL_RUNNER，可以自动将模块功能暴露为工具供 LLM 调用。
 
 模块规范：
-    1. 位于 skills/<skill_name>/scripts/ 目录下
+    1. 位于 skills/scripts/ 目录下
     2. 可选定义 TOOL_SCHEMA: dict — OpenAI function calling schema
     3. 可选定义 TOOL_RUNNER: Callable[[dict], str] — 工具执行函数
     4. 如果没有 TOOL_SCHEMA，模块仍可作为普通库被其他模块调用
@@ -40,7 +40,9 @@ _loaded_modules: dict[str, Any] = {}
 
 
 def scan_and_register() -> list[dict[str, Any]]:
-    """扫描 skills/*/scripts/ 目录，加载所有模块并注册为工具。
+    """扫描 skills/scripts/ 目录，加载所有模块并注册为工具。
+
+    同时兼容旧格式 skills/*/scripts/（向后兼容迁移期）。
 
     返回注册成功的工具 schema 列表。
     """
@@ -49,20 +51,29 @@ def scan_and_register() -> list[dict[str, Any]]:
     if not SKILLS_DIR.exists():
         return registered
 
+    # 优先新格式：skills/scripts/*.py
+    scripts_dirs = [SKILLS_DIR / "scripts"] if (SKILLS_DIR / "scripts").is_dir() else []
+    # 兼容旧格式：skills/*/scripts/
     for scripts_dir in sorted(SKILLS_DIR.glob("*/scripts")):
-        if not scripts_dir.is_dir():
-            continue
+        if scripts_dir not in scripts_dirs:
+            scripts_dirs.append(scripts_dir)
 
-        skill_name = scripts_dir.parent.name
-
+    for scripts_dir in scripts_dirs:
         for py_file in sorted(scripts_dir.glob("*.py")):
             if py_file.name.startswith("_"):
                 continue
 
             script_name = py_file.stem
-            module_key = f"{skill_name}/{script_name}"
+            # 新格式：skills/scripts/foo.py → module_key = "scripts.foo"
+            # 旧格式：skills/bar/scripts/foo.py → module_key = "bar/foo"
+            if scripts_dir.name == "scripts" and scripts_dir.parent == SKILLS_DIR:
+                module_key = f"scripts.{script_name}"
+            else:
+                skill_name = scripts_dir.parent.name
+                module_key = f"{skill_name}/{script_name}"
+
             try:
-                module = _load_module(skill_name, script_name, py_file)
+                module = _load_module(script_name, py_file)
             except Exception as e:
                 logger.warning(f"加载脚本 {module_key} 失败: {e}")
                 continue
@@ -90,22 +101,28 @@ def scan_and_register() -> list[dict[str, Any]]:
     return registered
 
 
-def _load_module(skill_name: str, script_name: str, py_file: Path) -> Any:
+def _load_module(script_name: str, py_file: Path) -> Any:
     """动态加载单个 Python 模块。先做静态 import 检查，不通过则拒绝加载。"""
     # 加载前静态检查危险 import
     code = py_file.read_text(encoding="utf-8")
     blocked = _check_blocked_imports(code)
     if blocked:
         raise RuntimeError(
-            f"拒绝加载 {skill_name}/{script_name}: 包含危险 import: {blocked}"
+            f"拒绝加载 {script_name}: 包含危险 import: {blocked}"
         )
 
+    # 确定模块名（支持新旧两种目录结构）
+    if py_file.parent.name == "scripts" and py_file.parent.parent == SKILLS_DIR:
+        module_prefix = "skills.scripts"
+    else:
+        module_prefix = f"skills.{py_file.parent.parent.name}.scripts"
+
     spec = importlib.util.spec_from_file_location(
-        f"skills.{skill_name}.scripts.{script_name}",
+        f"{module_prefix}.{script_name}",
         str(py_file),
     )
     if spec is None or spec.loader is None:
-        raise RuntimeError(f"无法创建模块 spec: {skill_name}/{script_name}")
+        raise RuntimeError(f"无法创建模块 spec: {script_name}")
 
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

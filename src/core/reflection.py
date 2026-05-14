@@ -2,7 +2,7 @@
 
 每次任务完成后，自动判断是否有值得持久化的知识：
 - 项目事实 → projects/<名>.md（新建或更新）
-- 新方法论 → skills/<名>/SKILL.md（新建或更新）
+- 新方法论 → skills/<名>.md（新建或更新）
 - 无价值 → 跳过
 """
 
@@ -503,7 +503,7 @@ def _update_info(target: str, content: str, reason: str) -> str | None:
 def _create_skill(
     target: str, content: str, reason: str
 ) -> str | None:
-    """创建新的 skill 目录和 SKILL.md。带格式校验。"""
+    """创建新的 skill 文件（平铺 .md 格式）。带格式校验。"""
     if not target or not content:
         return None
 
@@ -524,12 +524,11 @@ def _create_skill(
         logger.info(f"Skill 名称不规范: {target}，跳过创建")
         return None
 
-    skill_dir = SKILLS_DIR / target
-    skill_dir.mkdir(parents=True, exist_ok=True)
+    SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+    skill_path = SKILLS_DIR / f"{target}.md"
 
-    frontmatter = f"---\ncreated_at: \'{date.today()}\'\ndescription: {content[:200]}\n---\n\n{content}"
-    skill_file = skill_dir / "SKILL.md"
-    skill_file.write_text(frontmatter, encoding="utf-8")
+    frontmatter = f"---\ncreated_at: '{date.today()}'\nname: {target}\ndescription: {content[:200]}\n---\n\n{content}"
+    skill_path.write_text(frontmatter, encoding="utf-8")
     logger.info(f"已创建技能: {target} ({reason})")
 
     return f"已创建技能: {target}（以后遇到类似问题会自动使用）"
@@ -538,19 +537,22 @@ def _create_skill(
 def _update_skill(
     target: str, content: str, reason: str
 ) -> str | None:
-    """更新已有 skill。"""
+    """更新已有 skill（平铺 .md 格式）。"""
     if not target:
         return None
 
-    skill_dir = SKILLS_DIR / target
-    skill_file = skill_dir / "SKILL.md"
+    # 优先平铺文件，兼容旧目录格式
+    skill_path = SKILLS_DIR / f"{target}.md"
+    old_dir_path = SKILLS_DIR / target / "SKILL.md"
+    if not skill_path.exists() and old_dir_path.exists():
+        skill_path = old_dir_path
 
-    if not skill_file.exists():
+    if not skill_path.exists():
         if content and len(content.strip()) >= _MIN_SKILL_CONTENT_LEN:
             return _create_skill(target, content, reason)
         return None
 
-    existing = skill_file.read_text(encoding="utf-8")
+    existing = skill_path.read_text(encoding="utf-8")
 
     if content and _content_already_exists(existing, content):
         logger.debug(f"Skill {target} 已有相同信息，跳过更新")
@@ -563,7 +565,7 @@ def _update_skill(
     if updated == existing:
         return None
 
-    skill_file.write_text(updated, encoding="utf-8")
+    skill_path.write_text(updated, encoding="utf-8")
     logger.info(f"已更新技能: {target} ({reason})")
     return f"已更新技能: {target}（{reason}）"
 
