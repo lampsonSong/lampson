@@ -498,20 +498,26 @@ def main() -> None:
     # 单实例检测：防止多个 daemon 同时运行争抢飞书消息
     _check_single_instance()
 
-    # 配置 logging：daemon 模式下输出 INFO 及以上级别到 stderr（launchd 重定向到 launchd.err.log）
+    # 配置 logging：直接用 FileHandler 写文件，不依赖 stderr 重定向
+    LOG_DIR = LAMIX_DIR / "logs"
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    
+    file_handler = logging.FileHandler(
+        LOG_DIR / "daemon_error.log",
+        encoding="utf-8",
+    )
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(logging.Formatter(
+        fmt="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
-        stream=sys.stderr,
+        handlers=[file_handler],
     )
-
-    # 强制 stdout/stderr 行缓冲：文件重定向时默认全缓冲，
-    # 会导致日志丢失（进程崩溃时缓冲区内容不刷盘）。
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(line_buffering=True)
-    if hasattr(sys.stderr, "reconfigure"):
-        sys.stderr.reconfigure(line_buffering=True)
 
     # 修复飞书 WebSocket SSL 证书验证失败（macOS launchd / Windows 均可能出现）
     _patch_websockets_ssl()
