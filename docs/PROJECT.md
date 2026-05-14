@@ -302,8 +302,10 @@ daemon 每天凌晨 4 点自动执行一次审计（cron 定时）。
 **自动修复**：空目录删除、散落 .md 合并到 SKILL.md、缺失 frontmatter 自动生成、重叠检测。
 
 **知识归档**：
+- 归档基准日期为用户最后活跃日期（`~/.lamix/.last_active_date`），避免用户长时间不用后回来知识被错误归档
 - 7 天未使用且调用次数为 0 → 自动归档
 - 30 天未使用 → 自动归档
+- skill / info / project 三类统一归档规则
 - 归档不删除，移入 `archived/` 子目录，保留可恢复
 - `last_used_at` 在每次 skill view、info 加载、project_context 加载时自动更新
 
