@@ -42,8 +42,7 @@ _loaded_modules: dict[str, Any] = {}
 def scan_and_register() -> list[dict[str, Any]]:
     """扫描 skills/scripts/ 目录，加载所有模块并注册为工具。
 
-    同时兼容旧格式 skills/*/scripts/（向后兼容迁移期）。
-
+    同时扫描 skills/scripts/*.py。
     返回注册成功的工具 schema 列表。
     """
     registered: list[dict[str, Any]] = []
@@ -51,52 +50,42 @@ def scan_and_register() -> list[dict[str, Any]]:
     if not SKILLS_DIR.exists():
         return registered
 
-    # 优先新格式：skills/scripts/*.py
-    scripts_dirs = [SKILLS_DIR / "scripts"] if (SKILLS_DIR / "scripts").is_dir() else []
-    # 兼容旧格式：skills/*/scripts/
-    for scripts_dir in sorted(SKILLS_DIR.glob("*/scripts")):
-        if scripts_dir not in scripts_dirs:
-            scripts_dirs.append(scripts_dir)
+    scripts_dir = SKILLS_DIR / "scripts"
+    if not scripts_dir.is_dir():
+        return registered
 
-    for scripts_dir in scripts_dirs:
-        for py_file in sorted(scripts_dir.glob("*.py")):
-            if py_file.name.startswith("_"):
-                continue
+    for py_file in sorted(scripts_dir.glob("*.py")):
+        if py_file.name.startswith("_"):
+            continue
 
-            script_name = py_file.stem
-            # 新格式：skills/scripts/foo.py → module_key = "scripts.foo"
-            # 旧格式：skills/bar/scripts/foo.py → module_key = "bar/foo"
-            if scripts_dir.name == "scripts" and scripts_dir.parent == SKILLS_DIR:
-                module_key = f"scripts.{script_name}"
-            else:
-                skill_name = scripts_dir.parent.name
-                module_key = f"{skill_name}/{script_name}"
+        script_name = py_file.stem
+        module_key = f"scripts.{script_name}"
 
+        try:
+            module = _load_module(script_name, py_file)
+        except Exception as e:
+            logger.warning(f"加载脚本 {module_key} 失败: {e}")
+            continue
+
+        _loaded_modules[module_key] = module
+
+        # 检查是否定义了 TOOL_SCHEMA 和 TOOL_RUNNER
+        schema = getattr(module, "TOOL_SCHEMA", None)
+        runner = getattr(module, "TOOL_RUNNER", None)
+
+        if schema and runner:
             try:
-                module = _load_module(script_name, py_file)
+                from src.core import tools as tool_registry
+                ok = tool_registry.register_external(schema, runner)
+                if ok:
+                    registered.append(schema)
+                    logger.info(f"已注册技能脚本工具: {module_key}")
+                else:
+                    logger.warning(f"脚本 {module_key} schema 校验未通过，已跳过工具注册")
             except Exception as e:
-                logger.warning(f"加载脚本 {module_key} 失败: {e}")
-                continue
-
-            _loaded_modules[module_key] = module
-
-            # 检查是否定义了 TOOL_SCHEMA 和 TOOL_RUNNER
-            schema = getattr(module, "TOOL_SCHEMA", None)
-            runner = getattr(module, "TOOL_RUNNER", None)
-
-            if schema and runner:
-                try:
-                    from src.core import tools as tool_registry
-                    ok = tool_registry.register_external(schema, runner)
-                    if ok:
-                        registered.append(schema)
-                        logger.info(f"已注册技能脚本工具: {module_key}")
-                    else:
-                        logger.warning(f"脚本 {module_key} schema 校验未通过，已跳过工具注册")
-                except Exception as e:
-                    logger.warning(f"注册脚本 {module_key} 工具失败: {e}")
-            else:
-                logger.debug(f"脚本 {module_key} 无 TOOL_SCHEMA，跳过工具注册")
+                logger.warning(f"注册脚本 {module_key} 工具失败: {e}")
+        else:
+            logger.debug(f"脚本 {module_key} 无 TOOL_SCHEMA，跳过工具注册")
 
     return registered
 
@@ -111,11 +100,7 @@ def _load_module(script_name: str, py_file: Path) -> Any:
             f"拒绝加载 {script_name}: 包含危险 import: {blocked}"
         )
 
-    # 确定模块名（支持新旧两种目录结构）
-    if py_file.parent.name == "scripts" and py_file.parent.parent == SKILLS_DIR:
-        module_prefix = "skills.scripts"
-    else:
-        module_prefix = f"skills.{py_file.parent.parent.name}.scripts"
+    module_prefix = "skills.scripts"
 
     spec = importlib.util.spec_from_file_location(
         f"{module_prefix}.{script_name}",
@@ -164,34 +149,33 @@ def list_modules() -> list[dict[str, str]]:
     if not SKILLS_DIR.exists():
         return result
 
-    for scripts_dir in sorted(SKILLS_DIR.glob("*/scripts")):
-        if not scripts_dir.is_dir():
+    scripts_dir = SKILLS_DIR / "scripts"
+    if not scripts_dir.exists():
+        return result
+
+    for py_file in sorted(scripts_dir.glob("*.py")):
+        if py_file.name.startswith("_"):
             continue
 
-        skill_name = scripts_dir.parent.name
-        for py_file in sorted(scripts_dir.glob("*.py")):
-            if py_file.name.startswith("_"):
-                continue
-
-            script_name = py_file.stem
-            module_key = f"{skill_name}/{script_name}"
-            module = _loaded_modules.get(module_key)
-            has_tool = hasattr(module, "TOOL_SCHEMA") if module else False
-            result.append({
-                "name": module_key,
-                "skill": skill_name,
-                "script": script_name,
-                "path": str(py_file),
-                "registered_as_tool": str(has_tool),
-            })
+        script_name = py_file.stem
+        module_key = f"scripts.{script_name}"
+        module = _loaded_modules.get(module_key)
+        has_tool = hasattr(module, "TOOL_SCHEMA") if module else False
+        result.append({
+            "name": module_key,
+            "skill": "scripts",
+            "script": script_name,
+            "path": str(py_file),
+            "registered_as_tool": str(has_tool),
+        })
     return result
 
 
 def write_module(skill_name: str, script_name: str, code: str) -> str:
-    """写入一个新的技能脚本文件，并自动注册为工具。
+    """写入一个新的技能脚本文件到 skills/scripts/，并自动注册为工具。
 
     Args:
-        skill_name: 技能名（目录名）
+        skill_name: 技能名（用于脚本文件名前缀）
         script_name: 脚本名（不含 .py）
         code: 完整的 Python 源码
 
@@ -209,10 +193,10 @@ def write_module(skill_name: str, script_name: str, code: str) -> str:
     if _contains_blocked_import(code):
         return "[错误] 代码包含禁止的 import（不允许 import src 内部模块）"
 
-    scripts_dir = SKILLS_DIR / skill_name / "scripts"
+    scripts_dir = SKILLS_DIR / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
 
-    target = scripts_dir / f"{script_name}.py"
+    target = scripts_dir / f"{skill_name}_{script_name}.py"
 
     # 如果已存在，先读出来做备份信息
     action = "更新" if target.exists() else "创建"
@@ -231,22 +215,23 @@ def write_module(skill_name: str, script_name: str, code: str) -> str:
         target.unlink(missing_ok=True)
         return f"[错误] 代码语法检查失败，已回滚: {e}"
 
-    logger.info(f"已{action}技能脚本: {skill_name}/{script_name}")
+    module_key = f"scripts.{skill_name}_{script_name}"
+    logger.info(f"已{action}技能脚本: {module_key}")
 
     # 自动注册新写入的脚本
     try:
-        module = _load_module(skill_name, script_name, target)
-        _loaded_modules[f"{skill_name}/{script_name}"] = module
+        module = _load_module(f"{skill_name}_{script_name}", target)
+        _loaded_modules[module_key] = module
         schema = getattr(module, "TOOL_SCHEMA", None)
         runner = getattr(module, "TOOL_RUNNER", None)
         if schema and runner:
             from src.core import tools as tool_registry
             tool_registry.register_external(schema, runner)
-        logger.info(f"已自动注册脚本: {skill_name}/{script_name}")
+        logger.info(f"已自动注册脚本: {module_key}")
     except Exception as e:
         logger.warning(f"脚本写入成功但自动注册失败（需重启 daemon）: {e}")
 
-    return f"已{action}脚本: {skill_name}/{script_name}"
+    return f"已{action}脚本: {module_key}"
 
 
 def _contains_blocked_import(code: str) -> bool:
@@ -271,7 +256,7 @@ def _contains_blocked_import(code: str) -> bool:
 
 def get_module_code(skill_name: str, script_name: str) -> str | None:
     """读取指定脚本的源码。"""
-    target = SKILLS_DIR / skill_name / "scripts" / f"{script_name}.py"
+    target = SKILLS_DIR / "scripts" / f"{skill_name}_{script_name}.py"
     if not target.exists():
         return None
     try:

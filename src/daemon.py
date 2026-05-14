@@ -134,37 +134,6 @@ def _signal_handler(signum: int, _frame: object | None) -> None:
     _shutdown.set()
 
 
-def _migrate_old_skills_format() -> None:
-    """将旧格式 skills/*/SKILL.md 迁移为平铺 skills/*.md。"""
-    from src.core.config import SKILLS_DIR
-    if not SKILLS_DIR.exists():
-        return
-    migrated = 0
-    for skill_dir in list(SKILLS_DIR.iterdir()):
-        if not skill_dir.is_dir():
-            continue
-        old_path = skill_dir / "SKILL.md"
-        if not old_path.is_file():
-            continue
-        new_path = SKILLS_DIR / f"{skill_dir.name}.md"
-        if new_path.exists():
-            logger.info(f"[migrate] 跳过 skill '{skill_dir.name}'（平铺文件已存在）")
-            continue
-        try:
-            shutil.copy2(str(old_path), str(new_path))
-            # 删除旧 SKILL.md，尝试删空目录
-            old_path.unlink()
-            try:
-                skill_dir.rmdir()
-            except OSError:
-                pass  # 目录非空（scripts 等），保留
-            logger.info(f"[migrate] 已迁移 skill: {skill_dir.name}/SKILL.md → {skill_dir.name}.md")
-            migrated += 1
-        except Exception as e:
-            logger.warning(f"[migrate] 迁移 skill '{skill_dir.name}' 失败: {e}")
-    if migrated > 0:
-        logger.info(f"[migrate] 共迁移 {migrated} 个旧格式 skills")
-
 
 def _check_single_instance() -> None:
     """检查是否已有 daemon 实例在运行，若有则退出。"""
@@ -640,8 +609,6 @@ def main() -> None:
     _register_tasks(session)
 
     # ── 加载 skill scripts（延迟，避免循环导入）──────────────────────
-    # 先迁移旧格式 skills（skills/*/SKILL.md → skills/*.md）
-    _migrate_old_skills_format()
     load_skill_scripts()
     logger.info("[daemon] skill scripts 已加载")
 
@@ -721,14 +688,8 @@ def _start_memory_watcher(mgr) -> None:
         state: dict[str, float] = {}
         for d in watch_dirs:
             if d.exists():
-                # skills 是嵌套结构：skills/xxx/SKILL.md，需要递归
-                if d == SKILLS_DIR:
-                    for p in d.rglob("*.md"):
-                        state[str(p)] = p.stat().st_mtime
-                else:
-                    # projects/info 是平铺结构
-                    for p in d.glob("*.md"):
-                        state[str(p)] = p.stat().st_mtime
+                for p in d.glob("*.md"):
+                    state[str(p)] = p.stat().st_mtime
         return state
 
     def _watcher() -> None:

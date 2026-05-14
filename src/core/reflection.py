@@ -534,19 +534,12 @@ def _create_skill(
     return f"已创建技能: {target}（以后遇到类似问题会自动使用）"
 
 
-def _update_skill(
-    target: str, content: str, reason: str
-) -> str | None:
-    """更新已有 skill（平铺 .md 格式）。"""
+def _update_skill(target: str, content: str, reason: str) -> str | None:
+    """更新已有 skill 文件（平铺 .md 格式）。"""
     if not target:
         return None
 
-    # 优先平铺文件，兼容旧目录格式
     skill_path = SKILLS_DIR / f"{target}.md"
-    old_dir_path = SKILLS_DIR / target / "SKILL.md"
-    if not skill_path.exists() and old_dir_path.exists():
-        skill_path = old_dir_path
-
     if not skill_path.exists():
         if content and len(content.strip()) >= _MIN_SKILL_CONTENT_LEN:
             return _create_skill(target, content, reason)
@@ -584,20 +577,18 @@ def _get_existing_skills_summary() -> str:
     if not SKILLS_DIR.exists():
         return "(无)"
     lines = []
-    for skill_dir in sorted(SKILLS_DIR.iterdir()):
-        if skill_dir.is_dir():
-            skill_file = skill_dir / "SKILL.md"
-            if skill_file.exists():
-                # 提取前两行作为摘要
-                first_lines = skill_file.read_text(encoding="utf-8").split("\n")[:4]
-                desc = " ".join(l.lstrip("-# ") for l in first_lines if l.strip())[:120]
-                lines.append(f"- {skill_dir.name}: {desc}")
+    for skill_file in sorted(SKILLS_DIR.glob("*.md")):
+        if skill_file.name == ".archived":
+            continue
+        first_lines = skill_file.read_text(encoding="utf-8").split("\n")[:4]
+        desc = " ".join(l.lstrip("-# ") for l in first_lines if l.strip())[:120]
+        lines.append(f"- {skill_file.stem}: {desc}")
     return "\n".join(lines) if lines else "(无)"
 
 
 def _get_skill_full_content(skill_name: str) -> str:
     """获取指定 skill 的完整内容。"""
-    skill_file = SKILLS_DIR / skill_name / "SKILL.md"
+    skill_file = SKILLS_DIR / f"{skill_name}.md"
     if not skill_file.exists():
         return ""
     return skill_file.read_text(encoding="utf-8")

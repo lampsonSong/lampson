@@ -133,7 +133,7 @@ def set_retrieval_indices(skill_index: Any, project_index: Any, info_index: Any 
 
 
 def _parse_skill(path: Path) -> dict[str, Any] | None:
-    """解析 SKILL.md。"""
+    """解析 skill 文件。"""
     try:
         content = path.read_text(encoding="utf-8")
     except OSError:
@@ -150,7 +150,7 @@ def _parse_skill(path: Path) -> dict[str, Any] | None:
         meta = {}
         body = content
 
-    name = meta.get("name", "") or path.parent.name
+    name = meta.get("name", "") or path.stem
     return {
         "name": name,
         "description": meta.get("description", ""),
@@ -170,7 +170,7 @@ def project_context(params: dict[str, Any]) -> str:
 
 
 def _increment_invocation(skill_path: Path) -> int:
-    """递增 SKILL.md 的 invocation_count 和 last_used_at，保留正文；返回新计数。"""
+    """递增 skill 文件的 invocation_count 和 last_used_at，保留正文；返回新计数。"""
     from datetime import date
     from src.core.prompt_builder import _parse_frontmatter, write_skill_with_frontmatter
 
@@ -190,7 +190,7 @@ def _increment_invocation(skill_path: Path) -> int:
 
 
 def _run_skill_view(params: dict[str, Any]) -> str:
-    """按名称加载 SKILL.md 全文，并递增 invocation_count。"""
+    """按名称加载 skill 文件全文，并递增 invocation_count。"""
     name = str(params.get("name", "")).strip()
     if not name:
         return "[错误] name 参数不能为空"
@@ -239,7 +239,7 @@ def _run_skill_view(params: dict[str, Any]) -> str:
 
 
 def _run_skill_search(params: dict[str, Any]) -> str:
-    """在 name / description 中做子串匹配，返回匹配的 SKILL.md 全文。"""
+    """在 name / description 中做子串匹配，返回匹配的 skill 文件全文。"""
     query = params.get("query", "").strip()
     top_k = int(params.get("top_k", 3))
     if not query:
@@ -349,7 +349,6 @@ def _list_archived_impl(category: str) -> str:
     if category in ("skill", "all"):
         archive_dir = SKILLS_DIR / ".archived"
         if archive_dir.exists():
-            # 新格式归档：skills/.archived/*.md
             for f in sorted(archive_dir.glob("*.md")):
                 try:
                     raw = f.read_text(encoding="utf-8")
@@ -361,21 +360,6 @@ def _list_archived_impl(category: str) -> str:
                     results.append(f"  📦 skill/{f.stem}: {desc}")
                 except OSError:
                     results.append(f"  📦 skill/{f.stem}")
-            # 旧格式归档兼容：skills/.archived/*/SKILL.md
-            for d in sorted(archive_dir.iterdir()):
-                if d.is_dir():
-                    skill_md = d / "SKILL.md"
-                    if skill_md.exists():
-                        try:
-                            raw = skill_md.read_text(encoding="utf-8")
-                            fm = re.match(r"^---\s*\n(.*?)\n---\s*\n", raw, re.DOTALL)
-                            desc = ""
-                            if fm:
-                                meta = yaml.safe_load(fm.group(1)) or {}
-                                desc = meta.get("description", "")[:80]
-                            results.append(f"  📦 skill/{d.name}: {desc}")
-                        except OSError:
-                            results.append(f"  📦 skill/{d.name}")
 
     if category in ("info", "all"):
         info_archive = LAMIX_DIR / "memory" / "info" / ".archived"
@@ -402,14 +386,8 @@ def _restore_archived_impl(category: str, name: str) -> str:
 
     if category == "skill":
         archive_dir = SKILLS_DIR / ".archived"
-        # 新格式：skills/.archived/foo.md
         candidates = list(archive_dir.glob(f"{name}*.md")) if archive_dir.exists() else []
-        # 旧格式兼容：skills/.archived/foo/SKILL.md
-        if archive_dir.exists():
-            for d in archive_dir.iterdir():
-                if d.is_dir() and d.name.startswith(name):
-                    candidates.append(d / "SKILL.md")
-        target_path = SKILLS_DIR / f"{name}.md"  # 恢复为平铺格式
+        target_path = SKILLS_DIR / f"{name}.md"
     elif category == "info":
         archive_dir = LAMIX_DIR / "memory" / "info" / ".archived"
         target_dir = LAMIX_DIR / "memory" / "info"

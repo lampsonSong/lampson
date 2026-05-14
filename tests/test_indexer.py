@@ -25,11 +25,9 @@ class TestCosineSim:
 
 
 def _write_skill(skills_dir: Path, name: str, description: str = "", body: str = "") -> Path:
-    """在 skills_dir 下创建一个 skill 目录和 SKILL.md。"""
-    skill_dir = skills_dir / name
-    skill_dir.mkdir(parents=True, exist_ok=True)
+    """在 skills_dir 下创建一个平铺 skill 文件 skills/<name>.md。"""
     content = f"---\nname: {name}\ndescription: {description}\n---\n\n{body}"
-    skill_file = skill_dir / "SKILL.md"
+    skill_file = skills_dir / f"{name}.md"
     skill_file.write_text(content, encoding="utf-8")
     return skill_file
 

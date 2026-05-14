@@ -98,12 +98,16 @@ def test_should_reflect_cooldown_takes_priority():
 
 @pytest.fixture
 def temp_projects(tmp_path: Path) -> Path:
-    return tmp_path / "projects"
+    d = tmp_path / "projects"
+    d.mkdir()
+    return d
 
 
 @pytest.fixture
 def temp_skills(tmp_path: Path) -> Path:
-    return tmp_path / "skills"
+    d = tmp_path / "skills"
+    d.mkdir()
+    return d
 
 
 def test_create_project_new(temp_projects: Path):
@@ -189,23 +193,21 @@ def test_create_skill_empty_content(temp_skills: Path):
 
 
 def test_update_skill_append(temp_skills: Path):
-    skill_dir = temp_skills / "existing"
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text(
+    skill_file = temp_skills / "existing.md"
+    skill_file.write_text(
         "---\nname: existing\n---\n# Existing\nOld content.",
         encoding="utf-8",
     )
     with patch("src.core.reflection.SKILLS_DIR", temp_skills):
         hint = _update_skill("existing", "New findings here.", "补充")
     assert hint is not None
-    updated = (skill_dir / "SKILL.md").read_text()
+    updated = skill_file.read_text()
     assert "New findings" in updated
 
 
 def test_update_skill_duplicate(temp_skills: Path):
-    skill_dir = temp_skills / "existing"
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text(
+    skill_file = temp_skills / "existing.md"
+    skill_file.write_text(
         "---\nname: existing\n---\n# Existing\nOld content.",
         encoding="utf-8",
     )

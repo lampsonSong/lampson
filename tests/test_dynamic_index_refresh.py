@@ -30,9 +30,7 @@ def _setup_dirs(tmp_path: Path):
 
 
 def _write_skill(skills_dir: Path, name: str, desc: str = "") -> Path:
-    d = skills_dir / name
-    d.mkdir(parents=True, exist_ok=True)
-    p = d / "SKILL.md"
+    p = skills_dir / f"{name}.md"
     p.write_text(
         f"---\nname: {name}\ndescription: {desc}\n---\n\nbody\n",
         encoding="utf-8",
@@ -97,10 +95,10 @@ class TestGetIndexFingerprint:
              patch("src.core.llm.INFO_DIR", info):
             fp = _get_index_fingerprint()
 
-        # 应该扫描到 skills/my-skill/SKILL.md
+        # 应该扫描到 skills/my-skill.md
         assert len(fp) >= 1
         paths = [p for p, _ in fp]
-        assert any("SKILL.md" in p for p in paths)
+        assert any("my-skill.md" in p for p in paths)
 
     def test_projects_flat(self, tmp_path: Path):
         """projects 目录是平铺结构，只扫一层。"""

@@ -21,8 +21,8 @@ def test_build_skills_index_format_and_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     skills = tmp_path / "skills"
-    (skills / "code-writing").mkdir(parents=True)
-    (skills / "code-writing" / "SKILL.md").write_text(
+    skills.mkdir()
+    (skills / "code-writing.md").write_text(
         "---\nname: code-writing\ndescription: 写代码\n---\n\n正文保持\n",
         encoding="utf-8",
     )
@@ -41,8 +41,8 @@ def test_build_skills_index_fills_created_at_and_invocation_count(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     skills = tmp_path / "skills"
-    (skills / "a").mkdir(parents=True)
-    path = skills / "a" / "SKILL.md"
+    skills.mkdir()
+    path = skills / "a.md"
     path.write_text(
         "---\nname: alpha\ndescription: d\n---\n\nbody\n",
         encoding="utf-8",
@@ -60,8 +60,8 @@ def test_build_skills_index_fills_created_at_and_invocation_count(
 
 def test_build_skills_index_skips_existing_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     skills = tmp_path / "skills"
-    (skills / "a").mkdir(parents=True)
-    path = skills / "a" / "SKILL.md"
+    skills.mkdir()
+    path = skills / "a.md"
     path.write_text(
         '---\nname: alpha\ndescription: d\ncreated_at: "2020-01-01"\ninvocation_count: 7\n---\n\nbody\n',
         encoding="utf-8",

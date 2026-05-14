@@ -76,9 +76,8 @@ class TestAuditReport:
 class TestScanSkills:
     def test_valid_skill_no_findings(self, temp_lamix_dir):
         _, skills_dir, _ = temp_lamix_dir
-        skill_dir = skills_dir / "good-skill"
-        skill_dir.mkdir()
-        (skill_dir / "SKILL.md").write_text("""---
+        skill_file = skills_dir / "good-skill.md"
+        skill_file.write_text("""---
 name: good-skill
 description: 一个正常的 skill
 triggers:
@@ -100,20 +99,19 @@ triggers:
         findings = scan_skills()
         assert findings == []
 
-    def test_orphan_dir_no_skills_md(self, temp_lamix_dir):
+    def test_orphan_md_file_no_frontmatter(self, temp_lamix_dir):
         _, skills_dir, _ = temp_lamix_dir
-        orphan = skills_dir / "orphan-skill"
-        orphan.mkdir()
-        (orphan / "readme.md").write_text("some doc", encoding="utf-8")
+        # 平铺格式下，orphan 表现为没有 frontmatter 的 .md 文件
+        orphan_file = skills_dir / "orphan-skill.md"
+        orphan_file.write_text("some doc without frontmatter", encoding="utf-8")
 
         findings = scan_skills()
-        assert any(f.target == "orphan-skill" and "没有 SKILL.md" in f.message for f in findings)
+        assert any(f.target == "orphan-skill" and "缺少 frontmatter" in f.message for f in findings)
 
     def test_missing_frontmatter(self, temp_lamix_dir):
         _, skills_dir, _ = temp_lamix_dir
-        skill_dir = skills_dir / "no-fm"
-        skill_dir.mkdir()
-        (skill_dir / "SKILL.md").write_text("没有 frontmatter 的 skill 正文", encoding="utf-8")
+        skill_file = skills_dir / "no-fm.md"
+        skill_file.write_text("没有 frontmatter 的 skill 正文", encoding="utf-8")
 
         findings = scan_skills()
         assert any("缺少 frontmatter" in f.message for f in findings)
@@ -121,9 +119,8 @@ triggers:
 
     def test_missing_skill_name(self, temp_lamix_dir):
         _, skills_dir, _ = temp_lamix_dir
-        skill_dir = skills_dir / "no-name"
-        skill_dir.mkdir()
-        (skill_dir / "SKILL.md").write_text("""---
+        skill_file = skills_dir / "no-name.md"
+        skill_file.write_text("""---
 description: 缺少 name 字段
 ---
 正文内容
@@ -134,9 +131,8 @@ description: 缺少 name 字段
 
     def test_template_placeholder(self, temp_lamix_dir):
         _, skills_dir, _ = temp_lamix_dir
-        skill_dir = skills_dir / "template-skill"
-        skill_dir.mkdir()
-        (skill_dir / "SKILL.md").write_text("""---
+        skill_file = skills_dir / "template-skill.md"
+        skill_file.write_text("""---
 name: template-skill
 description: 模板
 triggers:
@@ -148,20 +144,8 @@ triggers:
 """, encoding="utf-8")
 
         findings = scan_skills()
-        assert any("模板" in f.message and "步骤一" in f.message for f in findings)
-
-        (skill_dir / "SKILL.md").write_text("""---
-name: extra-md
-description: 有额外 md
-triggers:
-  - 额外
----
-1. **步骤**: ok
-""", encoding="utf-8")
-        (skill_dir / "notes.md").write_text("some notes", encoding="utf-8")
-
-        findings = scan_skills()
-        assert any("notes.md" in f.target and f.severity == "info" for f in findings)
+        # 应该检测到模板占位内容
+        assert any("步骤一" in f.message and "步骤三" in f.message for f in findings)
 
 
 # ── scan_projects ─────────────────────────────────────────────────────────────
@@ -212,7 +196,7 @@ class TestScanProjects:
 class TestScanSkillScripts:
     def test_valid_script_no_findings(self, temp_lamix_dir):
         _, skills_dir, _ = temp_lamix_dir
-        scripts_dir = skills_dir / "my-skill" / "scripts"
+        scripts_dir = skills_dir / "scripts"
         scripts_dir.mkdir(parents=True)
         (scripts_dir / "valid_module.py").write_text('''TOOL_SCHEMA = {
     "function": {
@@ -232,16 +216,16 @@ def TOOL_RUNNER(params):
 
     def test_syntax_error(self, temp_lamix_dir):
         _, skills_dir, _ = temp_lamix_dir
-        scripts_dir = skills_dir / "my-skill" / "scripts"
+        scripts_dir = skills_dir / "scripts"
         scripts_dir.mkdir(parents=True)
         (scripts_dir / "bad_syntax.py").write_text("def broken(:", encoding="utf-8")
 
         findings = scan_skill_scripts()
-        assert any(f.target == "my-skill/bad_syntax" and f.severity == "error" and "语法错误" in f.message for f in findings)
+        assert any(f.target == "scripts/bad_syntax" and f.severity == "error" and "语法错误" in f.message for f in findings)
 
     def test_blocked_import(self, temp_lamix_dir):
         _, skills_dir, _ = temp_lamix_dir
-        scripts_dir = skills_dir / "my-skill" / "scripts"
+        scripts_dir = skills_dir / "scripts"
         scripts_dir.mkdir(parents=True)
         (scripts_dir / "bad_import.py").write_text('''from src.core import agent
 def TOOL_RUNNER(params):
@@ -250,11 +234,11 @@ TOOL_SCHEMA = {"function": {"name": "x", "description": "", "parameters": {"type
 ''', encoding="utf-8")
 
         findings = scan_skill_scripts()
-        assert any(f.target == "my-skill/bad_import" and "危险 import" in f.message for f in findings)
+        assert any(f.target == "scripts/bad_import" and "危险 import" in f.message for f in findings)
 
     def test_missing_runner(self, temp_lamix_dir):
         _, skills_dir, _ = temp_lamix_dir
-        scripts_dir = skills_dir / "my-skill" / "scripts"
+        scripts_dir = skills_dir / "scripts"
         scripts_dir.mkdir(parents=True)
         (scripts_dir / "no_runner.py").write_text('''TOOL_SCHEMA = {"function": {"name": "learned_no_runner", "description": "", "parameters": {"type": "object", "properties": {}, "required": []}}}
 ''', encoding="utf-8")
@@ -269,9 +253,8 @@ class TestRunAudit:
     def test_full_audit_returns_report(self, temp_lamix_dir):
         _, skills_dir, projects_dir = temp_lamix_dir
 
-        sd = skills_dir / "normal"
-        sd.mkdir()
-        (sd / "SKILL.md").write_text("""---
+        skill_file = skills_dir / "normal.md"
+        skill_file.write_text("""---
 name: normal
 description: normal
 triggers:

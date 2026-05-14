@@ -76,7 +76,7 @@ _skills_index_cache: tuple[frozenset[tuple[str, float]], str] | None = None
 
 
 def write_skill_with_frontmatter(path: Path, meta: dict[str, Any], body: str) -> None:
-    """将 YAML frontmatter + 正文写回 SKILL.md（正文不变，仅更新 meta 时用）。"""
+    """将 YAML frontmatter + 正文写回 skill 文件（正文不变，仅更新 meta 时用）。"""
     dump = yaml.dump(meta, allow_unicode=True, default_flow_style=False).strip()
     path.write_text(f"---\n{dump}\n---\n{body}", encoding="utf-8")
 
@@ -104,26 +104,13 @@ def _ensure_skill_index_fields(path: Path) -> None:
 
 
 def _skill_md_paths_under_skills() -> list[Path]:
-    """返回所有 skill md 文件路径。
-
-    扫描顺序：先平铺 *.md（优先），再兼容旧格式 */SKILL.md。
-    """
+    """返回所有 skill md 文件路径（平铺 .md 格式）。"""
     if not SKILLS_DIR.exists():
         return []
     out: list[Path] = []
-    # 新格式：平铺 *.md
     for p in sorted(SKILLS_DIR.glob("*.md")):
         if ".archived" not in str(p):
             out.append(p)
-    # 旧格式兼容：*/SKILL.md
-    for p in sorted(SKILLS_DIR.rglob("SKILL.md")):
-        if ".archived" in str(p):
-            continue
-        # 跳过已经以同名 .md 存在的
-        if p.parent != SKILLS_DIR:
-            flat = SKILLS_DIR / f"{p.parent.name}.md"
-            if not flat.exists():
-                out.append(p)
     return out
 
 
@@ -138,7 +125,7 @@ def _skills_mtime_fingerprint(paths: list[Path]) -> frozenset[tuple[str, float]]
 
 
 def build_skills_index() -> str:
-    """扫描 ~/.lamix/skills 下 SKILL.md，生成注入 system prompt 的技能目录块。"""
+    """扫描 skills/ 下平铺 .md 文件，生成注入 system prompt 的技能目录块。"""
     global _skills_index_cache
     paths = _skill_md_paths_under_skills()
     if not paths:

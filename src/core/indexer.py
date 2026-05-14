@@ -209,7 +209,8 @@ def _read_text_file(path: Path) -> str:
 def _iter_skill_paths(skills_dir: Path) -> list[Path]:
     if not skills_dir.exists():
         return []
-    return list(skills_dir.rglob("SKILL.md"))
+    return [f for f in skills_dir.glob("*.md")
+             if f.name != ".archived" and f.parent == skills_dir]
 
 
 def _skill_search_text(parsed: dict[str, Any]) -> str:
@@ -319,17 +320,16 @@ class SkillIndex:
         for e in to_archive:
             pkey = str(e.get("path", ""))
             skill_md = Path(pkey)
-            skill_dir = skill_md.parent
-            if not skill_dir.is_dir() or not skill_md.is_file():
+            if not skill_md.is_file():
                 continue
-            dest = archive_dir / skill_dir.name
+            dest = archive_dir / skill_md.name
             try:
                 if dest.exists():
                     logger.warning("Skip archive, destination exists: %s", dest)
                     continue
-                shutil.move(str(skill_dir), str(dest))
+                shutil.move(str(skill_md), str(dest))
                 archived_keys.add(pkey)
-                archived_names.append(str(e.get("name", skill_dir.name)))
+                archived_names.append(str(e.get("name", skill_md.stem)))
             except OSError as ex:
                 logger.warning("Archive failed for %s: %s", skill_dir, ex)
         if not archived_keys:
@@ -398,7 +398,7 @@ class SkillIndex:
     def search(
         self, query: str, top_k: int = 3, similarity_threshold: float = 0.3
     ) -> list[str]:
-        """关键词检索，返回匹配 skill 的 SKILL.md 全文列表。"""
+        """关键词检索，返回匹配 skill 的全文列表。"""
         if not self._entries or not query.strip():
             return []
         q = query.strip()

@@ -31,7 +31,7 @@ BASE_SKILLS_DIR = Path(__file__).resolve().parent.parent.parent / "config" / "de
 # skill scripts（可执行 Python 代码）放这里，保持包结构
 SKILL_SCRIPTS_DIR = SKILLS_DIR / "scripts"
 
-# SKILL.md frontmatter 解析正则
+# skill 文件 frontmatter 解析正则
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
 
@@ -73,37 +73,22 @@ def load_all_skills() -> dict[str, Skill]:
 
     加载顺序：先 base（随仓库），再 user（~/.lamix/skills/）。
     同名 skill 以 user 版本为准（覆盖 base）。
-    扫描顺序：先平铺 *.md 文件（优先），再兼容旧格式 */SKILL.md（向后兼容）。
     """
     skills: dict[str, Skill] = {}
 
     # 1. 加载 base skills（只读，随仓库版本）
     if BASE_SKILLS_DIR.exists():
-        # 新格式：平铺 *.md
         for skill_md in sorted(BASE_SKILLS_DIR.glob("*.md")):
             skill = _parse_skill_md(skill_md)
             if skill:
                 skill._source = "base"  # type: ignore[attr-defined]
                 skills[skill.name] = skill
-        # 旧格式兼容：*/SKILL.md
-        for skill_md in sorted(BASE_SKILLS_DIR.glob("*/SKILL.md")):
-            skill = _parse_skill_md(skill_md)
-            if skill and skill.name not in skills:
-                skill._source = "base"  # type: ignore[attr-defined]
-                skills[skill.name] = skill
 
     # 2. 加载 user skills（可写，覆盖同名 base）
     SKILLS_DIR.mkdir(parents=True, exist_ok=True)
-    # 新格式：平铺 *.md
     for skill_md in sorted(SKILLS_DIR.glob("*.md")):
         skill = _parse_skill_md(skill_md)
         if skill:
-            skill._source = "user"  # type: ignore[attr-defined]
-            skills[skill.name] = skill
-    # 旧格式兼容：*/SKILL.md
-    for skill_md in sorted(SKILLS_DIR.glob("*/SKILL.md")):
-        skill = _parse_skill_md(skill_md)
-        if skill and skill.name not in skills:
             skill._source = "user"  # type: ignore[attr-defined]
             skills[skill.name] = skill
 
@@ -171,16 +156,16 @@ description: {description or name + ' 技能'}
 
 
 def install_default_skills(default_skills_dir: Path) -> None:
-    """将 config/default_skills/ 中的技能复制到 SKILLS_DIR（如果不存在）。"""
+    """将 config/default_skills/ 中的平铺 .md 技能文件复制到 SKILLS_DIR（如果不存在）。"""
     SKILLS_DIR.mkdir(parents=True, exist_ok=True)
     if not default_skills_dir.exists():
         return
-    for skill_dir in default_skills_dir.iterdir():
-        if not skill_dir.is_dir():
+    for skill_file in default_skills_dir.glob("*.md"):
+        if not skill_file.is_file():
             continue
-        dest = SKILLS_DIR / skill_dir.name
+        dest = SKILLS_DIR / skill_file.name
         if not dest.exists():
-            shutil.copytree(str(skill_dir), str(dest))
+            shutil.copy2(str(skill_file), str(dest))
 
 
 # ── Consolidation ─────────────────────────────────────────────────────────────
@@ -303,7 +288,7 @@ def consolidate_skills(skills: dict[str, Skill], llm_client: Any) -> tuple[list[
 
 
 def _get_invocation_count(path: Path) -> int:
-    """读取 SKILL.md 的 invocation_count。"""
+    """读取 skill 文件的 invocation_count。"""
     try:
         content = path.read_text(encoding="utf-8")
     except OSError:
@@ -319,7 +304,7 @@ def _get_invocation_count(path: Path) -> int:
 
 
 def _write_skill(path: Path, name: str, body: str, invocation_count: int, description: str) -> None:
-    """写回 SKILL.md（保留 frontmatter，更新 body 和 invocation_count）。"""
+    """写回 skill 文件（保留 frontmatter，更新 body 和 invocation_count）。"""
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError:
@@ -348,23 +333,19 @@ def _write_skill(path: Path, name: str, body: str, invocation_count: int, descri
 
 
 def execute_consolidation(actions: list[ConsolidationAction]) -> str:
-    """执行合并操作：删被合并的 skill，更新保留的 skill 文件为平铺 .md。"""
+    """执行合并操作：删被合并的 skill，更新保留的 skill 文件。"""
     if not actions:
         return "没有需要合并的技能。"
 
     lines: list[str] = []
     for action in actions:
-        # 优先找平铺文件，再找旧目录格式
         keep_path = SKILLS_DIR / f"{action.keep}.md"
-        old_dir_path = SKILLS_DIR / action.keep
-        if not keep_path.is_file() and old_dir_path.is_dir():
-            keep_path = old_dir_path / "SKILL.md"
 
         if not keep_path.is_file():
             lines.append(f"[跳过] 保留的 skill '{action.keep}' 文件不存在")
             continue
 
-        # 获取当前 skill 的 description（从 meta 或旧目录 meta）
+        # 获取当前 skill 的 description
         try:
             raw = keep_path.read_text(encoding="utf-8")
         except OSError:
@@ -382,9 +363,6 @@ def execute_consolidation(actions: list[ConsolidationAction]) -> str:
         # 收集被合并 skill 的 description（去重追加）
         for del_name in action.delete:
             del_path = SKILLS_DIR / f"{del_name}.md"
-            del_dir = SKILLS_DIR / del_name
-            if not del_path.is_file() and del_dir.is_dir():
-                del_path = del_dir / "SKILL.md"
             if del_path.is_file():
                 try:
                     del_raw = del_path.read_text(encoding="utf-8")
@@ -400,7 +378,7 @@ def execute_consolidation(actions: list[ConsolidationAction]) -> str:
                     if del_desc and del_desc != description:
                         description = f"{description} / {del_desc}"
 
-        # 写回（平铺格式）
+        # 写回
         _write_skill(
             keep_path,
             name=action.keep,
@@ -408,28 +386,13 @@ def execute_consolidation(actions: list[ConsolidationAction]) -> str:
             invocation_count=action.keep_invocation_count,
             description=description,
         )
-        # 如果写入的是旧格式文件，迁移到平铺格式
-        if keep_path.name == "SKILL.md":
-            new_path = SKILLS_DIR / f"{action.keep}.md"
-            shutil.move(str(keep_path), str(new_path))
-            # 删除旧空目录（如果有）
-            old_parent = keep_path.parent
-            if old_parent.is_dir() and old_parent != SKILLS_DIR:
-                try:
-                    old_parent.rmdir()  # 只删空目录
-                except OSError:
-                    pass
 
-        # 删除被合并的 skill（平铺 + 旧目录）
+        # 删除被合并的 skill
         deleted_names: list[str] = []
         for del_name in action.delete:
             del_flat = SKILLS_DIR / f"{del_name}.md"
-            del_dir = SKILLS_DIR / del_name
             if del_flat.is_file():
                 del_flat.unlink()
-                deleted_names.append(del_name)
-            elif del_dir.is_dir():
-                shutil.rmtree(del_dir)
                 deleted_names.append(del_name)
 
         lines.append(f"合并完成：保留 '{action.keep}'，删除 {deleted_names}，invocation_count={action.keep_invocation_count}")

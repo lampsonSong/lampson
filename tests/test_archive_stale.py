@@ -113,8 +113,7 @@ class TestArchiveAnchorDate:
         from src.core.self_audit import cleanup_stale_knowledge
 
         skills_dir, projects_dir, _ = _make_dirs(tmp_path)
-        skill_dir = skills_dir / "test-skill"
-        skill_md = skill_dir / "SKILL.md"
+        skill_md = skills_dir / "test-skill.md"
 
         # anchor_date = 2026-04-25, stale_7 = 2026-04-18
         # last_used = 2026-04-20 > stale_7，不应归档
@@ -133,15 +132,14 @@ class TestArchiveAnchorDate:
 
         skill_findings = [f for f in findings if f.category == "skill"]
         assert len(skill_findings) == 0
-        assert skill_dir.exists()
+        assert skill_md.exists()
 
     def test_skill_archived_when_old_by_anchor(self, tmp_path):
         """skill 最后使用在 anchor_date 前 30 天以上，应归档。"""
         from src.core.self_audit import cleanup_stale_knowledge
 
         skills_dir, projects_dir, _ = _make_dirs(tmp_path)
-        skill_dir = skills_dir / "old-skill"
-        skill_md = skill_dir / "SKILL.md"
+        skill_md = skills_dir / "old-skill.md"
 
         # anchor_date = 2026-05-10, stale_30 = 2026-04-10
         # last_used = 2026-04-01 < stale_30，应归档
@@ -161,7 +159,7 @@ class TestArchiveAnchorDate:
         skill_findings = [f for f in findings if f.category == "skill"]
         assert len(skill_findings) == 1
         assert skill_findings[0].fixed is True
-        assert not skill_dir.exists()
+        assert not skill_md.exists()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -176,8 +174,8 @@ class TestSkillArchiveRules:
         from src.core.self_audit import cleanup_stale_knowledge
 
         skills_dir, projects_dir, _ = _make_dirs(tmp_path)
-        skill_dir = skills_dir / "test-skill"
-        _write_frontmatter(skill_dir / "SKILL.md", meta)
+        skill_md = skills_dir / "test-skill.md"
+        _write_frontmatter(skill_md, meta)
         if anchor is None:
             anchor = date.today()
 
@@ -185,23 +183,23 @@ class TestSkillArchiveRules:
              patch("src.core.self_audit.PROJECTS_DIR", projects_dir), \
              patch("src.core.self_audit._get_last_active_date", return_value=anchor):
             findings = cleanup_stale_knowledge(auto_fix=True)
-        return [f for f in findings if f.category == "skill"], skill_dir
+        return [f for f in findings if f.category == "skill"], skill_md
 
     def test_recent_skill_kept(self, tmp_path):
         """7 天内有使用，保留。"""
-        findings, skill_dir = self._setup_and_run(tmp_path, {
+        findings, skill_md = self._setup_and_run(tmp_path, {
             "name": "active-skill",
             "created_at": "2026-01-01",
             "last_used_at": (date.today() - timedelta(days=3)).isoformat(),
             "invocation_count": 5,
         })
         assert len(findings) == 0
-        assert skill_dir.exists()
+        assert skill_md.exists()
 
     def test_7days_no_invocation_archived(self, tmp_path):
         """7 天没用且 invocation_count=0，归档。"""
         anchor = date.today()
-        findings, skill_dir = self._setup_and_run(tmp_path, {
+        findings, skill_md = self._setup_and_run(tmp_path, {
             "name": "unused-skill",
             "created_at": (anchor - timedelta(days=10)).isoformat(),
             "last_used_at": (anchor - timedelta(days=8)).isoformat(),
@@ -209,24 +207,24 @@ class TestSkillArchiveRules:
         })
         assert len(findings) == 1
         assert findings[0].fixed is True
-        assert not skill_dir.exists()
+        assert not skill_md.exists()
 
     def test_7days_has_invocation_kept(self, tmp_path):
         """7 天没用但 invocation_count>0，保留。"""
         anchor = date.today()
-        findings, skill_dir = self._setup_and_run(tmp_path, {
+        findings, skill_md = self._setup_and_run(tmp_path, {
             "name": "used-before-skill",
             "created_at": (anchor - timedelta(days=20)).isoformat(),
             "last_used_at": (anchor - timedelta(days=8)).isoformat(),
             "invocation_count": 3,
         })
         assert len(findings) == 0
-        assert skill_dir.exists()
+        assert skill_md.exists()
 
     def test_30days_archived_regardless(self, tmp_path):
         """30 天没用，不管 invocation_count，归档。"""
         anchor = date.today()
-        findings, skill_dir = self._setup_and_run(tmp_path, {
+        findings, skill_md = self._setup_and_run(tmp_path, {
             "name": "very-old-skill",
             "created_at": (anchor - timedelta(days=40)).isoformat(),
             "last_used_at": (anchor - timedelta(days=31)).isoformat(),
@@ -234,6 +232,7 @@ class TestSkillArchiveRules:
         })
         assert len(findings) == 1
         assert findings[0].fixed is True
+        assert not skill_md.exists()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

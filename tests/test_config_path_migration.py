@@ -182,9 +182,8 @@ class TestSkillIndexWithConfigOverride:
         # 模拟新的 skills 目录结构
         skills_dir = tmp_path / "memory" / "skills"
         skills_dir.mkdir(parents=True)
-        skill_dir = skills_dir / "test-skill"
-        skill_dir.mkdir()
-        (skill_dir / "SKILL.md").write_text(
+        skill_file = skills_dir / "test-skill.md"
+        skill_file.write_text(
             "---\nname: test-skill\ndescription: a test skill\n---\n\nbody",
             encoding="utf-8",
         )

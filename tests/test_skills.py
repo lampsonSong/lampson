@@ -8,11 +8,10 @@ import pytest
 from src.core.skills_tools import _parse_skill, skill, info
 
 
-def _write_skill_md(skill_dir: Path, name: str, description: str = "", body: str = "") -> Path:
-    """创建一个 SKILL.md 文件。"""
-    skill_dir.mkdir(parents=True, exist_ok=True)
+def _write_skill_md(skills_dir: Path, name: str, description: str = "", body: str = "") -> Path:
+    """创建一个平铺 skill 文件 skills/<name>.md。"""
     content = f"---\nname: {name}\ndescription: {description}\n---\n\n{body}"
-    f = skill_dir / "SKILL.md"
+    f = skills_dir / f"{name}.md"
     f.write_text(content, encoding="utf-8")
     return f
 
@@ -22,7 +21,7 @@ class TestParseSkill:
 
     def test_parse_with_frontmatter(self, tmp_path: Path):
         """解析带 frontmatter 的 SKILL.md。"""
-        f = _write_skill_md(tmp_path / "my-skill", "my-skill", "A skill", "body content")
+        f = _write_skill_md(tmp_path, "my-skill", "A skill", "body content")
         result = _parse_skill(f)
         assert result is not None
         assert result["name"] == "my-skill"
@@ -30,10 +29,8 @@ class TestParseSkill:
         assert "body content" in result["body"]
 
     def test_parse_without_frontmatter(self, tmp_path: Path):
-        """解析无 frontmatter 的文件，name 取目录名。"""
-        skill_dir = tmp_path / "no-meta"
-        skill_dir.mkdir()
-        f = skill_dir / "SKILL.md"
+        """解析无 frontmatter 的文件，name 取文件名（path.stem）。"""
+        f = tmp_path / "no-meta.md"
         f.write_text("Just some content", encoding="utf-8")
         result = _parse_skill(f)
         assert result is not None
@@ -42,7 +39,7 @@ class TestParseSkill:
 
     def test_parse_nonexistent_file(self, tmp_path: Path):
         """不存在的文件返回 None。"""
-        result = _parse_skill(tmp_path / "nonexistent" / "SKILL.md")
+        result = _parse_skill(tmp_path / "nonexistent.md")
         assert result is None
 
 
@@ -51,7 +48,7 @@ class TestSkillTool:
 
     def test_skill_view(self, tmp_path: Path):
         """view 能加载技能全文。"""
-        f = _write_skill_md(tmp_path / "test-skill", "test-skill", "desc", "body text")
+        f = _write_skill_md(tmp_path, "test-skill", "desc", "body text")
 
         mock_index = MagicMock()
         mock_index._entries = [{"name": "test-skill", "path": str(f)}]
@@ -71,7 +68,7 @@ class TestSkillTool:
 
     def test_skill_search(self, tmp_path: Path):
         """search 能搜索技能。"""
-        f = _write_skill_md(tmp_path / "code-review", "code-review", "Review code", "steps")
+        f = _write_skill_md(tmp_path, "code-review", "Review code", "steps")
 
         mock_index = MagicMock()
         mock_index._entries = [{"name": "code-review", "description": "Review code", "path": str(f)}]

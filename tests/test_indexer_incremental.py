@@ -10,10 +10,8 @@ from src.core.indexer import SkillIndex, ProjectIndex
 
 
 def _write_skill(skills_dir: Path, name: str, description: str = "", body: str = "") -> Path:
-    skill_dir = skills_dir / name
-    skill_dir.mkdir(parents=True, exist_ok=True)
     content = f"---\nname: {name}\ndescription: {description}\n---\n\n{body}"
-    f = skill_dir / "SKILL.md"
+    f = skills_dir / f"{name}.md"
     f.write_text(content, encoding="utf-8")
     return f
 
@@ -99,8 +97,7 @@ class TestSkillIndexIncrementalUpdate:
         assert len(idx1.list_summaries()) == 2
 
         # 删除 skill-b
-        import shutil
-        shutil.rmtree(skills_dir / "skill-b")
+        (skills_dir / "skill-b.md").unlink()
 
         idx2 = SkillIndex(skills_dir, index_dir)
         idx2.load_or_build()

@@ -92,101 +92,69 @@ class AuditReport:
 # ── 扫描器 ───────────────────────────────────────────────────────────────────
 
 def scan_skills(auto_fix: bool = False) -> list[AuditFinding]:
-    """扫描所有 skills，返回审计发现列表。
+    """扫描所有 skills（平铺 .md 格式），返回审计发现列表。
 
     注意：skill 的触发逻辑已改为 LLM 判断，不再检查 triggers 字段。
-    知识性 skill（如 machines、user-data-location）没有编号步骤也正常，
-    不再将"缺少编号步骤"作为警告。
-
-    auto_fix=True 时，对可安全修复的问题执行自动修复：
-    - 空目录（无 SKILL.md 且无其他文件）→ 删除
-    - 额外 .md 文件 → 合并到 SKILL.md 末尾后删除
-    - 缺少 frontmatter → 自动生成
+    auto_fix=True 时：缺少 frontmatter 自动生成（name 从 path.stem 取）。
     """
     findings: list[AuditFinding] = []
 
     if not SKILLS_DIR.exists():
         return findings
 
-    for skill_dir in SKILLS_DIR.iterdir():
-        if not skill_dir.is_dir():
-            continue
-        skill_md = skill_dir / "SKILL.md"
-        if not skill_md.exists():
-            # 检查目录是否为空（没有任何其他文件）
-            other_files = list(skill_dir.iterdir())
-            if not other_files and auto_fix:
-                # 空目录，直接删除
-                import shutil
-                shutil.rmtree(skill_dir)
-                findings.append(AuditFinding(
-                    severity="warning",
-                    category="skill",
-                    target=skill_dir.name,
-                    message="存在目录但没有 SKILL.md 文件",
-                    suggestion="删除目录，或创建 SKILL.md",
-                    fixed=True,
-                    fix_detail="已删除空目录",
-                ))
-            else:
-                findings.append(AuditFinding(
-                    severity="warning",
-                    category="skill",
-                    target=skill_dir.name,
-                    message="存在目录但没有 SKILL.md 文件",
-                    suggestion="删除目录，或创建 SKILL.md",
-                ))
+    for skill_file in SKILLS_DIR.glob("*.md"):
+        if skill_file.name.startswith("."):
             continue
 
         try:
-            content = skill_md.read_text(encoding="utf-8")
+            raw = skill_file.read_text(encoding="utf-8")
         except OSError:
             continue
 
         # 检查 frontmatter
-        fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", content, re.DOTALL)
+        fm_match = re.match("^---\s*\n(.*?)\n---\s*\n", raw, re.DOTALL)
         if not fm_match:
+            name = skill_file.stem
             if auto_fix:
-                # 自动生成 frontmatter：name 从目录名取，description 从正文第一行取
-                body_lines = content.strip().splitlines()
+                body_lines = raw.strip().splitlines()
                 first_line = ""
                 for line in body_lines:
                     stripped = line.strip()
-                    # 跳过空行和纯标题标记
                     if stripped and not stripped.startswith("#"):
                         first_line = stripped
                         break
                     elif stripped.startswith("#"):
-                        # 取标题内容作为 description
                         first_line = stripped.lstrip("# ").strip()
                         break
                 if not first_line:
-                    first_line = skill_dir.name
-                fm_block = f"---\nname: {skill_dir.name}\ndescription: {first_line}\n---\n"
-                new_content = fm_block + content
-                skill_md.write_text(new_content, encoding="utf-8")
-                # 重新读取以继续后续检查
-                content = new_content
-                fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", content, re.DOTALL)
+                    first_line = name
+                fm_block = f"---\nname: {name}\ndescription: {first_line}\n---\n"
+                new_content = fm_block + raw
+                skill_file.write_text(new_content, encoding="utf-8")
+                raw = new_content
+                fm_match = re.match("^---\s*\n(.*?)\n---\s*\n", raw, re.DOTALL)
                 findings.append(AuditFinding(
                     severity="warning",
                     category="skill",
-                    target=skill_dir.name,
-                    message="SKILL.md 缺少 frontmatter（--- ... ---）",
+                    target=name,
+                    message="skill 文件缺少 frontmatter",
                     suggestion="添加 YAML frontmatter（name、description）",
                     fixed=True,
-                    fix_detail=f"已自动生成 frontmatter（name={skill_dir.name}）",
+                    fix_detail=f"已自动生成 frontmatter（name={name}）",
                 ))
             else:
                 findings.append(AuditFinding(
                     severity="warning",
                     category="skill",
-                    target=skill_dir.name,
-                    message="SKILL.md 缺少 frontmatter（--- ... ---）",
+                    target=name,
+                    message="skill 文件缺少 frontmatter",
                     suggestion="添加 YAML frontmatter（name、description）",
                 ))
+            # 继续检查正文
+            body = raw
         else:
             # 解析 frontmatter
+            name = skill_file.stem
             try:
                 import yaml
                 meta = yaml.safe_load(fm_match.group(1)) or {}
@@ -194,38 +162,32 @@ def scan_skills(auto_fix: bool = False) -> list[AuditFinding]:
                     findings.append(AuditFinding(
                         severity="info",
                         category="skill",
-                        target=skill_dir.name,
+                        target=name,
                         message="frontmatter 缺少 name 字段",
                     ))
                 if not meta.get("description"):
                     findings.append(AuditFinding(
                         severity="info",
                         category="skill",
-                        target=skill_dir.name,
+                        target=name,
                         message="frontmatter 缺少 description 字段",
                     ))
-                # 注意：不再检查 triggers 字段，触发逻辑已改为 LLM
             except yaml.YAMLError as e:
                 findings.append(AuditFinding(
                     severity="error",
                     category="skill",
-                    target=skill_dir.name,
+                    target=name,
                     message=f"frontmatter YAML 解析失败: {e}",
                     suggestion="修复 frontmatter 格式",
                 ))
+            body = raw[fm_match.end():]
 
-        # 检查正文结构
-        body = content[fm_match.end():] if fm_match else content
-
-        # 注意：不再检查是否有编号步骤，skill 可能是知识性内容（如 machines），
-        # 没有固定步骤也完全正常。
-
-        # 检查内容长度
+        # 检查正文长度
         if len(body.strip()) < 50:
             findings.append(AuditFinding(
                 severity="warning",
                 category="skill",
-                target=skill_dir.name,
+                target=name,
                 message="正文内容过短（<50 字符），可能是不完整的 skill",
                 suggestion="补充完整的步骤描述和注意事项",
             ))
@@ -235,56 +197,15 @@ def scan_skills(auto_fix: bool = False) -> list[AuditFinding]:
             findings.append(AuditFinding(
                 severity="warning",
                 category="skill",
-                target=skill_dir.name,
+                target=name,
                 message="正文仍为模板占位内容（步骤一/步骤二/步骤三），未填写实际内容",
                 suggestion="替换为具体的操作步骤",
             ))
 
-        # 检查孤立文件（目录下有非 SKILL.md 的 .md 文件）
-        extra_md_files = [f for f in skill_dir.iterdir() if f.suffix == ".md" and f != skill_md]
-        for f in extra_md_files:
-            if auto_fix:
-                # 把额外 .md 文件内容合并到 SKILL.md 末尾，然后删除
-                try:
-                    extra_content = f.read_text(encoding="utf-8")
-                    current = skill_md.read_text(encoding="utf-8")
-                    merged = current.rstrip() + f"\n\n<!-- merged from {f.name} -->\n" + extra_content
-                    skill_md.write_text(merged, encoding="utf-8")
-                    f.unlink()
-                    findings.append(AuditFinding(
-                        severity="info",
-                        category="skill",
-                        target=f"{skill_dir.name}/{f.name}",
-                        message=f"目录中有额外的 .md 文件: {f.name}",
-                        suggestion="合并到 SKILL.md 或删除",
-                        fixed=True,
-                        fix_detail=f"已将 {f.name} 内容合并到 SKILL.md 末尾并删除原文件",
-                    ))
-                except OSError as e:
-                    logger.warning(f"auto_fix: 合并 {f} 失败: {e}")
-                    findings.append(AuditFinding(
-                        severity="info",
-                        category="skill",
-                        target=f"{skill_dir.name}/{f.name}",
-                        message=f"目录中有额外的 .md 文件: {f.name}",
-                        suggestion="合并到 SKILL.md 或删除",
-                    ))
-            else:
-                findings.append(AuditFinding(
-                    severity="info",
-                    category="skill",
-                    target=f"{skill_dir.name}/{f.name}",
-                    message=f"目录中有额外的 .md 文件: {f.name}",
-                    suggestion="合并到 SKILL.md 或删除",
-                ))
-
-    # 注意：不再检查触发词冲突，触发逻辑已改为 LLM，不再依赖 triggers 字段
-
     return findings
 
-
 def scan_skill_overlap() -> list[AuditFinding]:
-    """检测 skill 之间的职责重叠。
+    """检测 skill 之间的职责重叠（平铺 .md 格式）。
 
     逻辑：
     1. 收集所有 skill 的 (name, description)
@@ -305,13 +226,11 @@ def scan_skill_overlap() -> list[AuditFinding]:
     def _extract_keywords(text: str) -> set[str]:
         """从文本中提取关键词（中文用 jieba，英文按空格分词）。"""
         keywords: set[str] = set()
-        # 英文词
         en_words = re.findall(r"[a-zA-Z]+", text)
         for w in en_words:
             w_lower = w.lower()
             if len(w_lower) >= 2 and w_lower not in _EN_STOP_WORDS:
                 keywords.add(w_lower)
-        # 中文词（用 jieba 分词）
         chinese_text = re.sub(r"[a-zA-Z0-9\s\-_/\\.,;:!?(){}[\]\"'`~@#$%^&*+=|<>]", " ", text)
         if chinese_text.strip():
             try:
@@ -321,26 +240,21 @@ def scan_skill_overlap() -> list[AuditFinding]:
                     if len(word) >= 2:
                         keywords.add(word)
             except ImportError:
-                # jieba 不可用时，按字拆分中文（长度>=2 的连续中文片段）
                 for seg in re.findall(r"[\u4e00-\u9fff]{2,}", chinese_text):
                     keywords.add(seg)
         return keywords
 
-    # 收集所有 skill 的 name 和 description
-    skill_infos: list[tuple[str, str, set[str]]] = []  # (name, description, keywords)
+    skill_infos: list[tuple[str, str, set[str]]] = []
 
-    for skill_dir in SKILLS_DIR.iterdir():
-        if not skill_dir.is_dir():
-            continue
-        skill_md = skill_dir / "SKILL.md"
-        if not skill_md.exists():
+    for skill_file in SKILLS_DIR.glob("*.md"):
+        if skill_file.name.startswith("."):
             continue
         try:
-            content = skill_md.read_text(encoding="utf-8")
+            raw = skill_file.read_text(encoding="utf-8")
         except OSError:
             continue
 
-        fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", content, re.DOTALL)
+        fm_match = re.match("^---\s*\n(.*?)\n---\s*\n", raw, re.DOTALL)
         if not fm_match:
             continue
         try:
@@ -349,7 +263,7 @@ def scan_skill_overlap() -> list[AuditFinding]:
         except Exception:
             continue
 
-        name = meta.get("name", skill_dir.name)
+        name = meta.get("name", skill_file.stem)
         description = meta.get("description", "")
         if not description:
             continue
@@ -368,7 +282,6 @@ def scan_skill_overlap() -> list[AuditFinding]:
             if len(overlap) <= 3:
                 continue
 
-            # 检查重叠度是否 >60%（以较小集合为基准）
             smaller = min(len(kws_a), len(kws_b))
             if smaller == 0:
                 continue
@@ -386,7 +299,6 @@ def scan_skill_overlap() -> list[AuditFinding]:
             ))
 
     return findings
-
 
 def scan_projects() -> list[AuditFinding]:
     """扫描所有 projects，返回审计发现列表。"""
@@ -489,100 +401,100 @@ def scan_skill_scripts() -> list[AuditFinding]:
     if not SKILLS_DIR.exists():
         return findings
 
-    for scripts_dir in sorted(SKILLS_DIR.glob("*/scripts")):
-        if not scripts_dir.is_dir():
+    scripts_dir = SKILLS_DIR / "scripts"
+    if not scripts_dir.is_dir():
+        return findings
+
+    skill_name = "scripts"
+
+    for py_file in sorted(scripts_dir.glob("*.py")):
+        if py_file.name.startswith("_"):
             continue
 
-        skill_name = scripts_dir.parent.name
+        script_name = py_file.stem
+        target_label = f"{skill_name}/{script_name}"
 
-        for py_file in sorted(scripts_dir.glob("*.py")):
-            if py_file.name.startswith("_"):
-                continue
+        try:
+            code = py_file.read_text(encoding="utf-8")
+        except OSError:
+            continue
 
-            script_name = py_file.stem
-            target_label = f"{skill_name}/{script_name}"
+        # 语法检查
+        try:
+            import py_compile
+            py_compile.compile(str(py_file), doraise=True)
+        except py_compile.PyCompileError as e:
+            findings.append(AuditFinding(
+                severity="error",
+                category="module",
+                target=target_label,
+                message=f"语法错误: {e}",
+                suggestion="修复语法错误",
+            ))
+            continue
 
-            try:
-                code = py_file.read_text(encoding="utf-8")
-            except OSError:
-                continue
-
-            # 语法检查
-            try:
-                import py_compile
-                py_compile.compile(str(py_file), doraise=True)
-            except py_compile.PyCompileError as e:
+        # 危险 import 检查（使用公共常量）
+        from src.tools.skill_scripts import BLOCKED_IMPORTS
+        for line in code.splitlines():
+            stripped = line.strip()
+            m = re.match(r"^from\s+(\S+)", stripped)
+            if m and m.group(1).split(".")[0] in BLOCKED_IMPORTS:
                 findings.append(AuditFinding(
                     severity="error",
-                    category="module",
+                    category="script",
                     target=target_label,
-                    message=f"语法错误: {e}",
-                    suggestion="修复语法错误",
+                    message=f"危险 import: {stripped}",
+                    suggestion="移除此 import，禁止脚本调用 src 内部模块",
                 ))
-                continue
+            m = re.match(r"^import\s+(\S+)", stripped)
+            if m and m.group(1).split(".")[0] in BLOCKED_IMPORTS:
+                findings.append(AuditFinding(
+                    severity="error",
+                    category="script",
+                    target=target_label,
+                    message=f"危险 import: {stripped}",
+                    suggestion="移除此 import",
+                ))
 
-            # 危险 import 检查（使用公共常量）
-            from src.tools.skill_scripts import BLOCKED_IMPORTS
-            for line in code.splitlines():
-                stripped = line.strip()
-                m = re.match(r"^from\s+(\S+)", stripped)
-                if m and m.group(1).split(".")[0] in BLOCKED_IMPORTS:
-                    findings.append(AuditFinding(
-                        severity="error",
-                        category="script",
-                        target=target_label,
-                        message=f"危险 import: {stripped}",
-                        suggestion="移除此 import，禁止脚本调用 src 内部模块",
-                    ))
-                m = re.match(r"^import\s+(\S+)", stripped)
-                if m and m.group(1).split(".")[0] in BLOCKED_IMPORTS:
-                    findings.append(AuditFinding(
-                        severity="error",
-                        category="script",
-                        target=target_label,
-                        message=f"危险 import: {stripped}",
-                        suggestion="移除此 import",
-                    ))
+        # 检查是否有 TOOL_SCHEMA 或 TOOL_RUNNER
+        has_schema = "TOOL_SCHEMA" in code
+        has_runner = "TOOL_RUNNER" in code
+        if has_schema and not has_runner:
+            findings.append(AuditFinding(
+                severity="warning",
+                category="module",
+                target=target_label,
+                message="定义了 TOOL_SCHEMA 但缺少 TOOL_RUNNER，工具不会被注册",
+                suggestion="添加 TOOL_RUNNER 函数: TOOL_RUNNER(params: dict) -> str",
+            ))
+        if has_runner and not has_schema:
+            findings.append(AuditFinding(
+                severity="warning",
+                category="module",
+                target=target_label,
+                message="定义了 TOOL_RUNNER 但缺少 TOOL_SCHEMA，无法注册为工具",
+                suggestion="添加 TOOL_SCHEMA（OpenAI function calling schema）",
+            ))
 
-            # 检查是否有 TOOL_SCHEMA 或 TOOL_RUNNER
-            has_schema = "TOOL_SCHEMA" in code
-            has_runner = "TOOL_RUNNER" in code
-            if has_schema and not has_runner:
+        # 检查 TOOL_RUNNER 函数签名
+        if has_runner:
+            runner_match = re.search(r"def\s+TOOL_RUNNER\s*\([^)]*\)\s*(?:->\s*\w+)?\s*:", code)
+            if not runner_match:
                 findings.append(AuditFinding(
                     severity="warning",
                     category="module",
                     target=target_label,
-                    message="定义了 TOOL_SCHEMA 但缺少 TOOL_RUNNER，工具不会被注册",
-                    suggestion="添加 TOOL_RUNNER 函数: TOOL_RUNNER(params: dict) -> str",
-                ))
-            if has_runner and not has_schema:
-                findings.append(AuditFinding(
-                    severity="warning",
-                    category="module",
-                    target=target_label,
-                    message="定义了 TOOL_RUNNER 但缺少 TOOL_SCHEMA，无法注册为工具",
-                    suggestion="添加 TOOL_SCHEMA（OpenAI function calling schema）",
+                    message="TOOL_RUNNER 签名不符合规范，应为: def TOOL_RUNNER(params: dict) -> str:",
                 ))
 
-            # 检查 TOOL_RUNNER 函数签名
-            if has_runner:
-                runner_match = re.search(r"def\s+TOOL_RUNNER\s*\([^)]*\)\s*(?:->\s*\w+)?\s*:", code)
-                if not runner_match:
-                    findings.append(AuditFinding(
-                        severity="warning",
-                        category="module",
-                        target=target_label,
-                        message="TOOL_RUNNER 签名不符合规范，应为: def TOOL_RUNNER(params: dict) -> str:",
-                    ))
-
-            # 检查文件大小（异常大的脚本）
-            if len(code) > 50_000:
-                findings.append(AuditFinding(
-                    severity="info",
-                    category="module",
-                    target=target_label,
-                    message=f"脚本代码 {len(code)} 字符，较大。建议拆分。",
-                ))
+        # 检查文件大小（异常大的脚本）
+        if len(code) > 50_000:
+            findings.append(AuditFinding(
+                severity="info",
+                category="module",
+                target=target_label,
+                message=f"脚本代码 {len(code)} 字符，较大。建议拆分。",
+            ))
 
     return findings
 
@@ -796,9 +708,9 @@ def run_audit(auto_fix: bool = True) -> AuditReport:
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     # 统计扫描数量
-    skills_count = len(list(SKILLS_DIR.glob("*/SKILL.md"))) if SKILLS_DIR.exists() else 0
+    skills_count = len(list(SKILLS_DIR.glob("*.md"))) - len(list(SKILLS_DIR.glob(".archived/*.md"))) if SKILLS_DIR.exists() else 0
     projects_count = len(list(PROJECTS_DIR.glob("*.md"))) if PROJECTS_DIR.exists() else 0
-    scripts_count = len(list(SKILLS_DIR.glob("*/scripts/*.py"))) if SKILLS_DIR.exists() else 0
+    scripts_count = len(list((SKILLS_DIR / "scripts").glob("*.py"))) if (SKILLS_DIR / "scripts").is_dir() else 0
 
     findings: list[AuditFinding] = []
     findings.extend(scan_skills(auto_fix=auto_fix))
@@ -936,19 +848,18 @@ def cleanup_stale_knowledge(auto_fix: bool = True) -> list[AuditFinding]:
         except (ValueError, TypeError):
             return None
 
-    # ── Skills 清理 ──
+    # ── Skills 清理（平铺 .md 格式）─
     if SKILLS_DIR.exists():
-        for skill_dir in SKILLS_DIR.iterdir():
-            if not skill_dir.is_dir() or skill_dir.name.startswith("."):
+        for skill_file in SKILLS_DIR.glob("*.md"):
+            if skill_file.name.startswith("."):
                 continue
-            skill_md = skill_dir / "SKILL.md"
-            if not skill_md.exists():
-                continue
+            if skill_file.parent != SKILLS_DIR:
+                continue  # 跳过子目录（如 scripts/）
             try:
-                raw = skill_md.read_text(encoding="utf-8")
+                raw = skill_file.read_text(encoding="utf-8")
             except OSError:
                 continue
-            fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", raw, re.DOTALL)
+            fm_match = re.match("^---\s*\n(.*?)\n---\s*\n", raw, re.DOTALL)
             if not fm_match:
                 continue
             try:
@@ -957,7 +868,7 @@ def cleanup_stale_knowledge(auto_fix: bool = True) -> list[AuditFinding]:
             except Exception:
                 continue
 
-            name = meta.get("name", skill_dir.name)
+            name = meta.get("name", skill_file.stem)
             last_used = _parse_date(meta.get("last_used_at", ""))
             created = _parse_date(meta.get("created_at", ""))
             invocation_count = int(meta.get("invocation_count", 0))
@@ -977,11 +888,11 @@ def cleanup_stale_knowledge(auto_fix: bool = True) -> list[AuditFinding]:
             if should_archive and auto_fix:
                 archive_dir = SKILLS_DIR / ".archived"
                 archive_dir.mkdir(parents=True, exist_ok=True)
-                dest = archive_dir / skill_dir.name
+                dest = archive_dir / skill_file.name
                 if dest.exists():
                     import uuid
-                    dest = archive_dir / f"{skill_dir.name}_{uuid.uuid4().hex[:6]}"
-                shutil.move(str(skill_dir), str(dest))
+                    dest = archive_dir / f"{skill_file.stem}_{uuid.uuid4().hex[:6]}.md"
+                shutil.move(str(skill_file), str(dest))
                 findings.append(AuditFinding(
                     severity="info",
                     category="skill",
@@ -1013,7 +924,7 @@ def cleanup_stale_knowledge(auto_fix: bool = True) -> list[AuditFinding]:
                 raw = info_file.read_text(encoding="utf-8")
             except OSError:
                 continue
-            fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", raw, re.DOTALL)
+            fm_match = re.match("^---\s*\n(.*?)\n---\s*\n", raw, re.DOTALL)
             if not fm_match:
                 continue
             try:
@@ -1070,7 +981,7 @@ def cleanup_stale_knowledge(auto_fix: bool = True) -> list[AuditFinding]:
                 raw = proj_file.read_text(encoding="utf-8")
             except OSError:
                 continue
-            fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", raw, re.DOTALL)
+            fm_match = re.match("^---\s*\n(.*?)\n---\s*\n", raw, re.DOTALL)
             if not fm_match:
                 continue
             try:
