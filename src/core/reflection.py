@@ -170,7 +170,7 @@ def tool_reflect_runner(params: dict[str, Any]) -> str:
 
 # ── 反思 Prompt ──────────────────────────────────────────────────────────────
 
-REFLECT_PROMPT = """你是一个知识管理助手。请分析这次任务执行过程，判断是否有值得持久化的知识。
+REFLECT_PROMPT = """你是一个知识管理助手。检查执行过程是否产生了新的、未记录的知识。
 
 ## 用户目标
 {goal}
@@ -187,31 +187,26 @@ REFLECT_PROMPT = """你是一个知识管理助手。请分析这次任务执行
 ## 已有 Info
 {existing_info}
 
-请只输出一个 JSON 对象，不要其他文字。字段说明：
-- "learnings": 数组。每项含：
-  - "type": "project_create" | "project_update" | "skill_create" | "skill_update" | "info_create" | "info_update"
-  - "target": 项目名、技能名或信息名
-  - "reason": 一句话说明为什么值得记录
-  - "content": 要写入的正文内容
+请依次检查以下三个问题，只要任意一个回答"是"就产生一条 learning：
+
+1. **Skill 类型**：是否发现了新的、未记录的 5+ 步可复用工作流？→ skill_create
+2. **Project 类型**：是否在项目中发现了新的、未记录的信息（配置、测试结论、容器地址等）？→ project_update
+3. **Info 类型**：是否发现了新的、未记录的通用知识（服务地址、API 用法、踩坑记录）？→ info_create
 
 判断标准：
-- project_create: 首次发现某个项目，记录基本信息（路径、技术栈、入口、配置）。仅当已有 Projects 列表中无该项目时使用
-- project_update: 在已有项目中发现了新信息（新模块、新配置）或需要修正过时内容。仅当已有 Projects 列表中已有该项目时使用
-- skill_create: 发现了一种可复用的操作方法，当前 skills 里没有覆盖的。5+ 步骤的工作流都算（不限类型：API调用、脚本、调试流程等）。简单查询不算
-- skill_update: 执行过程中发现某个已有 skill 的步骤不够、有错误，需要修正或补充
-- info_create: 任何用过但没记录过的工具用法、API 参数、踩坑经验。
-- info_update: 已有 info 需要修正或补充
-- 空数组: 简单查询、闲聊、或信息已经记录过
+- skill_create: 5+ 步骤的工作流，skills 里没有的
+- project_update: 项目相关的新发现，直接追加到 project 文件
+- info_create: 通用知识的新发现，info 里没有的
+
+请只输出 JSON：
+{{"learnings": []}}
+或
+{{"learnings": [{{"type": "project_update", "target": "项目名", "reason": "发现了新配置", "content": "具体内容"}}]}}
 
 注意：
-- 不要重复记录已有信息
-- skill 的 content 是方法论（通用步骤），不是具体答案
-- project_update 的 content 是增量信息，不是整个文件重写
-- info 的 content 是项目无关的通用知识（如服务地址、工具配置、API说明等）
-
-示例：
-{{"learnings": []}}
-{{"learnings": [{{"type": "project_create", "target": "hermes", "reason": "首次探索了 hermes 项目", "content": "源码路径: ~/.hermes/hermes-agent/\\n入口: hermes_cli.main:main"}}]}}"""
+- 只要任意一个问题回答"是"就产生一条 learning
+- project_update 的 content 是增量信息，直接追加到对应项目的 md 文件
+- skill 的 content 是方法论（通用步骤），不是具体答案"""
 
 
 # ── 是否需要反思（LLM 判断）─────────────────────────────────────────────────
