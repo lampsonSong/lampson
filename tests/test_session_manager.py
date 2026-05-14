@@ -76,5 +76,5 @@ class TestSessionManager:
                 
                 sm = SessionManager({})
                 assert sm._lock is not None
-                import threading
-                assert isinstance(sm._lock, threading.Lock)
+                # threading.Lock() 返回 _thread.lock，Python 3.11+ 中 threading.Lock 本身不是类型
+                assert hasattr(sm._lock, "acquire") and hasattr(sm._lock, "release")

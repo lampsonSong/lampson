@@ -86,6 +86,10 @@ class Agent:
         # ── trace / 完整复现 ───────────────────────────────────────────
         # session_id：由 Session 注入，用于写 trace 行到 JSONL
         self.session_id: str = ""
+
+        # ── 反思水位线 ────────────────────────────────────────────────
+        # 记录上次反思时 messages 的长度，下次只反思增量部分
+        self._reflect_watermark: int = 0
     def refresh_tools(self) -> None:
         """重新加载工具列表（外部注册新工具后调用）。"""
         self._tools = tool_registry.get_all_schemas()
@@ -746,6 +750,9 @@ class Agent:
             if usage_pct >= end_threshold_percent:
                 result += f"\n---\n📊 Context: {estimated:,} / {cw:,} tokens ({usage_pct:.0f}%)"
 
+        # ── 后台反思：end turn 后判断是否需要沉淀 skill/info/project ──
+        self._maybe_spawn_background_reflection(user_input)
+
         return result
 
     def _estimate_context_tokens(self) -> int:
@@ -761,6 +768,83 @@ class Agent:
             return len(serialized.encode("utf-8")) // 4
         except Exception:
             return 0
+
+    # ── 后台反思 ─────────────────────────────────────────────────────────────
+
+    def _maybe_spawn_background_reflection(self, user_input: str) -> None:
+        """end turn 后判断是否需要后台反思沉淀。
+
+        用 should_reflect() 做短路判断，通过后起后台线程执行
+        reflect_and_learn + execute_learnings，不阻塞用户回复。
+        """
+        from src.core.reflection import should_reflect, reflect_and_learn, execute_learnings
+        from src.core.reflection import _llm_client as _get_llm
+
+        tool_count = self._fast_path_tool_count
+
+        if not should_reflect(
+            plan=self.current_plan,
+            tool_call_count=tool_count,
+            skill_activated=list(self.skills.keys())[0] if self.skills else None,
+            user_input=user_input,
+        ):
+            return
+
+        # 需要快照增量对话：从上次反思水位线到现在的所有 messages
+        messages_snapshot = list(self.llm.messages)
+        watermark = self._reflect_watermark
+        incremental_messages = messages_snapshot[watermark:]
+        # 更新水位线
+        self._reflect_watermark = len(messages_snapshot)
+
+        # 构建执行摘要：收集本轮所有 tool call 名称
+        tool_names: list[str] = []
+        for msg in messages_snapshot:
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    fname = tc.get("function", {}).get("name", "")
+                    if fname:
+                        tool_names.append(fname)
+
+        execution_summary = f"本轮调用了 {len(tool_names)} 次工具：{', '.join(tool_names)}" if tool_names else "本轮无工具调用"
+
+        def _run_reflection():
+            """后台线程：调用 reflect_and_learn 并执行沉淀。"""
+            try:
+                from src.core.reflection import _llm_client as _injected_llm
+                llm = _injected_llm
+                if llm is None:
+                    # fallback: 用 agent 自己的 llm client
+                    llm = self.llm
+
+                learnings = reflect_and_learn(
+                    goal=user_input[:200],
+                    execution_summary=execution_summary,
+                    llm_client=llm,
+                    skill_activated=list(self.skills.keys())[0] if self.skills else None,
+                    recent_context=self._format_messages_for_context(incremental_messages),
+                )
+                if learnings:
+                    hints = execute_learnings(learnings)
+                    if hints:
+                        logger.info(f"[后台反思] 沉淀完成: {'; '.join(hints)}")
+            except Exception as e:
+                logger.warning(f"[后台反思] 失败: {e}")
+
+        t = threading.Thread(target=_run_reflection, name="bg-reflection", daemon=True)
+        t.start()
+
+    @staticmethod
+    def _format_messages_for_context(messages: list[dict]) -> str:
+        """将消息列表格式化为反思上下文文本。"""
+        lines = []
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role in ("user", "assistant") and content:
+                preview = content[:300]
+                lines.append(f"[{role}] {preview}")
+        return "\n".join(lines) if lines else "（无对话记录）"
 
     def maybe_compact(
         self,

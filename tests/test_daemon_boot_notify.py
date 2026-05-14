@@ -1,6 +1,14 @@
 """测试 boot_tasks 执行前的通知功能。"""
 
 from unittest.mock import patch
+import sys
+
+# setproctitle 可能在某些环境未安装，mock 掉再导入 daemon
+# 必须做成完整的 mock，否则 pytest.importorskip 后测试内部访问属性会失败
+_mock_setproctitle = __import__('types', fromlist=['']).ModuleType('setproctitle')
+_mock_setproctitle.setproctitle = lambda *a, **k: None
+_mock_setproctitle.getproctitle = lambda: ''
+sys.modules['setproctitle'] = _mock_setproctitle
 from src.daemon import _notify_boot_tasks_running
 
 

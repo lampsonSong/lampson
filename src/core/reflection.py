@@ -52,26 +52,44 @@ def set_skill_index(index: Any) -> None:
     _skill_index = index
 
 
-def _refresh_skill_index() -> None:
-    """skill 文件变更后重建索引 + 刷新 tools 注册。静默失败。"""
+def _refresh_all_indices() -> None:
+    """skill/info/project 变更后重建所有索引 + 刷新 tools 注册。静默失败。"""
     global _skill_index
-    if _skill_index is None:
-        return
     try:
-        _skill_index.load_or_build()
-        from src.core import skills_tools as skills_tools_reg
+        # Skill 索引
+        if _skill_index is not None:
+            _skill_index.load_or_build()
+            logger.info('[反思] Skill 索引已重建')
+        else:
+            logger.debug('[反思] Skill 索引未注入，跳过')
+
+        # Project 索引
         from src.tools import session as session_tool
         current_session = session_tool.get_current_session()
+        if current_session and current_session.project_index is not None:
+            current_session.project_index.load_or_build()
+            if current_session.agent:
+                current_session.agent.project_index = current_session.project_index
+            logger.info('[反思] Project 索引已重建')
+
+        # Info 缓存：清掉 prompt_builder 的 _info_index_cache，下次构建时自动重建
+        from src.core import prompt_builder
+        prompt_builder._info_index_cache = None
+        logger.info('[反思] Info 缓存已清除')
+
+        # 统一刷新 skills_tools 的检索索引
         if current_session:
+            from src.core import skills_tools as skills_tools_reg
             skills_tools_reg.set_retrieval_indices(
-                _skill_index, current_session.project_index
+                _skill_index,
+                current_session.project_index,
             )
             current_session.skill_index = _skill_index
             if current_session.agent:
                 current_session.agent.skill_index = _skill_index
-        logger.info('[反思] Skill 索引已重建')
+
     except Exception as e:
-        logger.warning('[反思] Skill 索引重建失败: %s', e)
+        logger.warning('[反思] 索引重建失败: %s', e)
 
 
 # ── 工具注册 ────────────────────────────────────────────────────────────────
@@ -333,35 +351,39 @@ def execute_learnings(learnings: list[dict[str, Any]]) -> list[str]:
             hint = _create_project(target, content, reason)
             if hint:
                 hints.append(hint)
+                _refresh_all_indices()
 
         elif ltype == "project_update":
             hint = _update_project(target, content, reason)
             if hint:
                 hints.append(hint)
+                _refresh_all_indices()
 
         elif ltype == "skill_create":
             hint = _create_skill(target, content, reason)
             if hint:
                 hints.append(hint)
                 _notify_user(f"📝 **Skill 新建**\n\n- 名称：{target}\n- 原因：{reason}")
-                _refresh_skill_index()
+                _refresh_all_indices()
 
         elif ltype == "skill_update":
             hint = _update_skill(target, content, reason)
             if hint:
                 hints.append(hint)
                 _notify_user(f"🔧 **Skill 更新**\n\n- 名称：{target}\n- 原因：{reason}")
-                _refresh_skill_index()
+                _refresh_all_indices()
 
         elif ltype == "info_create":
             hint = _create_info(target, content, reason)
             if hint:
                 hints.append(hint)
+                _refresh_all_indices()
 
         elif ltype == "info_update":
             hint = _update_info(target, content, reason)
             if hint:
                 hints.append(hint)
+                _refresh_all_indices()
 
         else:
             logger.warning(f"未知的学习类型: {ltype}，跳过")
