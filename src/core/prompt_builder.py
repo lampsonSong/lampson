@@ -47,16 +47,9 @@ MEMORY_GUIDANCE = (
     "服务器地址、账号密码、API Key 等技术信息不要写 USER.md，写 info 目录。\n"
 )
 
-SKILLS_GUIDANCE = (
-    "完成复杂任务（5+ 工具调用）、修复疑难错误或发现重要工作流后，\n"
-    "考虑将工作流记录到 ~/.lamix/memory/skills/ 目录下以便复用。\n"
-    "如果发现某个 skill 过时或错误，及时更新它。\n"
-    "不维护的 skills 迟早会成为负担。"
-)
-
-TOOL_USE_ENFORCEMENT = (
-    "执行具体任务时（写代码、查文件、改配置等），必须立即使用工具行动，不许只描述意图。"
-    "回答提问、聊天、确认等场景直接回复即可，不需要硬塞工具调用。"
+ACTION_GUIDANCE = (
+    "完成任务后考虑沉淀为 skill；过时的 skill 及时更新。\n"
+    "执行任务时用工具行动，不要只描述意图；聊天/确认等场景直接回复即可。"
 )
 
 # ── Frontmatter 解析 ─────────────────────────────────────────────────────────
@@ -423,8 +416,9 @@ _fallback_identity = "\n".join([
     "你擅长自动化、代码、数据分析和系统运维。",
     "你的记忆分为三层：skills（工作流程）、info（零散信息）、projects（项目上下文）。",
     "三层内容可能重叠，没关系，重复不影响，按需加载即可。优先记能减少未来重复沟通的内容。",
-    "用户的性格、称呼、爱好、偏好、纠错等个人特征写在 ~/.lamix/USER.md。",
-    "服务器地址、账号密码、API Key 等技术信息不要写 USER.md，写 info 目录。",
+    "用户的性格、称呼、爱好、偏好、纠错等个人特征写在 ~/.lamix/USER.md。\n"
+    "服务器地址、账号密码、API Key 等技术信息不要写 USER.md，写 info 目录。\n"
+    "完成任务后考虑沉淀为 skill；执行任务时用工具行动，不要只描述意图。",
 ])
 
 
@@ -518,7 +512,7 @@ class PromptBuilder:
         skills_block = build_skills_index()
         if skills_block.strip():
             l2.append(skills_block)
-        l2.extend([SKILLS_GUIDANCE, TOOL_USE_ENFORCEMENT])
+        l2.append(ACTION_GUIDANCE)
         layers.extend(l2)
 
         # L3: Project index

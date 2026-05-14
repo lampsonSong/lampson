@@ -311,31 +311,38 @@ def search_projects(params: dict[str, Any]) -> str:
 
 # ── 归档查询与恢复 ──────────────────────────────────────────────────────────
 
-ARCHIVED_SKILLS_SCHEMA = {
+ARCHIVE_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "list_archived",
-        "description": "列出所有已归档的 skills/info/projects。使用场景：查看归档内容、恢复前确认。",
+        "name": "archive",
+        "description": "归档管理。action='list' 列出归档内容；action='restore' 从归档恢复指定项。",
         "parameters": {
             "type": "object",
             "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "restore"],
+                    "description": "操作类型",
+                },
                 "category": {
                     "type": "string",
                     "enum": ["skill", "info", "project", "all"],
-                    "description": "要查看的类别，默认 all",
-                    "default": "all",
+                    "description": "要查看或恢复的类别（list 时默认 all，restore 时必填）",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "要恢复的名称（restore 时必填）",
                 },
             },
-            "required": [],
+            "required": ["action"],
         },
     },
 }
 
 
-def list_archived(params: dict[str, Any]) -> str:
+def _list_archived_impl(category: str) -> str:
     """列出所有已归档的 skills/info/projects。"""
     from src.core.config import LAMIX_DIR
-    category = params.get("category", "all")
 
     results = []
 
@@ -376,44 +383,14 @@ def list_archived(params: dict[str, Any]) -> str:
     return "归档列表：\n" + "\n".join(results)
 
 
-RESTORE_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "restore_archived",
-        "description": "从归档中恢复指定 skill/info/project。使用场景：恢复误归档或有用的知识。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "category": {
-                    "type": "string",
-                    "enum": ["skill", "info", "project"],
-                    "description": "类别",
-                },
-                "name": {
-                    "type": "string",
-                    "description": "要恢复的名称",
-                },
-            },
-            "required": ["category", "name"],
-        },
-    },
-}
-
-
-def restore_archived(params: dict[str, Any]) -> str:
+def _restore_archived_impl(category: str, name: str) -> str:
     """从归档中恢复指定 skill/info/project。"""
     import shutil
     from src.core.config import LAMIX_DIR
 
-    category = params.get("category", "")
-    name = params.get("name", "").strip()
-    if not category or not name:
-        return "[错误] category 和 name 参数必填"
-
     if category == "skill":
         archive_dir = SKILLS_DIR / ".archived"
         target_dir = SKILLS_DIR
-        # 查找归档（可能有后缀）
         candidates = [d for d in archive_dir.iterdir() if d.is_dir() and d.name.startswith(name)]
     elif category == "info":
         archive_dir = LAMIX_DIR / "memory" / "info" / ".archived"
@@ -443,3 +420,28 @@ def restore_archived(params: dict[str, Any]) -> str:
 
     shutil.move(str(src), str(dest))
     return f"✓ 已恢复: {category}/{name} → {dest}"
+
+
+def archive(params: dict[str, Any]) -> str:
+    """归档管理：list / restore。"""
+    action = params.get("action", "")
+    if action == "list":
+        category = params.get("category", "all")
+        return _list_archived_impl(category)
+    elif action == "restore":
+        category = params.get("category", "")
+        name = params.get("name", "").strip()
+        if not category or not name:
+            return "[错误] restore 需要 category 和 name"
+        return _restore_archived_impl(category, name)
+    else:
+        return "[错误] action 必填，可选: list, restore"
+
+
+# ── 向后兼容别名 ──────────────────────────────────────────────────────────
+def list_archived(params: dict[str, Any]) -> str:
+    return _list_archived_impl(params.get("category", "all"))
+
+
+def restore_archived(params: dict[str, Any]) -> str:
+    return _restore_archived_impl(params.get("category", ""), params.get("name", "").strip())

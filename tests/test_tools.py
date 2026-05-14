@@ -67,9 +67,21 @@ class TestToolRegistry:
         from src.core import tools as tools_module
         assert "task_cancel" in tools_module._REGISTRY
 
-    def test_reflect_tool_registered(self):
+    def test_archive_tool_registered(self):
         from src.core import tools as tools_module
-        assert "reflect_and_learn" in tools_module._REGISTRY
+        assert "archive" in tools_module._REGISTRY
+
+    def test_list_archived_backward_compat(self):
+        from src.core.skills_tools import list_archived
+        # 向后兼容别名仍可用
+        result = list_archived({})
+        assert isinstance(result, str)
+
+    def test_restore_archived_backward_compat(self):
+        from src.core.skills_tools import restore_archived
+        # 向后兼容别名，错误情况
+        result = restore_archived({})
+        assert "[错误]" in result
 
     def test_registry_not_empty(self):
         from src.core import tools as tools_module
