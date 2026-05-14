@@ -36,7 +36,7 @@ from src.core.self_audit import (
     save_report,
     _audit_log,
 )
-from src.core.constants import DEFAULT_AUDIT_HOUR, DEFAULT_AUDIT_MINUTE, AUDIT_CHECK_INTERVAL, REPORT_MAX_LENGTH
+from src.core.constants import DEFAULT_AUDIT_HOUR, DEFAULT_AUDIT_MINUTE, REPORT_MAX_LENGTH
 from src.core.task_scheduler import TaskScheduler, TaskType, TaskConfig, schedule, start as scheduler_start, shutdown as scheduler_shutdown
 from src.core.tools import load_skill_scripts
 import logging
@@ -81,70 +81,23 @@ def _notify_user(text: str, config: dict | None = None) -> None:
 
 
 def _self_audit_callback() -> None:
-    """审计任务：根据用户活跃度 + 日历日期判断是否触发。
-
-    触发逻辑（任意满足即触发）：
-    1. 今天还没审计过（按日历日期判断，每天至少一次）
-    2. 用户 24 小时没有使用 → 触发审计
-    3. 用户有使用 → 等最后一次使用 1 小时后触发
-
-    发过一次审计后，重新开始计时。
-    """
-    from datetime import datetime, timedelta
-    from src.core.heartbeat import get_last_activity_time
+    """审计任务：每天凌晨 4 点由 cron 触发，直接执行审计。"""
+    from datetime import datetime
 
     now = datetime.now()
-    last_activity = get_last_activity_time()
-    last_audit_file = LAMIX_DIR / "logs" / ".last_audit_time"
-
-    # 读取上次审计时间
-    last_audit_time: datetime | None = None
-    last_audit_date: str | None = None
-    try:
-        if last_audit_file.exists():
-            ts = last_audit_file.read_text().strip()
-            last_audit_time = datetime.fromisoformat(ts)
-            last_audit_date = last_audit_time.date().isoformat()
-    except Exception:
-        pass
-
-    today_str = now.date().isoformat()
-
-    # 判断是否应该触发
-    should_run = False
-    reason = ""
-
-    if last_activity is None:
-        # heartbeat 文件不存在：降级为按日历日期判断（每天最多一次）
-        if last_audit_date != today_str:
-            should_run = True
-            reason = "每日例行审计（heartbeat记录缺失，降级为日历日期判断）"
-    elif now - last_activity >= timedelta(hours=24):
-        # 24 小时没有使用：立即触发（每天最多一次）
-        if last_audit_date != today_str:
-            should_run = True
-            reason = "用户24小时未使用"
-    elif now - last_activity >= timedelta(hours=1):
-        # 有使用，但最后使用已过 1 小时：触发（每天最多一次）
-        if last_audit_date != today_str:
-            should_run = True
-            reason = "用户最后使用后1小时"
-
-    if not should_run:
-        return
 
     try:
         report = run_audit()
         report_content = format_report_detail(report)
         if len(report_content) > REPORT_MAX_LENGTH:
             report_content = report_content[:REPORT_MAX_LENGTH] + "\n\n...（报告过长已截断）"
-        _audit_log(f"[self_audit] 审计完成（{reason}），开始发送报告")
+        _audit_log("[self_audit] 审计完成，开始发送报告")
         _notify_user(f"[Lamix] 自我审计报告\n\n{report_content}")
-        # 同时持久化到磁盘，供 /audit-report 命令查阅
         report_path = save_report(report)
         _audit_log(f"[self_audit] 报告已保存至 {report_path}")
-        logger.info(f"[self_audit] 审计完成（{reason}）")
+        logger.info("[self_audit] 每日审计完成")
         # 记录审计时间
+        last_audit_file = LAMIX_DIR / "logs" / ".last_audit_time"
         last_audit_file.parent.mkdir(parents=True, exist_ok=True)
         last_audit_file.write_text(now.isoformat(), encoding="utf-8")
     except Exception as e:
@@ -160,16 +113,14 @@ def _register_tasks(session=None) -> None:
         set_session(session)
     scheduler_start()
 
-    # 自我审计：每 4 小时检查一次是否需要执行审计
-    # 审计触发逻辑在 _self_audit_callback 内部判断：
-    #   - 用户 24 小时没有使用 → 触发审计
-    #   - 用户有使用 → 等最后一次使用 1 小时后触发
+    # 自我审计：每天凌晨 4 点执行一次
     schedule(TaskConfig(
         task_id="self_audit_check",
-        task_type=TaskType.INTERVAL,
-        interval_seconds=AUDIT_CHECK_INTERVAL,  # 4 小时检查一次
+        task_type=TaskType.CRON,
+        cron_hour=DEFAULT_AUDIT_HOUR,
+        cron_minute=DEFAULT_AUDIT_MINUTE,
         func=_self_audit_callback,
-        description="审计检查（每4小时）",
+        description="每日审计（凌晨4点）",
     ))
 
     logger.info("[daemon] 任务调度器已启动（审计检查）")

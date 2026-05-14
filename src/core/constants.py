@@ -15,7 +15,6 @@ HEARTBEAT_TIMEOUT: int = 30     # 无心跳则认为死亡（秒）
 WATCHDOG_INTERVAL: int = 10     # watchdog 检查频率（秒）
 
 # ── 审计 ──
-AUDIT_CHECK_INTERVAL: int = 14400  # 审计检查间隔（秒），4小时
 DEFAULT_AUDIT_HOUR: int = 4        # 默认审计触发时间 - 小时
 DEFAULT_AUDIT_MINUTE: int = 0      # 默认审计触发时间 - 分钟
 
