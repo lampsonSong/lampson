@@ -207,10 +207,44 @@ def _read_text_file(path: Path) -> str:
 
 
 def _iter_skill_paths(skills_dir: Path) -> list[Path]:
+    """扫描 skills 目录，返回所有 SKILL.md 文件路径。
+    
+    双层优先：skills/<name>/SKILL.md
+    向后兼容：skills/<name>.md（平铺单文件）
+    """
     if not skills_dir.exists():
         return []
-    return [f for f in skills_dir.glob("*.md")
-             if f.name != ".archived" and f.parent == skills_dir]
+    
+    paths: list[Path] = []
+    seen: set[str] = set()  # 避免重复
+    
+    # 优先：双层目录结构 skills/<name>/SKILL.md
+    for skill_dir in skills_dir.iterdir():
+        if not skill_dir.is_dir():
+            continue
+        if skill_dir.name.startswith("."):
+            continue
+        entry_file = skill_dir / "SKILL.md"
+        if entry_file.is_file():
+            key = str(entry_file.resolve())
+            if key not in seen:
+                paths.append(entry_file)
+                seen.add(key)
+    
+    # 向后兼容：平铺单文件 skills/<name>.md
+    for md_file in skills_dir.glob("*.md"):
+        if md_file.name.startswith("."):
+            continue
+        # 如果同名目录已存在，跳过（双层优先）
+        dir_path = skills_dir / md_file.stem
+        if dir_path.is_dir():
+            continue
+        key = str(md_file.resolve())
+        if key not in seen:
+            paths.append(md_file)
+            seen.add(key)
+    
+    return sorted(paths, key=lambda p: p.name)
 
 
 def _skill_search_text(parsed: dict[str, Any]) -> str:

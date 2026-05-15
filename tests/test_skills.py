@@ -9,9 +9,11 @@ from src.core.skills_tools import _parse_skill, skill, info
 
 
 def _write_skill_md(skills_dir: Path, name: str, description: str = "", body: str = "") -> Path:
-    """创建一个平铺 skill 文件 skills/<name>.md。"""
+    """创建一个双层 skill 目录 skills/<name>/SKILL.md。"""
     content = f"---\nname: {name}\ndescription: {description}\n---\n\n{body}"
-    f = skills_dir / f"{name}.md"
+    skill_dir = skills_dir / name
+    skill_dir.mkdir(exist_ok=True)
+    f = skill_dir / "SKILL.md"
     f.write_text(content, encoding="utf-8")
     return f
 
@@ -50,11 +52,10 @@ class TestSkillTool:
         """view 能加载技能全文。"""
         f = _write_skill_md(tmp_path, "test-skill", "desc", "body text")
 
-        mock_index = MagicMock()
-        mock_index._entries = [{"name": "test-skill", "path": str(f)}]
-
-        with patch("src.core.skills_tools._active_skill_index", mock_index):
-            result = skill({"action": "view", "name": "test-skill"})
+        # mock _resolve_skill_path 直接返回测试文件路径
+        with patch("src.core.skills_tools._resolve_skill_path", return_value=(f, False)):
+            with patch("src.core.skills_tools._increment_invocation", return_value=1):
+                result = skill({"action": "view", "name": "test-skill"})
         assert "test-skill" in result
         assert "body text" in result
 
@@ -72,7 +73,7 @@ class TestSkillTool:
 
         mock_index = MagicMock()
         mock_index._entries = [{"name": "code-review", "description": "Review code", "path": str(f)}]
-
+        # search 直接使用 _active_skill_index，不需要 mock _resolve_skill_path
         with patch("src.core.skills_tools._active_skill_index", mock_index):
             result = skill({"action": "search", "query": "review"})
         assert "code-review" in result
