@@ -1,0 +1,41 @@
+# IM-ASR-Translation 统一服务
+# 启动：docker compose up -d
+# 构建：docker compose build
+#
+# 依赖的外部服务：
+# - faster-whisper: 10.138.0.46:8301（ASR）
+# - VLLM:           10.224.231.142:9898（翻译推理）
+
+services:
+  im-asr-translation:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: im-asr-translation:latest
+    container_name: im-asr-translation
+    ports:
+      - "5031:5031"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "5031"
+      UVICORN_WORKERS: "2"
+      LOG_LEVEL: "INFO"
+      # VLLM 翻译后端
+      TRANSLATE_VLLM_HOST: "10.224.231.142"
+      TRANSLATE_VLLM_PORT: "9898"
+      TRANSLATE_LLM_MODEL: "GPTOssModel"
+      # faster-whisper ASR 后端
+      WHISPER_HOST: "10.138.0.46"
+      WHISPER_PORT: "8301"
+      # 音频下载限制
+      AUDIO_DOWNLOAD_TIMEOUT: "300"
+      MAX_AUDIO_SIZE_MB: "50"
+    volumes:
+      - ./log:/app/log
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5031/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

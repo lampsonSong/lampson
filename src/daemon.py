@@ -159,30 +159,125 @@ def _signal_handler(signum: int, _frame: object | None) -> None:
 def _check_single_instance() -> None:
     """检查是否已有 daemon 实例在运行，若有则退出。
 
-    使用 PID 文件 + 进程存活检测（排除僵尸）。
-    僵尸进程自动视为已死，清理 PID 文件后允许启动。
+    两层检测：
+    1. PID 文件 → 快速路径，检查文件中记录的进程是否存活
+    2. 进程名扫描 → 扫描所有名为 "lamix" 的进程，杀掉孤儿后继续
+
+    确保任何时刻只有一个 lamix daemon 在运行。
     """
-    if not _DAEMON_PID_PATH.exists():
+    my_pid = os.getpid()
+
+    # ── 第一层：PID 文件检查 ──
+    if _DAEMON_PID_PATH.exists():
+        try:
+            old_pid = int(_DAEMON_PID_PATH.read_text(encoding="utf-8").strip())
+        except (ValueError, OSError):
+            _DAEMON_PID_PATH.unlink(missing_ok=True)
+        else:
+            if old_pid != my_pid:
+                from src.platforms.process_manager import get_process_manager
+                pm = get_process_manager()
+                if pm.is_alive(old_pid):
+                    logger.error(f"[daemon] 已有 daemon 实例在运行 (PID={old_pid})，退出")
+                    sys.exit(0)
+                else:
+                    logger.info(f"[daemon] 旧进程 {old_pid} 已死，清理 PID 文件")
+                    _DAEMON_PID_PATH.unlink(missing_ok=True)
+
+    # ── 第二层：按进程名扫描所有 "lamix" 进程 ──
+    # 场景：PID 文件指向已死进程，但有其他 lamix 进程（孤儿/残留）还在跑
+    _kill_other_lamix_processes(my_pid)
+
+
+def _kill_other_lamix_processes(my_pid: int) -> None:
+    """扫描并杀掉所有非本进程的 "lamix" daemon 进程。
+
+    通过 pgrep 查找进程名精确匹配 "lamix" 的进程（setproctitle 设置的名称）。
+    杀掉后等待最多 3 秒确认退出。
+    """
+    import signal as sig_module
+
+    other_pids = _find_lamix_pids(exclude_pid=my_pid)
+    if not other_pids:
         return
+
+    logger.warning(f"[daemon] 发现残留 lamix 进程: {other_pids}，正在清理")
+
+    # SIGTERM 优雅终止
+    for pid in other_pids:
+        try:
+            os.kill(pid, sig_module.SIGTERM)
+        except OSError:
+            pass
+
+    # 等待最多 3 秒
+    for _ in range(30):
+        still_alive = [p for p in other_pids if _pid_exists(p)]
+        if not still_alive:
+            break
+        time.sleep(0.1)
+
+    # 还没死就 SIGKILL
+    still_alive = [p for p in other_pids if _pid_exists(p)]
+    if still_alive:
+        logger.warning(f"[daemon] SIGTERM 未杀掉 {still_alive}，发送 SIGKILL")
+        for pid in still_alive:
+            try:
+                os.kill(pid, sig_module.SIGKILL)
+            except OSError:
+                pass
+        time.sleep(0.3)
+
+    # 最终确认
+    final_alive = [p for p in other_pids if _pid_exists(p)]
+    if final_alive:
+        logger.error(f"[daemon] 无法杀掉残留进程 {final_alive}，仍然启动（可能为僵尸）")
+    else:
+        logger.info(f"[daemon] 已清理 {len(other_pids)} 个残留 lamix 进程")
+
+
+def _find_lamix_pids(exclude_pid: int) -> list[int]:
+    """查找所有名为 "lamix" 的进程 PID（排除 exclude_pid）。
+
+    优先用 pgrep -x（精确匹配进程名），fallback 到 ps + grep。
+    """
+    # 方法 1: pgrep -x lamix（精确匹配进程名）
     try:
-        old_pid = int(_DAEMON_PID_PATH.read_text(encoding="utf-8").strip())
-    except (ValueError, OSError):
-        _DAEMON_PID_PATH.unlink(missing_ok=True)
-        return
-    if old_pid == os.getpid():
-        return
+        result = subprocess.run(
+            ["pgrep", "-x", "lamix"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            pids = [int(p.strip()) for p in result.stdout.strip().split("\n") if p.strip()]
+            return [p for p in pids if p != exclude_pid]
+    except Exception:
+        pass
 
-    # 用 ProcessManager 的 is_alive()，已内置僵尸排除
-    from src.platforms.process_manager import get_process_manager
-    pm = get_process_manager()
-    if not pm.is_alive(old_pid):
-        # 进程已死或为僵尸，清理 PID 文件
-        logger.info(f"[daemon] 旧进程 {old_pid} 已死（或为僵尸），清理 PID 文件")
-        _DAEMON_PID_PATH.unlink(missing_ok=True)
-        return
+    # 方法 2 fallback: ps + grep
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "pid,comm"],
+            capture_output=True, text=True, timeout=5,
+        )
+        pids = []
+        for line in result.stdout.strip().split("\n")[1:]:  # 跳过 header
+            parts = line.strip().split()
+            if len(parts) >= 2 and parts[1] == "lamix":
+                pid = int(parts[0])
+                if pid != exclude_pid:
+                    pids.append(pid)
+        return pids
+    except Exception:
+        return []
 
-    logger.error(f"[daemon] 已有 daemon 实例在运行 (PID={old_pid})，退出")
-    sys.exit(0)
+
+def _pid_exists(pid: int) -> bool:
+    """检查 PID 是否存在（os.kill(pid, 0)）。"""
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
 
 
 def _write_daemon_pid() -> None:
