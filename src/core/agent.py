@@ -90,6 +90,7 @@ class Agent:
         # ── 反思水位线 ────────────────────────────────────────────────
         # 记录上次反思时 messages 的长度，下次只反思增量部分
         self._reflect_watermark: int = 0
+        self.reflect_notify_callback: Callable[[str], None] | None = None
     def refresh_tools(self) -> None:
         """重新加载工具列表（外部注册新工具后调用）。"""
         self._tools = tool_registry.get_all_schemas()
@@ -832,9 +833,12 @@ class Agent:
                     hints = execute_learnings(learnings)
                     if hints:
                         logger.info(f"[后台反思] 沉淀完成: {'; '.join(hints)}")
+                        if _notify:
+                            _notify(f"📝 反思沉淀完成:\n" + "\n".join(f"  • {h}" for h in hints))
             except Exception as e:
                 logger.warning(f"[后台反思] 失败: {e}")
 
+        _notify = self.reflect_notify_callback
         t = threading.Thread(target=_run_reflection, name="bg-reflection", daemon=True)
         t.start()
 

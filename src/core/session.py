@@ -221,6 +221,9 @@ class Session:
         self._reply_adapter = mgr._adapters.get(platform)
         self._reply_chat_id = chat_id
         self._reply_thread_id = thread_id
+        # 反思沉淀通知：用同一渠道回传
+        if hasattr(self, 'agent') and self.agent:
+            self.agent.reflect_notify_callback = self._send_reply_via_channel
 
     def _send_reply_via_channel(self, text: str) -> None:
         """通过主事件循环安全发送回复（避免 asyncio.run 嵌套）。"""
