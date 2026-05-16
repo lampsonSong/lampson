@@ -1,9 +1,10 @@
 """心跳机制模块：进程存活检测。
 
 职责：
-1. HeartbeatManager：进程内线程，定期写心跳文件
+1. HeartbeatManager：管理独立子进程，定期写心跳文件
 2. 心跳文件：~/.lamix/heartbeat/<pid>.json
 3. 收到 kill 信号时标记 user_stopped，避免 watchdog 误重拉
+4. 使用 multiprocessing.Process 绕过 GIL，确保心跳不受主进程阻塞影响
 """
 
 from __future__ import annotations
@@ -12,9 +13,8 @@ import json
 import os
 import subprocess
 import sys
-import threading
-from datetime import datetime
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -64,36 +64,81 @@ class HeartbeatRecord:
         )
 
 
-class HeartbeatManager:
-    """进程内心跳管理器。
+def _heartbeat_worker(pid: int, task_id: str | None, interval: int,
+                      lamix_dir: str | None = None) -> None:
+    """子进程心跳写入循环，独立于主进程 GIL。
 
-    在独立线程中定期向心跳文件写入记录。
-    收到 SIGTERM/SIGINT 时标记 user_stopped。
+    通过 stop flag 文件接收停止信号。
+    Args:
+        lamix_dir: 覆盖 LAMIX_DIR（测试用），None 则使用默认值。
+    """
+    _base = Path(lamix_dir) if lamix_dir else LAMIX_DIR
+    heartbeat_dir = _base / "heartbeat"
+    heartbeat_dir.mkdir(parents=True, exist_ok=True)
+    heartbeat_path = heartbeat_dir / f"{pid}.json"
+    stop_flag_path = heartbeat_dir.parent / "stop.flag"
+
+    def _now() -> str:
+        return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
+
+    def _write(user_stopped: bool = False) -> None:
+        data = {
+            "pid": pid,
+            "task_id": task_id,
+            "user_stopped": user_stopped,
+            "last_heartbeat": _now(),
+        }
+        tmp = heartbeat_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(heartbeat_path)
+
+    # 写入第一条
+    try:
+        _write()
+    except Exception:
+        pass
+
+    while True:
+        time.sleep(interval)
+
+        # 检查停止信号
+        if stop_flag_path.exists():
+            try:
+                content = stop_flag_path.read_text(encoding="utf-8").strip()
+                if content.isdigit() and int(content) == pid:
+                    stop_flag_path.unlink()
+                    # 写入 user_stopped 标记后退出
+                    try:
+                        _write(user_stopped=True)
+                    except Exception:
+                        pass
+                    return
+            except (OSError, ValueError):
+                pass
+
+        # 写心跳
+        try:
+            _write()
+        except Exception:
+            pass
+
+
+class HeartbeatManager:
+    """心跳管理器，使用独立子进程绕过 GIL。
+
+    子进程不受主进程 GIL 影响，即使主进程在执行耗时同步操作
+    （如 LLM 调用、文件搜索等），心跳也能正常写入。
     """
 
-    def __init__(self, task_id: str | None = None) -> None:
+    def __init__(self, task_id: str | None = None, lamix_dir: str | None = None) -> None:
         self._pid = os.getpid()
         self._task_id = task_id
-        self._record = HeartbeatRecord(pid=self._pid, task_id=task_id)
-        self._lock = threading.Lock()
-        self._stopped = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._heartbeat_file: Path | None = None
+        self._lamix_dir = Path(lamix_dir) if lamix_dir else LAMIX_DIR
+        self._hb_dir = self._lamix_dir / "heartbeat"
+        self._process: subprocess.Popen | None = None
 
     def _heartbeat_path(self) -> Path:
-        return HEARTBEAT_DIR / f"{self._pid}.json"
-
-    def _write(self) -> None:
-        """原子写入心跳文件。"""
-        HEARTBEAT_DIR.mkdir(parents=True, exist_ok=True)
-        path = self._heartbeat_path()
-        tmp = path.with_suffix(".tmp")
-        with self._lock:
-            self._record.touch()
-            data = self._record.to_dict()
-        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(path)
-        self._heartbeat_file = path
+        return self._hb_dir / f"{self._pid}.json"
 
     def _check_stop_flag(self) -> bool:
         """检查外部停止信号（Windows 优雅终止机制）。
@@ -101,56 +146,61 @@ class HeartbeatManager:
         Returns:
             True 表示检测到停止信号
         """
-        flag_path = HEARTBEAT_DIR.parent / "stop.flag"
+        flag_path = self._hb_dir.parent / "stop.flag"
         if flag_path.exists():
             try:
-                # 检查 flag 文件中的 pid 是否匹配当前进程
                 content = flag_path.read_text(encoding="utf-8").strip()
                 if content.isdigit() and int(content) == self._pid:
                     flag_path.unlink()
                     return True
             except (OSError, ValueError):
-                # 如果读取失败或 pid 不匹配，忽略
                 pass
         return False
 
-    def _loop(self) -> None:
-        """心跳线程主循环。"""
-        while not self._stopped.wait(HEARTBEAT_INTERVAL):
-            # 检查外部停止信号（Windows 优雅终止）
-            if self._check_stop_flag():
-                self.stop(user_initiated=False)
-                break
-
-            try:
-                self._write()
-            except Exception:
-                pass  # 心跳写入失败不崩溃
-
     def start(self) -> None:
-        """启动心跳线程，写入第一条记录。"""
-        self._write()
-        self._thread = threading.Thread(target=self._loop, daemon=True, name="HeartbeatThread")
-        self._thread.start()
+        """启动心跳子进程。"""
+        import multiprocessing as mp
+
+        self._process = mp.Process(
+            target=_heartbeat_worker,
+            args=(self._pid, self._task_id, HEARTBEAT_INTERVAL, str(self._lamix_dir)),
+            name="HeartbeatProcess",
+            daemon=True,
+        )
+        self._process.start()
 
     def stop(self, user_initiated: bool = False) -> None:
-        """停止心跳线程。
+        """停止心跳子进程。
 
         Args:
-            user_initiated: True 表示用户主动停止（不删除心跳文件，供 watchdog 识别）
+            user_initiated: True 表示用户主动停止（写 user_stopped 标记，供 watchdog 识别）
         """
-        self._stopped.set()
-        if self._thread is not None:
-            self._thread.join(timeout=5)
+        if self._process is None:
+            return
+
         if user_initiated:
-            with self._lock:
-                self._record.user_stopped = True
+            # 通过 stop flag 文件通知子进程优雅退出（会写 user_stopped=True）
+            flag_path = self._hb_dir.parent / "stop.flag"
             try:
-                self._write()
-            except Exception:
+                self._hb_dir.mkdir(parents=True, exist_ok=True)
+                flag_path.write_text(str(self._pid), encoding="utf-8")
+            except OSError:
                 pass
+            # 等待子进程处理 stop flag 并退出
+            self._process.join(timeout=HEARTBEAT_INTERVAL + 3)
         else:
-            # 非用户主动退出，删除心跳文件
+            # 非用户主动退出，直接终止子进程
+            self._process.terminate()
+            self._process.join(timeout=5)
+
+        # 如果子进程还活着，强制杀掉
+        if self._process.is_alive():
+            self._process.kill()
+            self._process.join(timeout=3)
+
+        self._process = None
+
+        if not user_initiated:
             self._remove()
 
     def _remove(self) -> None:
@@ -161,12 +211,6 @@ class HeartbeatManager:
                 path.unlink()
             except OSError:
                 pass
-
-    def update_task_id(self, task_id: str | None) -> None:
-        """更新当前任务 ID。"""
-        with self._lock:
-            self._record.task_id = task_id
-        self._write()
 
 
 def load_heartbeat(path: Path) -> HeartbeatRecord | None:
@@ -195,7 +239,7 @@ def read_all_heartbeats() -> dict[int, HeartbeatRecord]:
 
 def is_process_alive(pid: int) -> bool:
     """跨平台检查进程是否存活。
-    
+
     Windows 上用 tasklist（os.kill(pid, 0) 在该平台不可靠，
     进程已死仍可能返回 True），其他平台用 os.kill(pid, 0)。
     """
