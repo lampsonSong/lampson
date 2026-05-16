@@ -843,17 +843,34 @@ def _start_memory_watcher(mgr) -> None:
     logger.info("[daemon] memory watcher 已启动")
 
 
+import hashlib
+import json
+
+
+def _config_fingerprint(cfg: dict) -> str:
+    """计算配置的指纹，用于检测变更。"""
+    key_sections = {
+        "llm": cfg.get("llm", {}),
+        "models": cfg.get("models", []),
+        "feishu": cfg.get("feishu", {}),
+        "retrieval": cfg.get("retrieval", {}),
+        "skills_management": cfg.get("skills_management", {}),
+    }
+    serialized = json.dumps(key_sections, sort_keys=True, default=str)
+    return hashlib.md5(serialized.encode()).hexdigest()
+
+
 def _start_config_watcher(pm, config: dict) -> None:
     """启动 config.yaml 热重载检测线程。
 
-    每 30 秒检查 config.yaml，只在飞书凭证（app_id/app_secret）变更时触发热重载。
-    owner 身份等字段变更不触发（不需要重连 WS）。
+    每 30 秒检查 config.yaml，在任何关键配置（llm/models/feishu/retrieval/skills_management）变更时触发热重载。
     """
-    from src.core.config import CONFIG_PATH
+    from src.core.config import CONFIG_PATH, load_config
 
     def _watcher():
         last_mtime = CONFIG_PATH.stat().st_mtime if CONFIG_PATH.exists() else 0
-        last_creds = _get_feishu_credentials(CONFIG_PATH)
+        last_fingerprint = _config_fingerprint(config)
+        mgr = get_session_manager(config)
         while not _shutdown.is_set():
             _shutdown.wait(30)
             if _shutdown.is_set():
@@ -865,22 +882,28 @@ def _start_config_watcher(pm, config: dict) -> None:
                 if mtime == last_mtime:
                     continue
                 last_mtime = mtime
-                # 只在飞书凭证变更时才触发热重载
-                new_creds = _get_feishu_credentials(CONFIG_PATH)
-                if new_creds == last_creds:
-                    logger.warning("[daemon] 配置文件已变更，但飞书凭证未变，跳过热重载")
+
+                # 重新加载配置并计算指纹
+                new_config = load_config()
+                new_fingerprint = _config_fingerprint(new_config)
+                if new_fingerprint == last_fingerprint:
+                    logger.debug("[daemon] 配置文件已变更，但关键字段未变，跳过热重载")
                     continue
-                last_creds = new_creds
-                logger.info("[daemon] 飞书凭证已变更，热重载飞书 adapter...")
-                _reload_feishu_adapter(pm)
+
+                logger.info(f"[daemon] 配置文件已变更（fingerprint: {last_fingerprint[:8]} -> {new_fingerprint[:8]}），触发热重载...")
+                last_fingerprint = new_fingerprint
+                _reload_config(pm, mgr, config, new_config)
+                config.clear()
+                config.update(new_config)
             except Exception as e:
                 logger.error(f"[daemon] config watcher 异常: {e}")
 
     t = threading.Thread(target=_watcher, daemon=True, name="config-watcher")
     t.start()
+    logger.info("[daemon] config watcher 已启动")
 
 
-def _reload_feishu_adapter(pm) -> None:
+def _reload_feishu_adapter(pm, config: dict | None = None) -> None:
     """热重载飞书 adapter：标记旧 adapter 为 stopped，创建新的替换。
 
     不关闭旧 WS client（lark SDK 内部用 asyncio.get_event_loop()，
@@ -889,6 +912,9 @@ def _reload_feishu_adapter(pm) -> None:
     """
     from src.core.config import load_config
     from src.platforms.adapters.feishu import FeishuAdapter
+
+    if config is None:
+        config = load_config()
 
     # 1. 标记旧 adapter 为 stopped（不关闭 WS，避免 event loop 冲突）
     old_adapter = pm._adapters.get("feishu")
@@ -901,8 +927,7 @@ def _reload_feishu_adapter(pm) -> None:
             logger.error(f"[daemon] 标记旧飞书 adapter 失败: {e}")
 
     # 2. 读新配置
-    new_config = load_config()
-    feishu_cfg = new_config.get("feishu", {})
+    feishu_cfg = config.get("feishu", {})
     app_id = feishu_cfg.get("app_id", "").strip()
     app_secret = feishu_cfg.get("app_secret", "").strip()
 
@@ -916,7 +941,7 @@ def _reload_feishu_adapter(pm) -> None:
             "app_id": app_id,
             "app_secret": app_secret,
         })
-        mgr = get_session_manager(new_config)
+        mgr = get_session_manager(config)
         new_adapter.session_manager = mgr
         pm.register(new_adapter)
         new_adapter.start()
@@ -924,6 +949,135 @@ def _reload_feishu_adapter(pm) -> None:
     except Exception as e:
         logger.error(f"[daemon] 热重载飞书 adapter 失败: {e}")
 
+
+
+
+def _reload_config(pm, mgr, old_config: dict, new_config: dict) -> None:
+    """热重载配置变更。
+
+    对比新旧配置，只处理实际变更的部分：
+    - feishu: 凭证变更 → 重建 FeishuAdapter
+    - llm/models: 模型配置变更 → 重建所有 session 的 LLM 客户端
+    - retrieval/skills_management: 检索配置变更 → 更新 session 配置并刷新索引
+    """
+    from src.core.config import get_retrieval_config, get_embedding_config
+
+    # 1. 检测 feishu 变更
+    old_feishu = old_config.get("feishu", {})
+    new_feishu = new_config.get("feishu", {})
+    if old_feishu.get("app_id") != new_feishu.get("app_id") or \
+       old_feishu.get("app_secret") != new_feishu.get("app_secret"):
+        logger.info("[daemon] feishu 凭证变更，热重载飞书 adapter...")
+        _reload_feishu_adapter(pm, new_config)
+
+    # 2. 检测 llm/models 变更
+    old_llm = old_config.get("llm", {})
+    new_llm = new_config.get("llm", {})
+    old_models = old_config.get("models", [])
+    new_models = new_config.get("models", [])
+
+    llm_changed = (
+        old_llm.get("api_key") != new_llm.get("api_key") or
+        old_llm.get("base_url") != new_llm.get("base_url") or
+        old_llm.get("model") != new_llm.get("model") or
+        old_models != new_models
+    )
+
+    if llm_changed:
+        logger.info("[daemon] LLM/模型配置变更，热重载 LLM 客户端...")
+        _reload_llm_clients(mgr, new_config)
+
+    # 3. 检测 retrieval/skills_management 变更
+    old_retrieval = old_config.get("retrieval", {})
+    new_retrieval = new_config.get("retrieval", {})
+    old_sm = old_config.get("skills_management", {})
+    new_sm = new_config.get("skills_management", {})
+
+    if old_retrieval != new_retrieval or old_sm != new_sm:
+        logger.info("[daemon] retrieval/skills_management 配置变更，更新 session 配置...")
+        retrieval_cfg = get_retrieval_config(new_config)
+
+        with mgr._lock:
+            sessions = list(mgr._sessions.values())
+            if mgr._cli_session is not None:
+                sessions.append(mgr._cli_session)
+
+        for session in sessions:
+            try:
+                session.retrieval_config = retrieval_cfg
+                if session.agent:
+                    session.agent.retrieval_config = retrieval_cfg
+            except Exception as e:
+                logger.error(f"[daemon] 更新 session retrieval_config 失败: {e}")
+
+        mgr.refresh_all_indices()
+        logger.info("[daemon] retrieval/skills_management 配置已更新")
+
+
+def _reload_llm_clients(mgr, config: dict) -> None:
+    """重建所有 session 的 LLM 客户端（主模型 + fallback）。"""
+    from src.core.session import _create_llm, _create_llm_from_model_config
+    from src.core.compaction import _build_compaction_config
+
+    primary_llm, primary_adapter = _create_llm(config, channel="cli")
+    primary_name = config["llm"]["model"]
+    primary_cw = config["llm"].get("context_window")
+
+    # 构建多模型客户端字典
+    llm_clients: dict[str, Any] = {
+        primary_name: {
+            "llm": primary_llm,
+            "adapter": primary_adapter,
+            "context_window": primary_cw,
+        }
+    }
+
+    primary_api_key = config["llm"].get("api_key", "")
+    primary_base_url = config["llm"].get("base_url", "")
+    for model_cfg in config.get("models", []):
+        name = model_cfg["name"]
+        if name not in llm_clients:
+            llm_i, adapter_i = _create_llm_from_model_config(
+                model_cfg,
+                fallback_api_key=primary_api_key,
+                fallback_base_url=primary_base_url,
+                channel="cli",
+            )
+            llm_clients[name] = {
+                "llm": llm_i,
+                "adapter": adapter_i,
+                "context_window": model_cfg.get("context_window"),
+            }
+
+    # 构建 fallback_models
+    fallback_models: list[tuple[Any, Any]] = []
+    for name, cw in llm_clients.items():
+        if name != primary_name:
+            fallback_models.append((cw["llm"], cw["adapter"]))
+
+    compaction_cfg = _build_compaction_config(config, model_context_window=primary_cw)
+
+    with mgr._lock:
+        sessions = list(mgr._sessions.values())
+        if mgr._cli_session is not None:
+            sessions.append(mgr._cli_session)
+
+    for session in sessions:
+        try:
+            session.agent.llm = primary_llm
+            session.agent.adapter = primary_adapter
+            session.agent._compaction_config = compaction_cfg
+            session.agent.fallback_models = fallback_models
+            session.agent.set_context()
+
+            session.llm_clients = llm_clients
+            session._current_model_name = primary_name
+
+            logger.info(f"[daemon] session {session.session_id} 的 LLM 客户端已重建")
+        except Exception as e:
+            logger.error(f"[daemon] 重建 session LLM 客户端失败: {e}")
+
+    logger.info("[daemon] 所有 session 的 LLM 客户端已重建")
 
 def _trigger_safe_mode(pm, mgr) -> None:
     """由 FeishuAdapter 触发：切换到 safe_mode 后再恢复 daemon。"""
