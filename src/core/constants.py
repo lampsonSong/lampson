@@ -11,7 +11,7 @@ IDLE_TIMEOUT_SECONDS: int = IDLE_TIMEOUT_MINUTES * 60
 
 # ── 心跳 / Watchdog ──
 HEARTBEAT_INTERVAL: int = 10    # 心跳文件写入间隔（秒）
-HEARTBEAT_TIMEOUT: int = 30     # 无心跳则认为死亡（秒）
+HEARTBEAT_TIMEOUT: int = 90     # 无心跳则认为死亡（秒），需远大于 HEARTBEAT_INTERVAL(10s)，避免 GIL/调度抖动误判
 WATCHDOG_INTERVAL: int = 10     # watchdog 检查频率（秒）
 
 # ── 审计 ──
