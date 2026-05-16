@@ -835,6 +835,10 @@ class Agent:
                         logger.info(f"[后台反思] 沉淀完成: {'; '.join(hints)}")
                         if _notify:
                             _notify(f"📝 反思沉淀完成:\n" + "\n".join(f"  • {h}" for h in hints))
+                    elif _notify:
+                        _notify("📝 反思完成，暂无新内容需要沉淀")
+                elif _notify:
+                    _notify("📝 反思完成，暂无新内容需要沉淀")
             except Exception as e:
                 logger.warning(f"[后台反思] 失败: {e}")
 
