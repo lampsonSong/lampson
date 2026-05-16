@@ -398,6 +398,13 @@ class FeishuAdapter(BasePlatformAdapter):
             if not text:
                 return
 
+            # 处理引用消息：提取 parent_id，拉取被引用消息内容拼接到文本前面
+            parent_id = getattr(message, "parent_id", None)
+            quoted_text = self._fetch_quoted_text(parent_id) if parent_id else None
+
+            if quoted_text:
+                text = f"[引用消息]\n{quoted_text}\n---\n{text}"
+
             reaction_id = self._add_reaction(message_id)
 
             msg = PlatformMessage(
@@ -451,6 +458,32 @@ class FeishuAdapter(BasePlatformAdapter):
                 return " ".join(parts).strip()
 
         return ""
+
+    def _fetch_quoted_text(self, parent_id: str) -> str | None:
+        """根据 parent_id 获取被引用消息的文本内容。"""
+        try:
+            from src.feishu.client import get_client
+            client = get_client()
+            msg_data = client.get_message(parent_id)
+            if not msg_data:
+                return None
+
+            # 飞书单条消息 API 返回 data.items 数组
+            items = msg_data.get("items", [])
+            item = items[0] if items and isinstance(items, list) else msg_data
+
+            # 尝试多种路径提取 content：items[0].body.content / body.content / content
+            content = ""
+            body = item.get("body", {})
+            if isinstance(body, dict):
+                content = body.get("content", "")
+            if not content:
+                content = item.get("content", "")
+            if content:
+                return self._extract_text(content)
+        except Exception as e:
+            logger.warning(f"[feishu] 获取引用消息失败 (parent_id={parent_id}): {e}")
+        return None
 
     # ─── 调度入口（供 PlatformManager.dispatch 调用）────────────────────────
 

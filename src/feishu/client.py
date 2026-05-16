@@ -258,6 +258,23 @@ class FeishuClient:
         items = data.get("data", {}).get("items", [])
         return items
 
+    def get_message(self, message_id: str) -> dict[str, Any] | None:
+        """获取单条消息详情。
+
+        Returns:
+            消息 dict（含 body/content 等）或 None（消息不存在或无权限）。
+        """
+        resp = self._http.get(
+            f"{FEISHU_BASE}/im/v1/messages/{message_id}",
+            headers=self._headers(),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") != 0:
+            logger.warning(f"[feishu] 获取消息 {message_id} 失败: {data.get('msg')} (code={data.get('code')})")
+            return None
+        return data.get("data", {})
+
     def get_bot_info(self) -> dict[str, Any]:
         """获取机器人自身信息，用于测试连接是否正常。"""
         resp = self._http.get(
