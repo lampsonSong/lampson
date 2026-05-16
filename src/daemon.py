@@ -157,23 +157,23 @@ def _signal_handler(signum: int, _frame: object | None) -> None:
 
 
 def _check_single_instance() -> None:
-    """检查是否已有 daemon 实例在运行，若有则退出。"""
-    if not _DAEMON_PID_PATH.exists():
-        return
+    """通过进程查找确认是否已有 daemon 实例在运行，若有则退出。
+    
+    不依赖 PID 文件——watchdog 和直接启动都通过 pgrep 查找。
+    """
+    import subprocess
     try:
-        old_pid = int(_DAEMON_PID_PATH.read_text(encoding="utf-8").strip())
-    except (ValueError, OSError):
-        return
-    if old_pid == os.getpid():
-        return
-    # 检查旧进程是否还活着
-    try:
-        os.kill(old_pid, 0)  # 发信号0，不实际杀，只检测存活
-    except (ProcessLookupError, PermissionError):
-        # 旧进程已死，可以启动
-        return
-    logger.error(f"[daemon] 已有 daemon 实例在运行 (PID={old_pid})，退出")
-    sys.exit(0)
+        result = subprocess.run(
+            ["pgrep", "-f", "(src\\.daemon|lamix.*gateway)"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            pids = [int(p) for p in result.stdout.strip().split("\n") if p.strip() and int(p.strip()) != os.getpid()]
+            if pids:
+                logger.error(f"[daemon] 已有 daemon 实例在运行 (PID={pids[0]})，退出")
+                sys.exit(0)
+    except Exception:
+        pass
 
 
 def _write_daemon_pid() -> None:

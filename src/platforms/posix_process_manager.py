@@ -66,6 +66,10 @@ class PosixProcessManager(ProcessManager):
     def kill_process(self, pid: int, graceful: bool = True) -> bool:
         """通过 SIGTERM/SIGKILL 终止进程。"""
         if not self.is_alive(pid):
+            # 进程已死，清理 PID 文件
+            from src.core.config import LAMIX_DIR
+            pid_file = LAMIX_DIR / "logs" / "daemon.pid"
+            pid_file.unlink(missing_ok=True)
             return True
 
         try:
