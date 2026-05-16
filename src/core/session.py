@@ -765,18 +765,20 @@ class Session:
         except Exception:
             pass
 
-    def load_session(self, session_id: str = "", limit: int | None = None) -> str:
-        """加载指定或最近 session 的对话历史到当前 llm.messages。
+    def load_session(self, session_id: str = "", limit: int | None = None,
+                     inject: bool = False) -> str:
+        """加载指定或最近 session 的对话历史。
 
-        从最后一个 compaction 点（segment_boundary）之后开始加载，
-        之前的消息已归档到 skill/project 文件中。
+        默认只返回摘要文本（不注入 llm.messages），避免撑爆 context。
+        inject=True 时完整注入（仅 /resume 命令使用）。
 
         Args:
             session_id: 要加载的 session ID。为空则加载最近的。
             limit: 已废弃，保留参数兼容性，不使用。
+            inject: True 时完整注入 llm.messages，False 只返回摘要。
 
         Returns:
-            加载结果，包含全部对话内容。
+            摘要或完整对话内容。
         """
         if not session_id:
             sessions = session_store.list_recent_sessions(limit=1, ended_only=True)
@@ -792,22 +794,12 @@ class Session:
             from_segment = boundary.get("segment", 0) + 1
             segment_info = f"，从 segment {from_segment} 开始（之前已 compaction 归档）"
 
-        # 加载消息（不限制条数）
+        # 加载消息
         messages = session_store.get_session_messages(session_id, from_segment=from_segment)
         if not messages:
             return f"Session {session_id} 没有消息记录。"
 
-        # 构建注入消息 + 返回值内容
-        # 完整重建 OpenAI messages 结构：
-        # user → assistant(tool_calls) → tool → assistant → ...
-        # jsonl 中的顺序：tool_call, tool_result 交替，assistant 只有最终回复
-        # 需要把连续的 tool_call 归组为带 tool_calls 的 assistant 消息
-        llm = self.agent.llm
-        inject_msgs: list[dict] = []
-        content_lines: list[str] = []
-
-        # 第一步：预处理——把连续的 tool_call 归组为 assistant 消息
-        # 先按序收集所有有意义的行，跳过 system_prompt / llm_call / llm_error 等元数据
+        # 预处理——按类型收集有意义的消息行
         ordered: list[dict[str, Any]] = []
         for msg in messages:
             msg_type = msg.get("type", "")
@@ -820,9 +812,101 @@ class Session:
                 ordered.append({"kind": "tool_call", "data": msg})
             elif msg_type == "tool_result":
                 ordered.append({"kind": "tool_result", "data": msg})
-            # 其他类型（system_prompt, llm_call, llm_error, segment_boundary 等）跳过
 
-        # 第二步：归组——连续的 tool_call + 后续的 tool_result 归为一个 assistant(tool_calls) 消息
+        if not ordered:
+            return f"Session {session_id} 没有可加载的对话消息。"
+
+        # ── 摘要模式（默认）：只构建可读摘要，不注入 messages ──
+        if not inject:
+            return self._build_session_summary(session_id, ordered, segment_info)
+
+        # ── 完整注入模式（仅 /resume 使用）──
+        return self._inject_session_full(session_id, ordered, segment_info)
+
+    # ── 摘要限制常量 ──
+    _SUMMARY_MAX_CHARS = 4000     # 摘要总字符上限
+    _SUMMARY_MSG_PREVIEW = 150    # 每条消息预览字符数
+    _SUMMARY_MAX_MSGS = 50        # 最多展示的消息条数
+
+    def _build_session_summary(
+        self, session_id: str, ordered: list[dict], segment_info: str,
+    ) -> str:
+        """构建 session 摘要（不注入 messages，只返回可读文本）。"""
+        content_lines: list[str] = []
+        msg_count = 0
+        total_chars = 0
+
+        for item in ordered:
+            if msg_count >= self._SUMMARY_MAX_MSGS:
+                content_lines.append(f"...（共 {len(ordered)} 条，已截断展示前 {msg_count} 条）")
+                break
+
+            line = self._summarize_item(item)
+            if not line:
+                continue
+
+            msg_count += 1
+            # 检查总字符是否超限
+            if total_chars + len(line) > self._SUMMARY_MAX_CHARS:
+                content_lines.append(f"...（摘要已达 {self._SUMMARY_MAX_CHARS} 字符上限，剩余内容省略）")
+                break
+
+            content_lines.append(line)
+            total_chars += len(line)
+
+        summary = "\n".join(content_lines)
+        return (
+            f"[session {session_id} 摘要{segment_info}，共 {len(ordered)} 条消息]\n\n"
+            f"{summary}"
+        )
+
+    def _summarize_item(self, item: dict) -> str:
+        """将一条消息转为摘要行（截断到 _SUMMARY_MSG_PREVIEW 字符）。"""
+        kind = item["kind"]
+        preview = self._SUMMARY_MSG_PREVIEW
+
+        if kind == "user":
+            content = self._extract_text(item["data"].get("content", ""))
+            return f"[用户] {content[:preview]}"
+
+        elif kind == "assistant":
+            content = self._extract_text(item["data"].get("content", ""))
+            if content:
+                return f"[Lamix] {content[:preview]}"
+            return ""
+
+        elif kind == "tool_call":
+            tc_name = item["data"].get("name", "?")
+            tc_args = item["data"].get("arguments", {})
+            args_str = tc_args if isinstance(tc_args, str) else json.dumps(tc_args, ensure_ascii=False)
+            return f"  [tool: {tc_name}({args_str[:60]})]"
+
+        elif kind == "tool_result":
+            tr_content = item["data"].get("result_inline") or ""
+            return f"  [result: {str(tr_content)[:preview]}]"
+
+        return ""
+
+    @staticmethod
+    def _extract_text(content: str | list) -> str:
+        """从 content 字段提取纯文本。"""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return " ".join(
+                b.get("text", "") for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            )
+        return str(content)
+
+    def _inject_session_full(
+        self, session_id: str, ordered: list[dict], segment_info: str,
+    ) -> str:
+        """完整注入 session 到 llm.messages（仅 /resume 使用）。"""
+        llm = self.agent.llm
+        inject_msgs: list[dict] = []
+        content_lines: list[str] = []
+
         i = 0
         while i < len(ordered):
             item = ordered[i]
@@ -830,15 +914,10 @@ class Session:
             if item["kind"] == "user":
                 content = item["data"].get("content", "")
                 inject_msgs.append({"role": "user", "content": content})
-                if isinstance(content, str) and content:
-                    content_lines.append(f"[用户] {content}")
-                elif isinstance(content, list):
-                    texts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
-                    content_lines.append(f"[用户] {' '.join(texts)}")
+                content_lines.append(f"[用户] {self._extract_text(content)}")
                 i += 1
 
             elif item["kind"] == "tool_call":
-                # 收集连续的 tool_call
                 tool_calls_group: list[dict[str, Any]] = []
                 tc_ids: list[str] = []
                 tc_names_list: list[str] = []
@@ -847,7 +926,6 @@ class Session:
                     tc_id = tc_data.get("id", "")
                     tc_name = tc_data.get("name", "")
                     tc_args = tc_data.get("arguments", {})
-                    # jsonl 里 arguments 可能已经是 JSON string，避免双重编码
                     args_str = tc_args if isinstance(tc_args, str) else json.dumps(tc_args, ensure_ascii=False)
                     tool_calls_group.append({
                         "id": tc_id,
@@ -858,22 +936,18 @@ class Session:
                     tc_names_list.append(tc_name)
                     i += 1
 
-                # 构建 assistant 消息（带 tool_calls）
-                assistant_entry: dict[str, Any] = {
+                inject_msgs.append({
                     "role": "assistant",
                     "content": "",
                     "tool_calls": tool_calls_group,
-                }
-                inject_msgs.append(assistant_entry)
+                })
                 content_lines.append(f"  [Lamix tool_calls: {', '.join(tc_names_list)}]")
 
-                # 收集后续的 tool_result（按 id 匹配）
                 result_ids_seen: set[str] = set()
                 while i < len(ordered) and ordered[i]["kind"] == "tool_result":
                     tr_data = ordered[i]["data"]
                     tr_id = tr_data.get("id", "")
                     if tr_id in tc_ids:
-                        # result_inline 可能是 null（key 存在但值为 None），确保转为 string
                         tr_content = tr_data.get("result_inline") or ""
                         inject_msgs.append({
                             "role": "tool",
@@ -883,7 +957,6 @@ class Session:
                         result_ids_seen.add(tr_id)
                     i += 1
 
-                # 补充缺失的 tool_result（session 中途关闭等导致 tool_call 无对应 result）
                 for missing_id in tc_ids:
                     if missing_id not in result_ids_seen:
                         inject_msgs.append({
@@ -893,22 +966,15 @@ class Session:
                         })
 
             elif item["kind"] == "assistant":
-                # 最终回复 assistant 消息（无 tool_calls）
                 content = item["data"].get("content", "")
                 entry = {"role": "assistant", "content": content}
-                # 如果 jsonl 里有 tool_calls 字段也带上（兼容已有数据）
                 if item["data"].get("tool_calls"):
                     entry["tool_calls"] = item["data"]["tool_calls"]
                 inject_msgs.append(entry)
-                if isinstance(content, str) and content:
-                    content_lines.append(f"[Lamix] {content}")
-                elif isinstance(content, list):
-                    texts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
-                    content_lines.append(f"[Lamix] {' '.join(texts)}")
+                content_lines.append(f"[Lamix] {self._extract_text(content)}")
                 i += 1
 
             elif item["kind"] == "tool_result":
-                # 孤立的 tool_result（没有前面的 tool_call），直接作为 tool 消息
                 tr_data = item["data"]
                 tr_content = tr_data.get("result_inline") or ""
                 inject_msgs.append({
@@ -929,7 +995,6 @@ class Session:
             llm.messages[1:1] = inject_msgs
         else:
             llm.messages[:0] = inject_msgs
-        # 重置上次 token 计数，让 _estimate_context_tokens 基于实际 messages 重新计算
         self.agent.last_prompt_tokens = 0
 
         content_display = "\n".join(content_lines)
@@ -939,25 +1004,20 @@ class Session:
             f"{content_display}"
         )
 
-        # 同时把内容摘要发送到当前渠道（让用户在飞书/CLI 看到加载的内容）
+        # 通知用户
         try:
-            # 截断规则：如果超过 140 字，只显示最近 140 字
             display_content = content_display
             if len(content_display) > 140:
                 display_content = "..." + content_display[-140:]
-
             summary = (
                 f"已加载 session {session_id} 的对话历史"
                 f"（共 {len(inject_msgs)} 条{segment_info}）\n\n"
                 f"{display_content}"
             )
-
-            # 优先使用 partial_sender，fallback 到 interim_sender
             sender = self.partial_sender or getattr(self.agent, "interim_sender", None)
             if sender:
                 sender(summary)
         except Exception:
-            # 发送失败不影响返回值
             pass
 
         return result_text
@@ -1451,9 +1511,9 @@ class Session:
     def _handle_resume(self, parts: list[str]) -> str:
         """处理 /resume 命令：列出或加载历史 session。"""
         if len(parts) >= 2:
-            # /resume <id> → 加载指定 session
+            # /resume <id> → 完整加载指定 session（注入 messages）
             session_id = parts[1]
-            return self.load_session(session_id=session_id)
+            return self.load_session(session_id=session_id, inject=True)
 
         # /resume → 列出最近 5 个 session
         try:
