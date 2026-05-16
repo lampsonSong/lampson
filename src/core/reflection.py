@@ -39,11 +39,21 @@ _llm_client: Any = None
 # 全局 SkillIndex（由 Session 初始化时注入）
 _skill_index: Any = None
 
+# 全局 Fallback 模型列表（由 Session 初始化时注入）
+# 类型: list[tuple[LLMClient, BaseModelAdapter]]
+_fallback_llms: list[Any] = []
+
 
 def set_llm_client(client: Any) -> None:
     """由 Session 初始化时调用，注入当前 LLM Client。"""
     global _llm_client
     _llm_client = client
+
+
+def set_fallback_llms(fallback_llms: list[Any]) -> None:
+    """由 Session 初始化时调用，注入 fallback 模型列表。"""
+    global _fallback_llms
+    _fallback_llms = fallback_llms or []
 
 
 def set_skill_index(index: Any) -> None:
@@ -319,22 +329,41 @@ def reflect_and_learn(
         existing_info=existing_info,
     ) + extra_context
 
-    try:
-        resp = llm_client.client.chat.completions.create(
-            model=llm_client.model,
+    def _call_reflect_llm(target_llm: Any) -> list[dict[str, Any]]:
+        """调用单个 LLM 执行反思，返回 learnings 列表。"""
+        import re
+
+        resp = target_llm.client.chat.completions.create(
+            model=target_llm.model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
             max_tokens=2048,
         )
         raw = (resp.choices[0].message.content or "").strip()
+        # 移除 MiniMax 等模型的 <think>...</think> thinking 标签，防止污染 JSON
+        raw = re.sub(r'<think>[\s\S]*?</think>', '', raw)
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1]
             raw = raw.rsplit("```", 1)[0].strip()
         result = json.loads(raw)
         return result.get("learnings", [])
+
+    # 主模型
+    try:
+        return _call_reflect_llm(llm_client)
     except Exception as e:
-        logger.warning(f"反思 LLM 调用失败: {e}")
-        return []
+        logger.warning(f"反思 LLM {llm_client.model} 调用失败: {e}")
+
+    # Fallback 降级
+    global _fallback_llms
+    for fb_llm, _ in _fallback_llms:
+        try:
+            logger.info(f"反思 fallback 使用: {fb_llm.model}")
+            return _call_reflect_llm(fb_llm)
+        except Exception as e2:
+            logger.warning(f"反思 fallback {fb_llm.model} 失败: {e2}")
+
+    return []
 
 
 def execute_learnings(learnings: list[dict[str, Any]]) -> list[str]:

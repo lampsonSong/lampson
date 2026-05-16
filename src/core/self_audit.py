@@ -92,7 +92,7 @@ class AuditReport:
 # ── 扫描器 ───────────────────────────────────────────────────────────────────
 
 def scan_skills(auto_fix: bool = False) -> list[AuditFinding]:
-    """扫描所有 skills（平铺 .md 格式），返回审计发现列表。
+    """扫描所有 skills（平铺 .md 格式 + 子目录 SKILL.md 格式），返回审计发现列表。
 
     注意：skill 的触发逻辑已改为 LLM 判断，不再检查 triggers 字段。
     auto_fix=True 时：缺少 frontmatter 自动生成（name 从 path.stem 取）。
@@ -102,8 +102,9 @@ def scan_skills(auto_fix: bool = False) -> list[AuditFinding]:
     if not SKILLS_DIR.exists():
         return findings
 
-    for skill_file in SKILLS_DIR.glob("*.md"):
-        if skill_file.name.startswith("."):
+    for skill_file in SKILLS_DIR.glob("**/*.md"):
+        # 跳过 .archived 目录和隐藏文件
+        if ".archived" in skill_file.parts or skill_file.name.startswith("."):
             continue
 
         try:
@@ -246,8 +247,8 @@ def scan_skill_overlap() -> list[AuditFinding]:
 
     skill_infos: list[tuple[str, str, set[str]]] = []
 
-    for skill_file in SKILLS_DIR.glob("*.md"):
-        if skill_file.name.startswith("."):
+    for skill_file in SKILLS_DIR.glob("**/*.md"):
+        if ".archived" in skill_file.parts or skill_file.name.startswith("."):
             continue
         try:
             raw = skill_file.read_text(encoding="utf-8")
@@ -263,7 +264,8 @@ def scan_skill_overlap() -> list[AuditFinding]:
         except Exception:
             continue
 
-        name = meta.get("name", skill_file.stem)
+        sname = skill_file.parent.name if skill_file.parent != SKILLS_DIR else skill_file.stem
+        name = meta.get("name", sname)
         description = meta.get("description", "")
         if not description:
             continue
@@ -300,7 +302,7 @@ def scan_skill_overlap() -> list[AuditFinding]:
 
     return findings
 
-def scan_projects() -> list[AuditFinding]:
+def scan_projects(auto_fix: bool = False) -> list[AuditFinding]:
     """扫描所有 projects，返回审计发现列表。"""
     findings: list[AuditFinding] = []
 
@@ -328,13 +330,26 @@ def scan_projects() -> list[AuditFinding]:
 
         first_line = lines[0].strip()
         if not first_line.startswith("# "):
-            findings.append(AuditFinding(
-                severity="warning",
-                category="project",
-                target=name,
-                message="第一行不是 markdown 标题（# 项目名），格式不规范",
-                suggestion="第一行改为 # 项目名",
-            ))
+            if auto_fix:
+                new_content = "# " + name + "\n\n" + content
+                project_md.write_text(new_content, encoding="utf-8")
+                findings.append(AuditFinding(
+                    severity="warning",
+                    category="project",
+                    target=name,
+                    message="第一行不是 markdown 标题（# 项目名），格式不规范",
+                    suggestion="第一行改为 # 项目名",
+                    fixed=True,
+                    fix_detail="已自动添加标题 '# " + name + "'",
+                ))
+            else:
+                findings.append(AuditFinding(
+                    severity="warning",
+                    category="project",
+                    target=name,
+                    message="第一行不是 markdown 标题（# 项目名），格式不规范",
+                    suggestion="第一行改为 # 项目名",
+                ))
 
         # 检查是否只有标题没有内容
         if len(content.strip()) < len(first_line) + 5:
@@ -383,18 +398,31 @@ def scan_projects() -> list[AuditFinding]:
         # 检查是否有未闭合的代码块
         code_blocks = re.findall(r"```", content)
         if len(code_blocks) % 2 != 0:
-            findings.append(AuditFinding(
-                severity="warning",
-                category="project",
-                target=name,
-                message="存在未闭合的代码块（``` 数量为奇数）",
-                suggestion="检查并修复代码块配对",
-            ))
+            if auto_fix:
+                new_content = content + "\n```"
+                project_md.write_text(new_content, encoding="utf-8")
+                findings.append(AuditFinding(
+                    severity="warning",
+                    category="project",
+                    target=name,
+                    message="存在未闭合的代码块（``` 数量为奇数）",
+                    suggestion="检查并修复代码块配对",
+                    fixed=True,
+                    fix_detail="已自动在文件末尾添加 ``` 闭合",
+                ))
+            else:
+                findings.append(AuditFinding(
+                    severity="warning",
+                    category="project",
+                    target=name,
+                    message="存在未闭合的代码块（``` 数量为奇数）",
+                    suggestion="检查并修复代码块配对",
+                ))
 
     return findings
 
 
-def scan_skill_scripts() -> list[AuditFinding]:
+def scan_skill_scripts(auto_fix: bool = False) -> list[AuditFinding]:
     """扫描所有 skills/*/scripts/ 下的 Python 脚本，返回审计发现列表。"""
     findings: list[AuditFinding] = []
 
@@ -460,32 +488,90 @@ def scan_skill_scripts() -> list[AuditFinding]:
         has_schema = "TOOL_SCHEMA" in code
         has_runner = "TOOL_RUNNER" in code
         if has_schema and not has_runner:
-            findings.append(AuditFinding(
-                severity="warning",
-                category="module",
-                target=target_label,
-                message="定义了 TOOL_SCHEMA 但缺少 TOOL_RUNNER，工具不会被注册",
-                suggestion="添加 TOOL_RUNNER 函数: TOOL_RUNNER(params: dict) -> str",
-            ))
+            if auto_fix:
+                schema_match = re.search(r'"name":\s*"(\w+)"', code)
+                tool_name = schema_match.group(1) if schema_match else script_name
+                stub = '\ndef TOOL_RUNNER(params: dict) -> str:\n    return "[TOOL_RUNNER] params={}".format(params)'
+                new_code = code + stub
+                py_file.write_text(new_code, encoding="utf-8")
+                code = new_code
+                has_runner = True
+                findings.append(AuditFinding(
+                    severity="warning",
+                    category="module",
+                    target=target_label,
+                    message="定义了 TOOL_SCHEMA 但缺少 TOOL_RUNNER，工具不会被注册",
+                    suggestion="添加 TOOL_RUNNER 函数: TOOL_RUNNER(params: dict) -> str",
+                    fixed=True,
+                    fix_detail="已自动生成 TOOL_RUNNER stub",
+                ))
+            else:
+                findings.append(AuditFinding(
+                    severity="warning",
+                    category="module",
+                    target=target_label,
+                    message="定义了 TOOL_SCHEMA 但缺少 TOOL_RUNNER，工具不会被注册",
+                    suggestion="添加 TOOL_RUNNER 函数: TOOL_RUNNER(params: dict) -> str",
+                ))
         if has_runner and not has_schema:
-            findings.append(AuditFinding(
-                severity="warning",
-                category="module",
-                target=target_label,
-                message="定义了 TOOL_RUNNER 但缺少 TOOL_SCHEMA，无法注册为工具",
-                suggestion="添加 TOOL_SCHEMA（OpenAI function calling schema）",
-            ))
+            if auto_fix:
+                tool_name = script_name.replace("_", " ")
+                stub = '\nTOOL_SCHEMA = {\n    "type": "function",\n    "function": {\n        "name": "" + script_name + "",\n        "description": "Skill script: " + tool_name + "",\n        "parameters": {\n            "type": "object",\n            "properties": {},\n            "required": [],\n        },\n    },\n}'
+                new_code = code + stub
+                py_file.write_text(new_code, encoding="utf-8")
+                code = new_code
+                findings.append(AuditFinding(
+                    severity="warning",
+                    category="module",
+                    target=target_label,
+                    message="定义了 TOOL_RUNNER 但缺少 TOOL_SCHEMA，无法注册为工具",
+                    suggestion="添加 TOOL_SCHEMA（OpenAI function calling schema）",
+                    fixed=True,
+                    fix_detail="已自动生成 TOOL_SCHEMA stub",
+                ))
+            else:
+                findings.append(AuditFinding(
+                    severity="warning",
+                    category="module",
+                    target=target_label,
+                    message="定义了 TOOL_RUNNER 但缺少 TOOL_SCHEMA，无法注册为工具",
+                    suggestion="添加 TOOL_SCHEMA（OpenAI function calling schema）",
+                ))
 
         # 检查 TOOL_RUNNER 函数签名
         if has_runner:
             runner_match = re.search(r"def\s+TOOL_RUNNER\s*\([^)]*\)\s*(?:->\s*\w+)?\s*:", code)
             if not runner_match:
-                findings.append(AuditFinding(
-                    severity="warning",
-                    category="module",
-                    target=target_label,
-                    message="TOOL_RUNNER 签名不符合规范，应为: def TOOL_RUNNER(params: dict) -> str:",
-                ))
+                if auto_fix:
+                    new_code = re.sub(
+                        r"def\s+TOOL_RUNNER\s*\([^)]*\)\s*(?:->\s*\w+)?\s*:",
+                        "def TOOL_RUNNER(params: dict) -> str:",
+                        code
+                    )
+                    if new_code != code:
+                        py_file.write_text(new_code, encoding="utf-8")
+                        findings.append(AuditFinding(
+                            severity="warning",
+                            category="module",
+                            target=target_label,
+                            message="TOOL_RUNNER 签名不符合规范，应为: def TOOL_RUNNER(params: dict) -> str:",
+                            fixed=True,
+                            fix_detail="已自动修正为标准签名",
+                        ))
+                    else:
+                        findings.append(AuditFinding(
+                            severity="warning",
+                            category="module",
+                            target=target_label,
+                            message="TOOL_RUNNER 签名不符合规范，应为: def TOOL_RUNNER(params: dict) -> str:",
+                        ))
+                else:
+                    findings.append(AuditFinding(
+                        severity="warning",
+                        category="module",
+                        target=target_label,
+                        message="TOOL_RUNNER 签名不符合规范，应为: def TOOL_RUNNER(params: dict) -> str:",
+                    ))
 
         # 检查文件大小（异常大的脚本）
         if len(code) > 50_000:
@@ -708,15 +794,18 @@ def run_audit(auto_fix: bool = True) -> AuditReport:
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     # 统计扫描数量
-    skills_count = len(list(SKILLS_DIR.glob("*.md"))) - len(list(SKILLS_DIR.glob(".archived/*.md"))) if SKILLS_DIR.exists() else 0
+    skills_count = sum(
+        1 for f in SKILLS_DIR.glob("**/*.md")
+        if ".archived" not in f.parts and not f.name.startswith(".")
+    ) if SKILLS_DIR.exists() else 0
     projects_count = len(list(PROJECTS_DIR.glob("*.md"))) if PROJECTS_DIR.exists() else 0
     scripts_count = len(list((SKILLS_DIR / "scripts").glob("*.py"))) if (SKILLS_DIR / "scripts").is_dir() else 0
 
     findings: list[AuditFinding] = []
     findings.extend(scan_skills(auto_fix=auto_fix))
     findings.extend(scan_skill_overlap())
-    findings.extend(scan_projects())
-    findings.extend(scan_skill_scripts())
+    findings.extend(scan_projects(auto_fix=auto_fix))
+    findings.extend(scan_skill_scripts(auto_fix=auto_fix))
     findings.extend(scan_user_patterns())
     findings.extend(cleanup_stale_knowledge(auto_fix=auto_fix))
 
@@ -848,13 +937,16 @@ def cleanup_stale_knowledge(auto_fix: bool = True) -> list[AuditFinding]:
         except (ValueError, TypeError):
             return None
 
-    # ── Skills 清理（平铺 .md 格式）─
+    # ── Skills 清理（平铺 .md 格式 + 子目录 SKILL.md 格式）─
     if SKILLS_DIR.exists():
-        for skill_file in SKILLS_DIR.glob("*.md"):
-            if skill_file.name.startswith("."):
+        for skill_file in SKILLS_DIR.glob("**/*.md"):
+            if ".archived" in skill_file.parts or skill_file.name.startswith("."):
                 continue
-            if skill_file.parent != SKILLS_DIR:
-                continue  # 跳过子目录（如 scripts/）
+            # skill 存为 skill-name/SKILL.md 格式，parent 是子目录
+            if skill_file.parent == SKILLS_DIR:
+                skill_name_dir = skill_file.stem  # 平铺格式：name.md
+            else:
+                skill_name_dir = skill_file.parent.name  # 子目录格式：name/SKILL.md
             try:
                 raw = skill_file.read_text(encoding="utf-8")
             except OSError:
@@ -868,7 +960,7 @@ def cleanup_stale_knowledge(auto_fix: bool = True) -> list[AuditFinding]:
             except Exception:
                 continue
 
-            name = meta.get("name", skill_file.stem)
+            name = meta.get("name", skill_file.parent.name if skill_file.parent != SKILLS_DIR else skill_file.stem)
             last_used = _parse_date(meta.get("last_used_at", ""))
             created = _parse_date(meta.get("created_at", ""))
             invocation_count = int(meta.get("invocation_count", 0))
@@ -891,7 +983,7 @@ def cleanup_stale_knowledge(auto_fix: bool = True) -> list[AuditFinding]:
                 dest = archive_dir / skill_file.name
                 if dest.exists():
                     import uuid
-                    dest = archive_dir / f"{skill_file.stem}_{uuid.uuid4().hex[:6]}.md"
+                    dest = archive_dir / f"{skill_name_dir}_{uuid.uuid4().hex[:6]}.md"
                 shutil.move(str(skill_file), str(dest))
                 findings.append(AuditFinding(
                     severity="info",

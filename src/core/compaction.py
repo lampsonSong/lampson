@@ -301,6 +301,18 @@ class Compactor:
         self.config = config or CompactionConfig()
         self.fallback_llms: list[tuple[Any, Any]] = fallback_llms or []
 
+    # ── helpers ────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _strip_tool_fields(msg: dict[str, Any]) -> dict[str, Any]:
+        """摘要 assistant 消息时移除 tool 相关字段，防止残留 tool_calls 导致
+        tool_result 孤立、DeepSeek/MiniMax 等严格模型报 400 错误。"""
+        cleaned = dict(msg)
+        cleaned.pop("tool_calls", None)
+        cleaned.pop("tool_call_id", None)
+        cleaned.pop("name", None)
+        return cleaned
+
     def compact(
         self,
         messages: list[dict[str, Any]],
@@ -358,7 +370,7 @@ class Compactor:
             result_messages = list(messages)
             for i, msg in enumerate(result_messages):
                 if msg in max_turn.messages and msg.get("role") == "assistant":
-                    msg_copy = dict(msg)
+                    msg_copy = self._strip_tool_fields(msg)
                     msg_copy["content"] = summary
                     result_messages[i] = msg_copy
                     break
@@ -470,10 +482,11 @@ class Compactor:
             if turn.assistant_texts:
                 summary = _llm_summarize_turn(turn, self.llm, self.fallback_llms)
                 if summary:
-                    # 替换 assistant 文字消息为摘要
+                    # 替换 assistant 文字消息为摘要，同时移除 tool_calls 等字段
+                    # （摘要后不再是 tool_call 模式，tool_result 已不在 result 中）
                     for msg in turn.messages:
                         if msg.get("role") == "assistant":
-                            msg_copy = dict(msg)
+                            msg_copy = self._strip_tool_fields(msg)
                             msg_copy["content"] = summary
                             result.append(msg_copy)
                             break

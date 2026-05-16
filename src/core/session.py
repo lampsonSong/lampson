@@ -396,6 +396,7 @@ class Session:
         # 注入 LLM Client 和 SkillIndex 给 reflection
         from src.core import reflection
         reflection.set_llm_client(primary_llm)
+        reflection.set_fallback_llms(fallback_models)
         reflection.set_skill_index(sidx)
         # 注入 Session 引用给 session_load 工具
         from src.tools import session as session_tool
@@ -470,6 +471,9 @@ class Session:
             input_preview=user_input,
         )
         self.agent.metrics_collector = collector
+        # 设置渠道信息，供后台反思使用
+        self.agent.channel = self.channel
+        self.agent.partial_sender = self.partial_sender
 
         try:
             reply = self.agent.run(user_input_for_llm)
@@ -1539,6 +1543,8 @@ class Session:
             f"## Skills\n{all_content}\n"
         )
         try:
+            self.agent.channel = self.channel
+            self.agent.partial_sender = self.partial_sender
             result = self.agent.run(prompt)
             if result and result.strip():
                 memory_path.parent.mkdir(parents=True, exist_ok=True)

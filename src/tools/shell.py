@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import errno
+import fcntl
+import os
+import re
+import select
 import subprocess
 import shlex
-import re
+import signal
 import time
 from typing import Any
 
@@ -39,12 +44,16 @@ _GLOB_ABUSE_RE = re.compile(
     r"\b(cat|rm|mv|cp|less|head|tail)\b[^\n#;]*?[\*]"
 )
 
+# PTY 输出上限，防止 openconnect 等长时间命令撑爆内存
+MAX_OUTPUT_BYTES = 500_000
+
 
 def _hits_lamix_plist(command: str) -> bool:
     for pattern in _LAMIX_PLIST_RE:
         if pattern.search(command):
             return True
     return False
+
 
 def is_dangerous(command: str) -> bool:
     for pattern in _DANGER_RE:
@@ -68,7 +77,8 @@ def _is_cli_interrupted() -> bool:
 
 def execute_shell(command: str, timeout: int = 30) -> str:
     """执行 shell 命令，返回 stdout + stderr 合并字符串。
-    
+
+    使用 PTY 模拟真实终端，支持交互式命令（openconnect/ssh/expect 等）。
     支持 Ctrl+C 中断：在命令执行期间按 Ctrl+C 可终止进程并返回中断提示。
     """
     if len(command) > MAX_COMMAND_LENGTH:
@@ -86,63 +96,135 @@ def execute_shell(command: str, timeout: int = 30) -> str:
         )
 
     try:
-        # 使用 Popen 以支持轮询检查中断标志
+        # 创建 PTY（pseudo-terminal），让交互式命令认为在真实终端中运行
+        master_fd, slave_fd = os.openpty()
+
+        # 设置 master 为非阻塞，以便 select 可用
+        flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
+        fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+        # 启动进程，stdin/stdout/stderr 都连到 PTY slave
+        # setsid 让进程有独立的 session，TIOCSCTTY 获取控制终端
         process = subprocess.Popen(
             command,
             shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            preexec_fn=os.setsid,
+            pass_fds=(slave_fd,),
+            close_fds=True,
         )
-        
+
+        # 关闭 slave fd（子进程已 dup2 到 0/1/2）
+        os.close(slave_fd)
+
         start_time = time.time()
-        stdout_chunks = []
-        stderr_chunks = []
-        
+        output_parts = []
+        total_bytes = 0
+        closed = False
+
         while True:
             # 检查是否被 Ctrl+C 中断
             if _is_cli_interrupted():
-                process.terminate()
+                os.close(master_fd)
                 try:
-                    process.wait(timeout=2)
+                    os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                except (ProcessLookupError, OSError):
+                    pass
+                try:
+                    process.wait(timeout=3)
                 except subprocess.TimeoutExpired:
-                    process.kill()
+                    try:
+                        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                        process.wait()
+                    except (ProcessLookupError, OSError):
+                        pass
                 return "[中断] 命令已被 Ctrl+C 终止。"
-            
+
             # 检查超时
             if timeout and (time.time() - start_time) > timeout:
-                process.terminate()
+                if not closed:
+                    os.close(master_fd)
+                    closed = True
                 try:
-                    process.wait(timeout=2)
+                    os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                except (ProcessLookupError, OSError):
+                    pass
+                try:
+                    process.wait(timeout=3)
                 except subprocess.TimeoutExpired:
-                    process.kill()
+                    try:
+                        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                        process.wait()
+                    except (ProcessLookupError, OSError):
+                        pass
+                # 超时后收集已读输出
+                if output_parts:
+                    collected = "".join(output_parts)
+                    return (
+                        f"[超时] 命令执行超过 {timeout} 秒，已终止。\n"
+                        f"已收集输出（最后 {total_bytes} 字节）：\n{collected[-2000:]}"
+                    )
                 return f"[超时] 命令执行超过 {timeout} 秒，已终止。"
-            
+
             # 检查进程是否结束
-            returncode = process.poll()
-            if returncode is not None:
-                # 进程已结束，读取剩余输出
-                stdout, stderr = process.communicate()
-                if stdout:
-                    stdout_chunks.append(stdout)
-                if stderr:
-                    stderr_chunks.append(stderr)
+            if process.poll() is not None and closed:
                 break
-            
-            # 非阻塞读取（避免 CPU 占用过高）
-            time.sleep(0.05)
-        
-        output_parts = []
-        if stdout_chunks:
-            output_parts.append("".join(stdout_chunks))
-        if stderr_chunks:
-            output_parts.append(f"[stderr]\n{''.join(stderr_chunks)}")
-        if not output_parts:
-            output_parts.append(f"[命令执行完毕，退出码 {returncode}]")
-        return "\n".join(output_parts).strip()
-        
+
+            # 从 PTY master 读取可用数据
+            ready, _, _ = select.select([master_fd], [], [], 0.1)
+
+            if ready:
+                try:
+                    chunk = os.read(master_fd, 8192)
+                    if chunk:
+                        output_parts.append(chunk.decode("utf-8", errors="replace"))
+                        total_bytes += len(chunk)
+                        # 输出过多时截断（防止 openconnect 长时间运行撑爆内存）
+                        if total_bytes > MAX_OUTPUT_BYTES:
+                            output_parts.append(f"\n[输出截断，超过 {MAX_OUTPUT_BYTES} 字节]")
+                            if not closed:
+                                os.close(master_fd)
+                                closed = True
+                            try:
+                                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                            except (ProcessLookupError, OSError):
+                                pass
+                            break
+                except OSError as e:
+                    if e.errno == errno.EIO:
+                        # EIO: PTY slave 端关闭，只剩 master 可读，进程已退出
+                        pass
+                    else:
+                        break
+
+            # 进程结束了，尝试最后一次读
+            if process.poll() is not None and not closed:
+                # 给一点时间让输出缓冲区排空
+                time.sleep(0.2)
+                try:
+                    while True:
+                        chunk = os.read(master_fd, 8192)
+                        if not chunk:
+                            break
+                        output_parts.append(chunk.decode("utf-8", errors="replace"))
+                except OSError:
+                    pass
+                os.close(master_fd)
+                closed = True
+                break
+
+        # 组装最终输出
+        combined = "".join(output_parts)
+        if not combined.strip():
+            rc = process.poll()
+            if rc is None:
+                rc = process.wait()
+            combined = f"[命令执行完毕，退出码 {rc}]"
+
+        return combined.strip()
+
     except Exception as e:
         return f"[错误] 命令执行失败：{e}"
 
@@ -155,6 +237,7 @@ SCHEMA: dict[str, Any] = {
             "在终端执行 shell 命令，返回输出结果。"
             "适用于运行脚本、安装包、启动进程等。"
             "支持 Ctrl+C 中断正在执行的命令。"
+            "支持交互式命令（openconnect/ssh/expect 等）。"
             "禁止用此工具执行 find/grep/rg 搜索文件或内容，请改用 search 工具。"
             "禁止用 cat/head/tail 读取文件，请改用 file_read。"
         ),

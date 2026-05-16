@@ -73,15 +73,27 @@ def _notify_user(text: str, config: dict | None = None) -> None:
             return
     except Exception:
         pass
-    # Fallback: daemon 启动早期可能没有 session，直接 print
+    # Fallback: 尝试飞书直发，失败则 print
+    feishu_cfg = (config or {}).get("feishu", {})
+    app_id = feishu_cfg.get("app_id", "").strip()
+    app_secret = feishu_cfg.get("app_secret", "").strip()
+    owner_chat_id = feishu_cfg.get("owner_chat_id", "").strip()
+    if app_id and app_secret and owner_chat_id:
+        try:
+            from src.feishu.client import FeishuClient
+            client = FeishuClient(app_id=app_id, app_secret=app_secret)
+            client.send_message(receive_id=owner_chat_id, text=text, receive_id_type="chat_id")
+            return
+        except Exception as e:
+            logger.warning(f"[daemon] 飞书发送失败: {e}")
     print(f"[daemon] {text}", flush=True)
 
 
 # ── 任务回调 ────────────────────────────────────────────────────────────────
 
 
-def _self_audit_callback() -> None:
-    """审计任务：每天凌晨 4 点由 cron 触发，直接执行审计。"""
+def _do_self_audit() -> None:
+    """实际执行审计任务（在后台线程中运行）。"""
     from datetime import datetime
 
     now = datetime.now()
@@ -92,7 +104,9 @@ def _self_audit_callback() -> None:
         if len(report_content) > REPORT_MAX_LENGTH:
             report_content = report_content[:REPORT_MAX_LENGTH] + "\n\n...（报告过长已截断）"
         _audit_log("[self_audit] 审计完成，开始发送报告")
-        _notify_user(f"[Lamix] 自我审计报告\n\n{report_content}")
+        from src.core.config import load_config
+        audit_config = load_config()
+        _notify_user(f"[Lamix] 自我审计报告\n\n{report_content}", config=audit_config)
         report_path = save_report(report)
         _audit_log(f"[self_audit] 报告已保存至 {report_path}")
         logger.info("[self_audit] 每日审计完成")
@@ -102,6 +116,13 @@ def _self_audit_callback() -> None:
         last_audit_file.write_text(now.isoformat(), encoding="utf-8")
     except Exception as e:
         logger.error(f"[self_audit] 执行失败: {e}")
+
+
+def _self_audit_callback() -> None:
+    """审计任务：每天凌晨 4 点由 cron 触发，在后台线程中执行。"""
+    thread = threading.Thread(target=_do_self_audit, daemon=True)
+    thread.start()
+    _audit_log("[self_audit] 审计任务已提交到后台执行")
 
 
 def _register_tasks(session=None) -> None:
