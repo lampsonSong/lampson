@@ -157,23 +157,32 @@ def _signal_handler(signum: int, _frame: object | None) -> None:
 
 
 def _check_single_instance() -> None:
-    """通过进程查找确认是否已有 daemon 实例在运行，若有则退出。
-    
-    不依赖 PID 文件——watchdog 和直接启动都通过 pgrep 查找。
+    """检查是否已有 daemon 实例在运行，若有则退出。
+
+    使用 PID 文件 + 进程存活检测（排除僵尸）。
+    僵尸进程自动视为已死，清理 PID 文件后允许启动。
     """
-    import subprocess
+    if not _DAEMON_PID_PATH.exists():
+        return
     try:
-        result = subprocess.run(
-            ["pgrep", "-f", "(src\\.daemon|lamix.*gateway)"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode == 0:
-            pids = [int(p) for p in result.stdout.strip().split("\n") if p.strip() and int(p.strip()) != os.getpid()]
-            if pids:
-                logger.error(f"[daemon] 已有 daemon 实例在运行 (PID={pids[0]})，退出")
-                sys.exit(0)
-    except Exception:
-        pass
+        old_pid = int(_DAEMON_PID_PATH.read_text(encoding="utf-8").strip())
+    except (ValueError, OSError):
+        _DAEMON_PID_PATH.unlink(missing_ok=True)
+        return
+    if old_pid == os.getpid():
+        return
+
+    # 用 ProcessManager 的 is_alive()，已内置僵尸排除
+    from src.platforms.process_manager import get_process_manager
+    pm = get_process_manager()
+    if not pm.is_alive(old_pid):
+        # 进程已死或为僵尸，清理 PID 文件
+        logger.info(f"[daemon] 旧进程 {old_pid} 已死（或为僵尸），清理 PID 文件")
+        _DAEMON_PID_PATH.unlink(missing_ok=True)
+        return
+
+    logger.error(f"[daemon] 已有 daemon 实例在运行 (PID={old_pid})，退出")
+    sys.exit(0)
 
 
 def _write_daemon_pid() -> None:
