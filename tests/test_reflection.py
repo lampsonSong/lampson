@@ -44,50 +44,46 @@ def _make_plan(n_steps: int, status: StepStatus = StepStatus.done) -> Plan:
 
 
 def test_should_reflect_cooldown():
-    import src.core.reflection as ref_mod
-    ref_mod._last_reflect_time = time.time()
-    plan = _make_plan(5)
-    assert should_reflect(plan) is False
-
-
-def test_should_reflect_chat_intent():
-    """闲聊意图 → 不反思。"""
-    assert should_reflect(None, intent="chat") is False
-
-
-def test_should_reflect_info_query_intent():
-    """信息查询意图 → 不反思。"""
-    assert should_reflect(None, intent="info_query") is False
-
-
-def test_should_reflect_fast_path_no_tools():
-    """Fast Path + 0 工具调用 → 反思（tool_call 次数限制已删除）。"""
-    assert should_reflect(None, is_fast_path=True, tool_call_count=0) is True
-
-
-def test_should_reflect_plan_1step():
-    """1 步计划 → 反思（步骤数限制已删除）。"""
-    plan = _make_plan(1)
-    assert should_reflect(plan) is True
-
-
-def test_should_reflect_skill_activated():
-    """Skill 激活 → 反思。"""
-    assert should_reflect(None, skill_activated="code-review") is True
-
-
-def test_should_reflect_regular_task():
-    """普通任务（无 skill、无论步骤数）→ 反思。"""
-    plan = _make_plan(1)
-    assert should_reflect(plan, intent="") is True
-
-
-def test_should_reflect_cooldown_takes_priority():
     """冷却期内即使满足条件也不反思。"""
     import src.core.reflection as ref_mod
     ref_mod._last_reflect_time = time.time()
-    plan = _make_plan(5)
-    assert should_reflect(plan) is False
+    assert should_reflect(None, tool_call_count=3) is False
+
+
+def test_should_reflect_tool_call_count_0():
+    """tool_call_count=0 → 不反思。"""
+    assert should_reflect(None, tool_call_count=0) is False
+
+
+def test_should_reflect_tool_call_count_1():
+    """tool_call_count=1 → 不反思。"""
+    assert should_reflect(None, tool_call_count=1) is False
+
+
+def test_should_reflect_tool_call_count_2():
+    """tool_call_count=2 → 不反思。"""
+    assert should_reflect(None, tool_call_count=2) is False
+
+
+def test_should_reflect_tool_call_count_3():
+    """tool_call_count=3 → 反思。"""
+    assert should_reflect(None, tool_call_count=3) is True
+
+
+def test_should_reflect_tool_call_count_5():
+    """tool_call_count=5 → 反思。"""
+    assert should_reflect(None, tool_call_count=5) is True
+
+
+def test_should_reflect_with_plan_tool_count_3():
+    """有 plan + tool_call_count=3 → 反思。"""
+    plan = _make_plan(1)
+    assert should_reflect(plan, tool_call_count=3) is True
+
+
+def test_should_reflect_with_skill_tool_count_3():
+    """有 skill + tool_call_count=3 → 反思。"""
+    assert should_reflect(None, skill_activated="code-review", tool_call_count=3) is True
 
 
 # ── Project 沉淀 ───────────────────────────────────────────────────────────
