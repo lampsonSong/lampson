@@ -792,6 +792,7 @@ class Agent:
             tool_call_count=tool_count,
             skill_activated=list(self.skills.keys())[0] if self.skills else None,
             user_input=user_input,
+            intent=getattr(self, 'current_intent', ''),
         ):
             return
 
@@ -815,6 +816,7 @@ class Agent:
 
         def _run_reflection():
             """后台线程：调用 reflect_and_learn 并执行沉淀。"""
+            _notify = self.reflect_notify_callback
             try:
                 from src.core.reflection import _llm_client as _injected_llm
                 llm = _injected_llm
@@ -841,8 +843,9 @@ class Agent:
                     _notify("📝 反思完成，暂无新内容需要沉淀")
             except Exception as e:
                 logger.warning(f"[后台反思] 失败: {e}")
+                if _notify:
+                    _notify(f"反思失败: {e}")
 
-        _notify = self.reflect_notify_callback
         t = threading.Thread(target=_run_reflection, name="bg-reflection", daemon=True)
         t.start()
 

@@ -475,3 +475,120 @@ class TestRunTriggersReflection:
 
         assert result == "hello"
         mock_reflect.assert_called_once_with("hi")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 5. 通知机制
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestReflectNotification:
+    """验证 reflect_notify_callback 正确调用。"""
+
+    def test_notify_called_with沉淀结果(self):
+        """有沉淀时，callback 被调用且包含沉淀内容。"""
+        agent, _, _ = _make_agent()
+        agent._fast_path_tool_count = 1
+        agent.llm.messages = [
+            {"role": "user", "content": "do stuff"},
+            {"role": "assistant", "tool_calls": [{"function": {"name": "shell"}}]},
+            {"role": "tool", "content": "ok"},
+            {"role": "assistant", "content": "done"},
+        ]
+
+        notifications = []
+
+        def capture_notify(msg):
+            notifications.append(msg)
+
+        agent.reflect_notify_callback = capture_notify
+
+        learnings = [{
+            "type": "info_create",
+            "target": "test-info",
+            "content": "some content",
+            "reason": "test",
+        }]
+
+        with patch("src.core.reflection.should_reflect", return_value=True), \
+             patch("src.core.reflection.reflect_and_learn", return_value=learnings), \
+             patch("src.core.reflection.execute_learnings", return_value=["已创建 Info: test-info"]), \
+             patch("src.core.reflection._llm_client", MagicMock()), \
+             patch("src.core.reflection._refresh_all_indices"):
+            agent._maybe_spawn_background_reflection("do stuff")
+
+        # 等待后台线程执行
+        time.sleep(0.5)
+
+        assert len(notifications) == 1
+        assert "test-info" in notifications[0]
+
+    def test_notify_called_with暂无新内容(self):
+        """无沉淀时，callback 被调用且提示无新内容。"""
+        agent, _, _ = _make_agent()
+        agent._fast_path_tool_count = 1
+        agent.llm.messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ]
+
+        notifications = []
+
+        def capture_notify(msg):
+            notifications.append(msg)
+
+        agent.reflect_notify_callback = capture_notify
+
+        with patch("src.core.reflection.should_reflect", return_value=True), \
+             patch("src.core.reflection.reflect_and_learn", return_value=[]), \
+             patch("src.core.reflection._llm_client", MagicMock()):
+            agent._maybe_spawn_background_reflection("hello")
+
+        time.sleep(0.5)
+
+        assert len(notifications) == 1
+        assert "暂无新内容" in notifications[0]
+
+    def test_notify_none_does_not_crash(self):
+        """reflect_notify_callback 为 None 时不崩溃。"""
+        agent, _, _ = _make_agent()
+        agent._fast_path_tool_count = 1
+        agent.reflect_notify_callback = None
+        agent.llm.messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ]
+
+        with patch("src.core.reflection.should_reflect", return_value=True), \
+             patch("src.core.reflection.reflect_and_learn", return_value=[]), \
+             patch("src.core.reflection._llm_client", MagicMock()):
+            # 不崩溃即通过
+            agent._maybe_spawn_background_reflection("hello")
+
+        time.sleep(0.5)
+
+    def test_notify_reflect失败时也通知(self):
+        """反思执行失败时，callback 被调用通知失败。"""
+        agent, _, _ = _make_agent()
+        agent._fast_path_tool_count = 1
+        agent.llm.messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "tool_calls": [{"function": {"name": "shell"}}]},
+        ]
+
+        notifications = []
+
+        def capture_notify(msg):
+            notifications.append(msg)
+
+        agent.reflect_notify_callback = capture_notify
+
+        with patch("src.core.reflection.should_reflect", return_value=True), \
+             patch("src.core.reflection.reflect_and_learn", side_effect=Exception("LLM 调用失败")), \
+             patch("src.core.reflection._llm_client", MagicMock()):
+            agent._maybe_spawn_background_reflection("hello")
+
+        time.sleep(0.5)
+
+        assert len(notifications) == 1
+        assert "反思失败" in notifications[0]

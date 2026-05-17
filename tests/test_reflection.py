@@ -50,39 +50,36 @@ def test_should_reflect_cooldown():
     assert should_reflect(plan) is False
 
 
-def test_should_reflect_fast_path_no_tools():
-    """Fast Path + 0 工具调用 → 不反思。"""
-    assert should_reflect(None, is_fast_path=True, tool_call_count=0) is False
-
-
-def test_should_reflect_fast_path_with_tools():
-    """Fast Path + 1 工具调用 → 反思。"""
-    assert should_reflect(None, is_fast_path=True, tool_call_count=1) is True
-
-
 def test_should_reflect_chat_intent():
     """闲聊意图 → 不反思。"""
-    assert should_reflect(None, is_fast_path=True, tool_call_count=3, intent="chat") is False
+    assert should_reflect(None, intent="chat") is False
 
 
 def test_should_reflect_info_query_intent():
     """信息查询意图 → 不反思。"""
-    assert should_reflect(None, is_fast_path=True, tool_call_count=3, intent="info_query") is False
+    assert should_reflect(None, intent="info_query") is False
 
 
-def test_should_reflect_plan_3steps():
-    plan = _make_plan(3)
-    assert should_reflect(plan) is True
+def test_should_reflect_fast_path_no_tools():
+    """Fast Path + 0 工具调用 → 反思（tool_call 次数限制已删除）。"""
+    assert should_reflect(None, is_fast_path=True, tool_call_count=0) is True
 
 
 def test_should_reflect_plan_1step():
+    """1 步计划 → 反思（步骤数限制已删除）。"""
     plan = _make_plan(1)
-    assert should_reflect(plan) is False
+    assert should_reflect(plan) is True
 
 
 def test_should_reflect_skill_activated():
     """Skill 激活 → 反思。"""
     assert should_reflect(None, skill_activated="code-review") is True
+
+
+def test_should_reflect_regular_task():
+    """普通任务（无 skill、无论步骤数）→ 反思。"""
+    plan = _make_plan(1)
+    assert should_reflect(plan, intent="") is True
 
 
 def test_should_reflect_cooldown_takes_priority():

@@ -255,41 +255,27 @@ def should_reflect(
     llm_client: Any | None = None,
     recent_context: str = "",
 ) -> bool:
-    """启发式判断本次任务是否值得反思。
+    """判断本次任务是否需要反思。
 
-    不额外调用 LLM，由 reflect_and_learn 内部的 LLM 调用自行判断是否沉淀。
+    反思由 LLM 判断是否有值得沉淀的内容，这里只做冷却控制。
+    闲聊/简单查询跳过，其他全部触发反思。
     """
     import time
     global _last_reflect_time
 
     now = time.time()
     if now - _last_reflect_time < _REFLECT_COOLDOWN:
-        return False
-
-    # Fast Path 且没有工具调用 → 跳过（闲聊、简单查询）
-    if is_fast_path and tool_call_count == 0:
+        logger.info(f"[反思] 冷却中（距上次 {now - _last_reflect_time:.0f}s < {_REFLECT_COOLDOWN}s）")
         return False
 
     # 闲聊/简单查询 → 跳过
     if intent in ("chat", "info_query"):
+        logger.info(f"[反思] 跳过闲聊/简单查询（intent={intent}）")
         return False
 
-    # Skill 被激活 → 值得反思
-    if skill_activated:
-        _last_reflect_time = now
-        return True
-
-    # 有工具调用 → 值得反思
-    if tool_call_count >= 1:
-        _last_reflect_time = now
-        return True
-
-    # 计划模式 3 步以上 → 值得反思
-    if plan is not None and len(plan.steps) >= 3:
-        _last_reflect_time = now
-        return True
-
-    return False
+    # 其他全部触发反思
+    _last_reflect_time = now
+    return True
 
 
 
@@ -356,14 +342,21 @@ def reflect_and_learn(
 
     # Fallback 降级
     global _fallback_llms
+    all_failed = True
     for fb_llm, _ in _fallback_llms:
         try:
             logger.info(f"反思 fallback 使用: {fb_llm.model}")
-            return _call_reflect_llm(fb_llm)
+            learnings = _call_reflect_llm(fb_llm)
+            all_failed = False
+            if learnings:
+                return learnings
         except Exception as e2:
             logger.warning(f"反思 fallback {fb_llm.model} 失败: {e2}")
 
-    return []
+    if all_failed:
+        # 所有模型都失败了，只记录日志，不阻塞主流程
+        logger.warning("反思失败：主模型和所有 fallback 均调用失败")
+        return []
 
 
 def execute_learnings(learnings: list[dict[str, Any]]) -> list[str]:
