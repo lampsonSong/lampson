@@ -792,7 +792,6 @@ class Agent:
             tool_call_count=tool_count,
             skill_activated=list(self.skills.keys())[0] if self.skills else None,
             user_input=user_input,
-            intent=getattr(self, 'current_intent', ''),
         ):
             return
 

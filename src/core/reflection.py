@@ -249,7 +249,6 @@ def should_reflect(
     *,
     is_fast_path: bool = False,
     tool_call_count: int = 0,
-    intent: str = "",
     skill_activated: str | None = None,
     user_input: str = "",
     llm_client: Any | None = None,
@@ -257,23 +256,27 @@ def should_reflect(
 ) -> bool:
     """判断本次任务是否需要反思。
 
-    反思由 LLM 判断是否有值得沉淀的内容，这里只做冷却控制。
-    闲聊/简单查询跳过，其他全部触发反思。
+    触发条件：tool_call_count >= 3（任意 3 次以上工具调用）
+    冷却控制：距上次反思不足 5 分钟则跳过。
     """
     import time
     global _last_reflect_time
 
     now = time.time()
-    if now - _last_reflect_time < _REFLECT_COOLDOWN:
-        logger.info(f"[反思] 冷却中（距上次 {now - _last_reflect_time:.0f}s < {_REFLECT_COOLDOWN}s）")
+    elapsed = now - _last_reflect_time
+
+    # 冷却期内 → 跳过
+    if elapsed < _REFLECT_COOLDOWN:
+        logger.info(f"[反思] 跳过：冷却中（距上次 {elapsed:.0f}s < {_REFLECT_COOLDOWN}s）")
         return False
 
-    # 闲聊/简单查询 → 跳过
-    if intent in ("chat", "info_query"):
-        logger.info(f"[反思] 跳过闲聊/简单查询（intent={intent}）")
+    # 工具调用 < 3 次 → 跳过
+    if tool_call_count < 3:
+        logger.info(f"[反思] 跳过：tool_call_count={tool_call_count} < 3")
         return False
 
-    # 其他全部触发反思
+    # 触发反思
+    logger.info(f"[反思] 触发：tool_call_count={tool_call_count} >= 3")
     _last_reflect_time = now
     return True
 
